@@ -4,78 +4,425 @@ acpi_parse_definition_block :: (bytecode: [] u8) {
     LongForm();
     context.print_style.default_format_struct.draw_type_name = true;
 
-    parser_context.start_address = bytecode.data;
-    parser_context.bytecode_stream = bytecode;
+    context.acpi_parser.start_address = bytecode.data;
+    context.acpi_parser.bytecode = bytecode;
 
-    while parser_context.bytecode_stream.count > 0 {
-        term_obj := parse_term_object();
+    // dump();
+    // return;
 
-        using term_obj.value;
+    allocate :: () {
 
-        if term_obj.type == {
-            case Op_Region;     printf("%\n", op_region);
-            case Field;         printf("%\n", field);
-            case Method;        printf("%\n", method);
-            case Name;          printf("%\n", name);
-            case Index_Field;   printf("%\n", index_field);
-            case Scope;         printf("%\n", scope);
-            case Package;       printf("%\n", package);
-            case Device;        printf("%\n", device);
-            case; assert(false);
-        }
     }
+
+    while context.acpi_parser.bytecode.count > 0 {
+        term_obj := parse_term_object();
+        print_term_object(term_obj);
+    }
+}
+
+#scope_file
+
+#add_context acpi_parser: struct {
+    start_address: *u8;
+    bytecode: [] u8;
+
+    namespace_root: *Term_Object;
 }
 
 dump :: () {
     HexMode();
     context.print_style.default_format_int.minimum_digits = 2;
 
-    printf("Starting dump at byte 0x% (0x% left)\n", parser_context.bytecode_stream.data - parser_context.start_address, parser_context.bytecode_stream.count);
+    using context.acpi_parser;
+
+    printf("Starting dump at byte 0x% (0x% left)\n", bytecode.data - start_address, bytecode.count);
 
     for 0..99 {
-        printf("0x% ", parser_context.bytecode_stream[it]);
+        byte := bytecode[it];
+        if byte == 0x8 {
+            printf("0x% ", byte, color = theme.highlight);
+        } else {
+            printf("0x% ", byte);
+        }
         if !((it+1) % 10) printf("\n");
     }
     printf("\n");
 }
 
-#scope_file
+print_term_object :: (term_obj: *Term_Object) {
+    item: Any;
+    item.type = cast(*Type_Info) term_obj.type;
+    item.value_pointer = term_obj;
 
-parser_context: struct {
-    start_address: *u8;
-    bytecode_stream: [] u8;
+    builder: String_Builder;
+    print_item_to_builder(*builder, item, false);
+    result := builder_to_string(*builder);
+    free_buffers(*builder);
+
+    printf("%\n", result);
+
+    children := get_children(term_obj);
+    for children print_term_object(it);
 }
 
+Term_Object :: struct {
+    type: Type;
+    name: Name_String;
+    parent: *Term_Object;
+}
+
+Field :: struct {
+    using #as base: Term_Object;
+    type = #this;
+
+    flags: u8;
+    elements: [] Element;
+
+    Element :: struct {
+        name: string;
+        length: int;
+    }
+}
+
+Index_Field :: struct {
+    using #as base: Term_Object;
+    type = #this;
+
+    name_b: Name_String;
+    flags: u8;
+    elements: [] Field.Element;
+}
+
+Scope :: struct {
+    using #as base: Term_Object;
+    type = #this;
+
+    term_list: [] *Term_Object;
+}
+
+Device :: struct {
+    using #as base: Term_Object;
+    type = #this;
+
+    term_list: [] *Term_Object;
+}
+
+Method :: struct {
+    using #as base: Term_Object;
+    type = #this;
+
+    term_list: [] *Term_Object;
+    flags: u8;
+}
+
+Name :: struct {
+    using #as base: Term_Object;
+    type = #this;
+
+    value: Term_Arg;
+}
+
+Package :: struct {
+    using #as base: Term_Object;
+    num_elements: int;
+}
+
+Op_Region :: struct {
+    using #as base: Term_Object;
+    type = #this;
+
+    address_space: Address_Space;
+    offset: Term_Arg;
+    length: Term_Arg;
+
+    Address_Space :: enum u8 {
+        SystemMemory     :: 0x00;
+        SystemIO         :: 0x01;
+        PCI_Config       :: 0x02;
+        EmbeddedControl  :: 0x03;
+        SMBus            :: 0x04;
+        System_CMOS      :: 0x05;
+        PciBarTarget     :: 0x06;
+        IPMI             :: 0x07;
+        GeneralPurposeIO :: 0x08;
+        GenericSerialBus :: 0x09;
+        PCC              :: 0x0a;
+    }
+}
+
+get_children :: (term_obj: *Term_Object) -> [] *Term_Object {
+    if term_obj.type == {
+        case Scope;  return (cast(*Scope) term_obj).term_list;
+        case Device; return (cast(*Device) term_obj).term_list;
+        case Method; return (cast(*Method) term_obj).term_list;
+        case; return .[];
+    }
+}
+
+
+
 peek :: () -> u8 {
-    using parser_context;
-    assert(bytecode_stream.count > 0);
-    return bytecode_stream[0];
+    using context.acpi_parser;
+    assert(bytecode.count > 0);
+    return bytecode[0];
 }
 
 consume :: ($ type: Type) -> type {
-    using parser_context;
+    using context.acpi_parser;
 
     size := size_of(type);
 
-    assert(bytecode_stream.count > size);
+    assert(bytecode.count > size);
 
-    result := << cast(*type) bytecode_stream.data;
+    result := << cast(*type) bytecode.data;
 
-    bytecode_stream.count -= size;
-    bytecode_stream.data += size;
+    bytecode.count -= size;
+    bytecode.data += size;
 
     return result;
 }
 
 consume_string :: (count: int = 4) -> string {
+    using context.acpi_parser;
+
     result: string;
-    result.data = parser_context.bytecode_stream.data;
+    result.data = bytecode.data;
     result.count = count;
 
-    parser_context.bytecode_stream.data += count;
-    parser_context.bytecode_stream.count -= count;
+    bytecode.data += count;
+    bytecode.count -= count;
 
     return result;
+}
+
+parse_term_object :: () -> *Term_Object {
+    ExtOpPrefix :: 0x5b;
+
+    opcode := consume(u8);
+
+    if opcode == ExtOpPrefix {
+        opcode = consume(u8);
+
+        if opcode == {
+          case 0x80;
+            return parse_op_region();
+          case 0x81;
+            return parse_field();
+          case 0x82;
+            return parse_device();
+          case 0x86;
+            return parse_index_field();
+          case;
+            dump();
+            assert(false, tprint("Prefixed opcode not supported: 0x5b 0x%", opcode));
+        }
+    }
+
+    else if opcode == {
+      case 0x8;
+        return parse_name();
+      case 0x10;
+        return parse_scope();
+      case 0x12;
+        return parse_package();
+      case 0x14;
+        return parse_method();
+      case 0x8b;
+        Create_Word_Field :: #type,distinct void;
+
+        parse_create_word_field();
+        return null;
+        // CreateWordFieldOp
+      case;
+        dump();
+        assert(false, tprint("Term object not supported: 0x%", opcode));
+    }
+
+    return null;
+}
+
+parse_scope :: () -> *Scope {
+    using context.acpi_parser;
+
+    start_offset := bytecode.data;
+
+    package_length := parse_package_length();
+
+    scope := New(Scope);
+    scope.name = parse_name_string();
+
+    end_offset := bytecode.data;
+
+    scope_body_size_bytes := package_length - (end_offset - start_offset);
+    scope.term_list = parse_term_list(scope_body_size_bytes, scope);
+
+    return scope;
+}
+
+parse_device :: () -> *Device {
+    using context.acpi_parser;
+
+    start_offset := bytecode.data;
+
+    package_length := parse_package_length();
+
+    device := New(Device);
+    device.name = parse_name_string();
+
+    end_offset := bytecode.data;
+
+    device_body_size_bytes := package_length - (end_offset - start_offset);
+    device.term_list = parse_term_list(device_body_size_bytes, device);
+
+    return device;
+}
+
+parse_package :: () -> *Package {
+    using context.acpi_parser;
+
+    start_offset := bytecode.data;
+    package_length, bytes_used := parse_package_length();
+
+    package := New(Package);
+    package.num_elements = cast(int) consume(u8);
+
+    end_offset := bytecode.data;
+    method_body_size_bytes := package_length - (end_offset - start_offset);
+
+    // Skip package contents for now
+    bytecode.data += method_body_size_bytes;
+    bytecode.count -= method_body_size_bytes;
+
+    return package;
+}
+
+parse_index_field :: () -> *Index_Field {
+    index_field := New(Index_Field);
+
+    start := context.acpi_parser.bytecode.data;
+    length := parse_package_length();
+
+    index_field.name = parse_name_string();
+    index_field.name_b = parse_name_string();
+    index_field.flags = consume(u8);
+
+    elements: [..] Field.Element;
+    while true {
+        array_add(*elements, parse_field_element());
+        if context.acpi_parser.bytecode.data >= start + length break;
+    }
+    index_field.elements = elements;
+
+    return index_field;
+}
+
+parse_op_region :: () -> *Op_Region {
+    op_region := New(Op_Region);
+    op_region.name = parse_name_string();
+
+    op_region.address_space = consume(Op_Region.Address_Space);
+    op_region.offset = parse_term_arg();
+    op_region.length = parse_term_arg();
+    return op_region;
+}
+
+parse_method :: () -> *Method {
+    start_offset := context.acpi_parser.bytecode.data;
+
+    package_length, bytes_used := parse_package_length();
+
+    method := New(Method);
+    method.name = parse_name_string();
+    method.flags = consume(u8);
+
+    end_offset := context.acpi_parser.bytecode.data;
+
+    // Skip method bodies for now
+    method_body_size_bytes := package_length - (end_offset - start_offset);
+    // printf("Skipping, bytes used: %\n", bytes_used);
+
+    // method.term_list = parse_term_list(method_body_size_bytes, method);
+    context.acpi_parser.bytecode.data += method_body_size_bytes;
+    context.acpi_parser.bytecode.count -= method_body_size_bytes;
+
+    return method;
+}
+
+parse_name :: () -> *Name {
+    name := New(Name);
+    name.name = parse_name_string();
+    name.value = parse_term_arg();
+    return name;
+}
+
+parse_field :: () -> *Field {
+    field := New(Field);
+
+    start := context.acpi_parser.bytecode.data;
+    length := parse_package_length();
+
+    field.name = parse_name_string();
+    field.flags = consume(u8);
+
+    elements: [..] Field.Element;
+    while true {
+        array_add(*elements, parse_field_element());
+        if context.acpi_parser.bytecode.data >= start + length break;
+    }
+    field.elements = elements;
+
+    return field;
+}
+
+parse_create_word_field :: () {
+    parse_term_arg();
+    parse_term_arg();
+    parse_name_string();
+}
+
+Name_String :: struct {
+    name_path: string;
+    prefix_count: int;
+    flags: enum_flags {
+        root;
+        dual;
+        multi;
+    };
+}
+
+parse_name_string :: () -> Name_String {
+    DualNamePrefix :: 0x2e;
+    MultiNamePrefix :: 0x2f;
+
+    name_string: Name_String;
+
+    char := peek();
+    if char == #char "\\" {
+        consume(u8);
+        name_string.flags |= .root;
+    } else while char == #char "^" {
+        consume(u8);
+        name_string.prefix_count += 1;
+        char = peek();
+    }
+
+    if char == {
+      case DualNamePrefix;
+        consume(u8);
+        name_string.name_path = consume_string(8);
+        name_string.flags |= .dual;
+      case MultiNamePrefix;
+        consume(u8);
+        seg_count := consume(u8);
+        name_string.name_path = consume_string(seg_count * 4);
+        name_string.flags |= .multi;
+      case 0x0;
+        consume(u8);
+      case;
+        name_string.name_path = consume_string(4);
+    }
+
+    return name_string;
 }
 
 parse_package_length :: () -> int, bytes_used: int {
@@ -94,134 +441,6 @@ parse_package_length :: () -> int, bytes_used: int {
     return value, count+1;
 }
 
-Term_Object :: struct {
-    type: Type;
-
-    value: union {
-        op_region: Op_Region;
-        field: Field;
-        method: Method;
-        name: Name;
-        index_field: Index_Field;
-        scope: Scope;
-        package: Package;
-        device: Device;
-    }
-}
-
-parse_term_object :: () -> Term_Object {
-    ExtOpPrefix :: 0x5b;
-    result: Term_Object;
-
-    opcode := consume(u8);
-
-    if opcode == ExtOpPrefix {
-        opcode = consume(u8);
-
-        if opcode == {
-          case 0x80;
-            result.type = Op_Region;
-            result.value.op_region = parse_op_region();
-          case 0x81;
-            result.type = Field;
-            result.value.field = parse_field();
-          case 0x82;
-            result.type = Device;
-            result.value.device = parse_device();
-          case 0x86;
-            result.type = Index_Field;
-            result.value.index_field = parse_index_field();
-          case;
-            dump();
-            assert(false, tprint("Prefixed opcode not supported: 0x5b 0x%", opcode));
-        }
-    }
-
-    else if opcode == {
-      case 0x8;
-        result.type = Name;
-        result.value.name = parse_name();
-      case 0x10;
-        result.type = Scope;
-        result.value.scope = parse_scope();
-      case 0x12;
-        result.type = Package;
-        result.value.package = parse_package();
-      case 0x14;
-        result.type = Method;
-        result.value.method = parse_method();
-      case;
-        dump();
-        assert(false, tprint("Term object not supported: 0x%", opcode));
-    }
-
-    return result;
-}
-
-Device :: struct {
-    name: Name_String;
-    term_list: [] Term_Object;
-}
-
-parse_device :: () -> Device {
-    start_offset := parser_context.bytecode_stream.data;
-
-    package_length := parse_package_length();
-
-    result: Device;
-    result.name = parse_name_string();
-
-    end_offset := parser_context.bytecode_stream.data;
-
-    device_body_size_bytes := package_length - (end_offset - start_offset);
-    result.term_list = parse_term_list(device_body_size_bytes);
-
-    return result;
-}
-
-Scope :: struct {
-    name: Name_String;
-    term_list: [] Term_Object;
-}
-
-parse_scope :: () -> Scope {
-    start_offset := parser_context.bytecode_stream.data;
-
-    package_length := parse_package_length();
-
-    result: Scope;
-    result.name = parse_name_string();
-
-    end_offset := parser_context.bytecode_stream.data;
-
-    scope_body_size_bytes := package_length - (end_offset - start_offset);
-    result.term_list = parse_term_list(scope_body_size_bytes);
-
-    return result;
-}
-
-Package :: struct {
-    num_elements: int;
-}
-
-parse_package :: () -> Package {
-
-    start_offset := parser_context.bytecode_stream.data;
-    package_length, bytes_used := parse_package_length();
-
-    result: Package;
-    result.num_elements = cast(int) consume(u8);
-
-    end_offset := parser_context.bytecode_stream.data;
-    method_body_size_bytes := package_length - (end_offset - start_offset);
-
-    // Skip package contents for now
-    parser_context.bytecode_stream.data += method_body_size_bytes;
-    parser_context.bytecode_stream.count -= method_body_size_bytes;
-
-    return result;
-}
-
 parse_buffer :: () -> [] u8 {
     parse_package_length();
 
@@ -231,37 +450,12 @@ parse_buffer :: () -> [] u8 {
     return xx result;
 }
 
-Index_Field :: struct {
-    name_a: Name_String;
-    name_b: Name_String;
-    flags: u8;
-    elements: [..] Field_Element;
-}
-
-parse_index_field :: () -> Index_Field {
-    result: Index_Field;
-
-    start := parser_context.bytecode_stream.data;
-    length := parse_package_length();
-
-    result.name_a = parse_name_string();
-    result.name_b = parse_name_string();
-    result.flags = consume(u8);
+parse_term_list :: (term_list_size_bytes: int, parent: *Term_Object) -> [] *Term_Object {
+    start := context.acpi_parser.bytecode.data;
+    result: [..] *Term_Object;
 
     while true {
-        array_add(*result.elements, parse_field_element());
-        if parser_context.bytecode_stream.data >= start + length break;
-    }
-
-    return result;
-}
-
-parse_term_list :: (term_list_size_bytes: int) -> [] Term_Object {
-    start := parser_context.bytecode_stream.data;
-    result: [..] Term_Object;
-
-    while true {
-        if parser_context.bytecode_stream.data >= start + term_list_size_bytes {
+        if context.acpi_parser.bytecode.data >= start + term_list_size_bytes {
             break;
         }
 
@@ -315,7 +509,7 @@ parse_term_arg :: () -> Term_Arg, bool {
 
       case StringPrefix;
         result.type = ._string;
-        result._string.data = parser_context.bytecode_stream.data;
+        result._string.data = context.acpi_parser.bytecode.data;
         while consume(u8) result._string.count += 1;
 
       case 0x00; #through;
@@ -333,164 +527,24 @@ parse_term_arg :: () -> Term_Arg, bool {
         parse_package();
 
       case;
+        // if {
+        //     
+        // }
+
+        dump();
         assert(false, tprint("Term arg prefix not supported 0x%", prefix));
     }
 
     return result, result.type != .none;
 }
 
-Name_String :: struct {
-    name_path: string;
-    prefix_count: int;
-    flags: enum_flags {
-        root;
-        dual;
-        multi;
-    }
-}
-
-parse_name_string :: () -> Name_String {
-    DualNamePrefix :: 0x2e;
-    MultiNamePrefix :: 0x2f;
-
-    result: Name_String;
-
-    char := peek();
-    if char == #char "\\" {
-        consume(u8);
-        result.flags |= .root;
-    } else while char == #char "^" {
-        consume(u8);
-        result.prefix_count += 1;
-        char = peek();
-    }
-
-    if char == {
-      case DualNamePrefix;
-        consume(u8);
-        result.name_path = consume_string(8);
-        result.flags |= .dual;
-      case MultiNamePrefix;
-        consume(u8);
-        seg_count := consume(u8);
-        result.name_path = consume_string(seg_count * 4);
-        result.flags |= .multi;
-      case 0x0;
-        consume(u8);
-        // Leave result.name_path empty
-      case;
-        result.name_path = consume_string(4);
-    }
-
-    return result;
-}
-
-Op_Region :: struct {
-    name: Name_String;
-    address_space: Address_Space;
-    offset: Term_Arg;
-    length: Term_Arg;
-
-    Address_Space :: enum u8 {
-        SystemMemory     :: 0x00;
-        SystemIO         :: 0x01;
-        PCI_Config       :: 0x02;
-        EmbeddedControl  :: 0x03;
-        SMBus            :: 0x04;
-        System_CMOS      :: 0x05;
-        PciBarTarget     :: 0x06;
-        IPMI             :: 0x07;
-        GeneralPurposeIO :: 0x08;
-        GenericSerialBus :: 0x09;
-        PCC              :: 0x0a;
-    }
-}
-
-parse_op_region :: () -> Op_Region {
-    result: Op_Region;
-    result.name = parse_name_string();
-
-    result.address_space = consume(Op_Region.Address_Space);
-    result.offset = parse_term_arg();
-    result.length = parse_term_arg();
-    return result;
-}
-
-Method :: struct {
-    name: Name_String;
-    flags: u8;
-    term_list: [] Term_Object;
-}
-
-parse_method :: () -> Method {
-    start_offset := parser_context.bytecode_stream.data;
-
-    package_length, bytes_used := parse_package_length();
-    
-    result: Method;
-    result.name = parse_name_string();
-    result.flags = consume(u8);
-
-    end_offset := parser_context.bytecode_stream.data;
-
-    // Skip method bodies for now
-    method_body_size_bytes := package_length - (end_offset - start_offset);
-    // printf("Skipping, bytes used: %\n", bytes_used);
-
-    // result.term_list = parse_term_list(method_body_size_bytes);
-    parser_context.bytecode_stream.data += method_body_size_bytes;
-    parser_context.bytecode_stream.count -= method_body_size_bytes;
-
-    return result;
-}
-
-Name :: struct {
-    name: Name_String;
-    value: Term_Arg;
-}
-
-parse_name :: () -> Name {
-    result: Name;
-    result.name = parse_name_string();
-    result.value = parse_term_arg();
-    return result;
-}
-
-Field :: struct {
-    name: Name_String;
-    flags: u8;
-    elements: [..] Field_Element;
-}
-
-parse_field :: () -> Field {
-    result: Field;
-
-    start := parser_context.bytecode_stream.data;
-    length := parse_package_length();
-
-    result.name = parse_name_string();
-    result.flags = consume(u8);
-
-    while true {
-        array_add(*result.elements, parse_field_element());
-        if parser_context.bytecode_stream.data >= start + length break;
-    }
-
-    return result;
-}
-
-Field_Element :: struct {
-    name: string;
-    length: int;
-}
-
-parse_field_element :: () -> Field_Element {
+parse_field_element :: () -> Field.Element {
     ReservedFieldPrefix       :: 0x0;
     AccessFieldPrefix         :: 0x1;
     ConnectFieldPrefix        :: 0x2;
     ExtendedAccessFieldPrefix :: 0x3;
 
-    result: Field_Element;
+    result: Field.Element;
 
     prefix := peek();
 
