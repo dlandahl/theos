@@ -1,0 +1,10 @@
+// SPEC: Section 12.4
+X(Reset,             EFI_STATUS, (struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *prot, EFI_BOOLEAN extended_verification))
+X(OutputString,      EFI_STATUS, (struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *prot, EFI_UINT16 *string))
+X(TestString,        EFI_STATUS, (struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *prot, EFI_UINT16 *string))
+X(QueryMode,         EFI_STATUS, (struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *prot, EFI_UINTN mode_number, EFI_UINTN *columns, EFI_UINTN *rows))
+X(SetMode,           EFI_STATUS, (struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *prot, EFI_UINTN mode_number))
+X(SetAttribute,      EFI_STATUS, (struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *prot, EFI_UINTN attribute))
+X(ClearScreen,       EFI_STATUS, (struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *prot))
+X(SetCursorPosition, EFI_STATUS, (struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *prot, EFI_UINTN column, EFI_UINTN row))
+X(EnableCursor,      EFI_STATUS, (struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *prot, EFI_BOOLEAN visible))
