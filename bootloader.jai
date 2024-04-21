@@ -53,9 +53,6 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             stop.SetMode(stop, 2);
         }
 
-        identity_map_base: u64 = 0x10_0000;
-        EFI_CHECK(boot_services.AllocatePages(.AllocateAddress, .EfiLoaderData, 0x200, *identity_map_base));
-
         loaded_image_protocol: *EFI_LOADED_IMAGE_PROTOCOL;
         EFI_CHECK(boot_services.HandleProtocol(loaded_image, *EFI_LOADED_IMAGE_PROTOCOL_GUID, xx *loaded_image_protocol));
 
@@ -90,16 +87,39 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         EFI_CHECK(kernel_file.Read(kernel_file, *size, kernel_file_buffer));
 
-        // Map 4 MB at 0 for the bootloader
+        {
+            identity_map_base: u64 = 0x10_0000;
+            EFI_CHECK(boot_services.AllocatePages(.AllocateAddress, .EfiLoaderData, 0x200, *identity_map_base));
 
-        // Map 4 MB at 0xffff_ffff_8000_0000 for the kernel binary
-        pml4[0x1ff] = cast(u64) pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
-        pdpt[0x1fe] = cast(u64) pd.data   | PAGE_PRESENT | PAGE_READ_WRITE;
+            Page_Tables :: struct {
+                pml4: [0x200] u64;
+                pdpt: [0x200] u64;
+                pd:   [0x200] u64;
 
-        pd[0] = 0x000_000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-        pd[1] = 0x200_000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-        pd[2] = 0x400_000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-        pd[3] = 0x600_000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+                boot_pdpt: [0x200] u64;
+                boot_pd:   [0x200] u64;
+            }
+
+            using page_tables := cast(*Page_Tables) identity_map_base;
+
+            // Map some memory at 0 for the bootloader, to match the identity map that UEFI creates.
+            pml4[0]      = cast(u64) boot_pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
+            boot_pdpt[0] = cast(u64) boot_pd.data   | PAGE_PRESENT | PAGE_READ_WRITE;
+
+            boot_pd[0] = 0x000_000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            boot_pd[1] = 0x200_000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            boot_pd[2] = 0x400_000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            boot_pd[3] = 0x600_000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+
+            // Map some memory at 0xffff_ffff_8000_0000 for the kernel
+            pml4[0x1ff] = cast(u64) pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
+            pdpt[0x1fe] = cast(u64) pd.data   | PAGE_PRESENT | PAGE_READ_WRITE;
+
+            pd[0] = 0x000_000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            pd[1] = 0x200_000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            pd[2] = 0x400_000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            pd[3] = 0x600_000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+        }
 
         {
             // Parse kernel ELF
@@ -169,11 +189,6 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
     return 0;
 }
-
-pml4: [0x200] u64 #align 0x1000;
-
-pdpt: [0x200] u64 #align 0x1000;
-pd:   [0x200] u64 #align 0x1000;
 
 PAGE_PRESENT    :: 0x1;
 PAGE_READ_WRITE :: 0x2;
