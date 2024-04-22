@@ -44,7 +44,7 @@ main :: () {
         return;
     }
 
-    if false if !compile_kernel() {
+    if !compile_kernel() {
         log_error("Failed to compile the kernel.\n");
         return;
     }
@@ -101,7 +101,7 @@ compile_bootloader :: () -> success: bool {
                 link_command := tprint("%/bin/lld-linux -flavor link -subsystem:efi_application -driver -align:16 -base:0x500000 -entry:EfiMain .build/bootloader.o -out:.build/bootx64.efi", JAI_ROOT_DIR);
                 link_command_array := break_command_into_strings(link_command);
 
-                result := run_command(..link_command_array);
+                result := run_command(.. link_command_array);
                 if result.exit_code {
                     compiler_set_workspace_status(.FAILED, workspace);
                 }

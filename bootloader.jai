@@ -5,11 +5,11 @@
 #add_context system_table: *EFI_SYSTEM_TABLE;
 
 Boot_Data :: struct {
-    // Stuff that the bootloader will hand to the kernel.
+    // Stuff that the bootloader will hand to the kernel
 
     framebuffer: u64; // Physical address
 
-    // Where is the kernel binary in physical memory. Needed so the kernel can reserve it in its physical memory manager.
+    // Where is the kernel binary in physical memory. Needed so the kernel can reserve it in its physical memory manager
     kernel_base: u64;
     kernel_size: u64;
 }
@@ -24,7 +24,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
     push_context c {
         boot_services := system_table.BootServices;
 
-        if false {
+        {
             // Clear the screen
 
             gop: *EFI_GRAPHICS_OUTPUT_PROTOCOL;
@@ -42,15 +42,6 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
             console := system_table.ConOut;
             EFI_CHECK(console.Reset(console, 0));
-        }
-
-        {
-            // Fit more text on the screen
-
-            stop: *EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL;
-            EFI_CHECK(boot_services.LocateProtocol(*EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL_GUID, null, cast(**void) *stop));
-
-            stop.SetMode(stop, 2);
         }
 
         loaded_image_protocol: *EFI_LOADED_IMAGE_PROTOCOL;
@@ -87,47 +78,89 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         EFI_CHECK(kernel_file.Read(kernel_file, *size, kernel_file_buffer));
 
-        {
-            identity_map_base: u64 = 0x10_0000;
-            EFI_CHECK(boot_services.AllocatePages(.AllocateAddress, .EfiLoaderData, 0x200, *identity_map_base));
+        identity_map_base: u64 = 0x10_0000;
 
-            Page_Tables :: struct {
-                pml4: [0x200] u64;
-                pdpt: [0x200] u64;
-                pd:   [0x200] u64;
+        Page_Tables :: struct {
+            pml4: [0x200] u64;
+            pdpt: [0x200] u64;
+            pd:   [0x200] u64;
 
-                boot_pdpt: [0x200] u64;
-                boot_pd:   [0x200] u64;
-            }
-
-            using page_tables := cast(*Page_Tables) identity_map_base;
-
-            // Map some memory at 0 for the bootloader, to match the identity map that UEFI creates.
-            pml4[0]      = cast(u64) boot_pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
-            boot_pdpt[0] = cast(u64) boot_pd.data   | PAGE_PRESENT | PAGE_READ_WRITE;
-
-            boot_pd[0] = 0x000_000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-            boot_pd[1] = 0x200_000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-            boot_pd[2] = 0x400_000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-            boot_pd[3] = 0x600_000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-
-            // Map some memory at 0xffff_ffff_8000_0000 for the kernel
-            pml4[0x1ff] = cast(u64) pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
-            pdpt[0x1fe] = cast(u64) pd.data   | PAGE_PRESENT | PAGE_READ_WRITE;
-
-            pd[0] = 0x000_000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-            pd[1] = 0x200_000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-            pd[2] = 0x400_000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-            pd[3] = 0x600_000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            boot_pdpt: [0x200] u64;
+            boot_pd:   [0x200] u64;
         }
 
-        {
-            // Parse kernel ELF
+        using page_tables := cast(*Page_Tables) identity_map_base;
+
+        EFI_CHECK(boot_services.AllocatePages(.AllocateAddress, .EfiLoaderData, 0x200, *identity_map_base));
+
+        for 0..size_of(Page_Tables)-1 {
+                << (cast(*u8) page_tables + it) = 0;
+        }
+
+        pml4[0]      = cast(u64) boot_pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
+        boot_pdpt[0] = cast(u64) boot_pd.data   | PAGE_PRESENT | PAGE_READ_WRITE;
+
+        // Low memory where the bootloader is loaded
+        boot_pd[0] = 0x00_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+        boot_pd[1] = 0x20_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+        boot_pd[2] = 0x40_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+        boot_pd[3] = 0x60_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+
+        // UEFI Stack
+        boot_pd[64] = 0x800_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+        boot_pd[63] = 0x7e0_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+        boot_pd[62] = 0x7c0_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+        boot_pd[61] = 0x7a0_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+
+        // Higher-half memory for the kernel
+        pml4[0x1ff] = cast(u64) pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
+        pdpt[0x1fe] = cast(u64) pd.data   | PAGE_PRESENT | PAGE_READ_WRITE;
+
+        pd[0] = 0x100_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+        pd[1] = 0x120_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+        pd[2] = 0x140_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+        pd[3] = 0x160_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+
+
+
+        descriptor_size: u64; // Don't assume that memory map entries will match Lil_Uefi's EFI_MEMORY_DESCRIPTOR structure, the Qemu one is larger
+        mmap_size: u64;
+
+        boot_services.GetMemoryMap(*mmap_size, null, null, *descriptor_size, null); // Get the size, don't EFI_CHECK because return status will be BufferTooSmall
+
+        mmap_size += 16 * descriptor_size;
+        memory_map: *u8;
+
+        mmap_key: EFI_UINTN;
+
+        EFI_CHECK(boot_services.AllocatePool(.EfiLoaderData, mmap_size, cast(**void) *memory_map));
+        EFI_CHECK(boot_services.GetMemoryMap(*mmap_size, xx memory_map, *mmap_key, null, null));
+
+        count := mmap_size / descriptor_size;
+        memory_types := type_info(EFI_MEMORY_TYPE);
+
+        if false for 0..count-1 {
+            desc := cast(*EFI_MEMORY_DESCRIPTOR) (memory_map + it * descriptor_size);
+            display_string("\n\rType: ");
+
+            for memory_types.values if desc.Type == it {
+                display_string(memory_types.names[it_index]);
+                break;
+            }
+
+            display_int(xx desc.Type);
+        }
+
+        EFI_CHECK(boot_services.ExitBootServices(loaded_image, mmap_key));
+
+        cr3 := page_tables.pml4.data;
+        #asm { set_cr3 cr3; }
+
+        if false {
+
+            // Load kernel binary
             elf := kernel_file_buffer;
             elf_header := cast(*Elf64_Ehdr) elf;
-
-            display_string(xx elf_header.e_ident);
-            display_string("\n\r");
 
             for 0..elf_header.e_phnum-1 {
                 base := elf + elf_header.e_phoff;
@@ -136,53 +169,13 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
                 if program_header.p_type != PT_LOAD continue;
 
-                virtual_address := program_header.p_vaddr;
-
-                mask :: 0x1ff;
-                pml4_index := (virtual_address >> 39) & mask;
-                pdpt_index := (virtual_address >> 30) & mask;
-                pd\ _index := (virtual_address >> 21) & mask;
-                pt\ _index := (virtual_address >> 12) & mask;
-
+                memcpy(
+                    cast(*void) program_header.p_vaddr,
+                    elf + program_header.p_offset,
+                    cast(s32) program_header.p_filesz
+                );
             }
         }
-
-        mmap_key: EFI_UINTN;
-        {
-            // Get memory map
-
-            descriptor_size: u64; // Don't assume that the memory map entries will match Lil_Uefi's EFI_MEMORY_DESCRIPTOR structure, some versions of UEFI seem to have a larger one
-            mmap_size: u64;
-
-            boot_services.GetMemoryMap(*mmap_size, null, null, *descriptor_size, null); // Get the size, don't EFI_CHECK because return status will be BufferTooSmall rather than Success
-
-            display_string("Memory map size: ");
-            display_int(xx mmap_size);
-            display_string("\n\r");
-
-            mmap_size += 16 * descriptor_size;
-            memory_map: *u8;
-
-            EFI_CHECK(boot_services.AllocatePool(.EfiLoaderData, mmap_size, cast(**void) *memory_map));
-            EFI_CHECK(boot_services.GetMemoryMap(*mmap_size, xx memory_map, *mmap_key, null, null));
-
-            count := mmap_size / descriptor_size;
-            memory_types := type_info(EFI_MEMORY_TYPE);
-
-            if false for 0..count-1 {
-                desc := cast(*EFI_MEMORY_DESCRIPTOR) (memory_map + it * descriptor_size);
-                display_string("\n\rType: ");
-
-                for memory_types.values if desc.Type == it {
-                    display_string(memory_types.names[it_index]);
-                    break;
-                }
-
-                display_int(xx desc.Type);
-            }
-        }
-
-        EFI_CHECK(boot_services.ExitBootServices(loaded_image, mmap_key));
 
         while true {}
     }
@@ -193,15 +186,6 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 PAGE_PRESENT    :: 0x1;
 PAGE_READ_WRITE :: 0x2;
 PAGE_SIZE       :: 0x80;
-
-setup_page_table :: () {
-    pml4[0] = cast(u64) pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
-    pdpt[0] = cast(u64) pd.data   | PAGE_PRESENT | PAGE_READ_WRITE;
-
-    for 0..2 {
-
-    }
-}
 
 EFI_CHECK :: check_efi_status;
 
