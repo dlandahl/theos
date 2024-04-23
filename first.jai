@@ -40,7 +40,7 @@ main :: () {
     make_directory_if_it_does_not_exist(".build/");
 
     if !compile_bootloader() {
-        log_error("Failed to compile the boot loader.\n");
+        log_error("Failed to compile the bootloader.\n");
         return;
     }
 
@@ -124,6 +124,8 @@ compile_kernel :: () -> success: bool {
         options.output_path = ".build";
         options.emit_debug_info = .NONE;
         options.text_output_flags = 0;
+        options.entry_point_name = "main";
+        options.additional_linker_arguments = .["-emain"];
         options.os_target = .LINUX;
 
         new_path: [..] string;
