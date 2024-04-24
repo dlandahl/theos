@@ -124,8 +124,9 @@ compile_kernel :: () -> success: bool {
         options.output_path = ".build";
         options.emit_debug_info = .NONE;
         options.text_output_flags = 0;
-        options.entry_point_name = "main";
-        options.additional_linker_arguments = .["-emain"];
+        options.entry_point_name = "kernel_entry";
+        options.cast_bounds_check = .OFF;
+        options.additional_linker_arguments = .["-ekernel_entry", "-Tlink.ld"];
         options.os_target = .LINUX;
 
         new_path: [..] string;

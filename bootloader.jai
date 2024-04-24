@@ -2,27 +2,9 @@
 #import "Lil_Uefi";
 #import "Elf";
 
+#load "boot_data.jai";
+
 #add_context system_table: *EFI_SYSTEM_TABLE;
-
-Page_Tables :: struct {
-    pml4: [0x200] u64;
-    pdpt: [0x200] u64;
-    pd:   [0x200] u64;
-
-    boot_pdpt: [0x200] u64;
-    boot_pd:   [0x200] u64;
-}
-
-Boot_Data :: struct {
-    // Stuff that the bootloader will hand to the kernel
-    page_tables: Page_Tables;
-
-    kernel_load_buffer: [0x10_0000] u8;
-
-    framebuffer: u64;
-    x_resolution: u32;
-    y_resolution: u32;
-}
 
 #program_export
 EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UINTN #c_call {
@@ -37,7 +19,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         boot_data_address: u64 = 0x10_0000;
         boot_data := cast(*Boot_Data) boot_data_address;
 
-        EFI_CHECK(boot_services.AllocatePages(.AllocateAddress, .EfiLoaderData, size_of(Boot_Data) / 4096, *boot_data_address));
+        EFI_CHECK(boot_services.AllocatePages(.AllocateAddress, .EfiLoaderData, size_of(Boot_Data) / 4096 + 1, *boot_data_address));
 
         {
             // Get framebuffer and clear the screen
@@ -45,22 +27,25 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             gop: *EFI_GRAPHICS_OUTPUT_PROTOCOL;
             EFI_CHECK(boot_services.LocateProtocol(*EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, null, cast(**void) *gop));
 
-            gop.SetMode(gop, 1);
+            gop.SetMode(gop, 9);
 
             framebuffer: [] u32;
             framebuffer.data  = cast(*u32) gop.Mode.frame_buffer_base;
             framebuffer.count = cast(s64) gop.Mode.frame_buffer_size / size_of(u32);
 
             for *framebuffer {
-                it.* = 0x0000ff00;
+                it.* = 0x00ffff00;
             }
 
             console := system_table.ConOut;
             EFI_CHECK(console.Reset(console, 0));
 
-            boot_data.framebuffer = gop.Mode.frame_buffer_base;
+            boot_data.framebuffer = cast(*u32) gop.Mode.frame_buffer_base;
             boot_data.x_resolution = gop.Mode.info.HorizontalResolution;
             boot_data.y_resolution = gop.Mode.info.VerticalResolution;
+            boot_data.stride = gop.Mode.info.PixelsPerScanLine;
+
+            display(cast(u64) boot_data.framebuffer, "\n\r");
         }
 
         loaded_image_protocol: *EFI_LOADED_IMAGE_PROTOCOL;
@@ -74,6 +59,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         kernel_file: *EFI_FILE_PROTOCOL;
         file_name := cast(*u16) "k\0e\0r\0n\0e\0l\0\0\0".data;
+
 
         open_file_flags := EFI_FILE_ATTRIBUTES.READ_ONLY | .HIDDEN | .SYSTEM;
         EFI_CHECK(boot_volume.Open(boot_volume, xx *kernel_file, file_name, .Read, open_file_flags));
@@ -93,8 +79,6 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         elf := boot_data.kernel_load_buffer.data;
         elf_header := cast(*Elf64_Ehdr) elf;
-
-        display("Entry point: 0x", cast(int) elf_header.e_entry, "\n\r");
 
 
         for 0..size_of(Page_Tables)-1 {
@@ -127,6 +111,14 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             pd[1] = 0x120_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             pd[2] = 0x140_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             pd[3] = 0x160_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+
+            // Map the framebuffer
+            pd[4] = cast(u64) boot_data.framebuffer             | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            pd[5] = cast(u64) boot_data.framebuffer + 0x20_0000 | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+
+            // Translate framebuffer address to virtual
+            boot_data.framebuffer = cast(*u32) (0xffff_ffff_8000_0000 + 4*0x20_0000);
+            display(cast(u64) boot_data.framebuffer, "\n\r");
         }
 
         descriptor_size: u64; // Don't assume that memory map entries will match Lil_Uefi's EFI_MEMORY_DESCRIPTOR structure, the Qemu one is larger
@@ -224,14 +216,14 @@ display :: (args: .. Any) {
         }
 
         // Can you metaprogram this without string formatting?
-        if it.type == cast(*Type_Info) u8   display_int(cast(int) << cast(*u8)  it.value_pointer);
-        if it.type == cast(*Type_Info) s8   display_int(cast(int) << cast(*s8)  it.value_pointer);
-        if it.type == cast(*Type_Info) u16  display_int(cast(int) << cast(*u16) it.value_pointer);
-        if it.type == cast(*Type_Info) s16  display_int(cast(int) << cast(*s16) it.value_pointer);
-        if it.type == cast(*Type_Info) s32  display_int(cast(int) << cast(*s32) it.value_pointer);
-        if it.type == cast(*Type_Info) u32  display_int(cast(int) << cast(*u32) it.value_pointer);
-        if it.type == cast(*Type_Info) s64  display_int(cast(int) << cast(*s64) it.value_pointer);
-        if it.type == cast(*Type_Info) u64  display_int(cast(int) << cast(*u64) it.value_pointer);
+        if it.type == cast(*Type_Info) u8   display_int(cast,no_check(u64) << cast(*u8)  it.value_pointer);
+        if it.type == cast(*Type_Info) s8   display_int(cast,no_check(u64) << cast(*s8)  it.value_pointer);
+        if it.type == cast(*Type_Info) u16  display_int(cast,no_check(u64) << cast(*u16) it.value_pointer);
+        if it.type == cast(*Type_Info) s16  display_int(cast,no_check(u64) << cast(*s16) it.value_pointer);
+        if it.type == cast(*Type_Info) s32  display_int(cast,no_check(u64) << cast(*s32) it.value_pointer);
+        if it.type == cast(*Type_Info) u32  display_int(cast,no_check(u64) << cast(*u32) it.value_pointer);
+        if it.type == cast(*Type_Info) s64  display_int(cast,no_check(u64) << cast(*s64) it.value_pointer);
+        if it.type == cast(*Type_Info) u64  display_int(cast,no_check(u64) << cast(*u64) it.value_pointer);
     }
 }
 
@@ -243,7 +235,7 @@ display_string :: (message: string) {
     console.OutputString(console, wide_text);
 }
 
-display_int :: (value: int) {
+display_int :: (value: u64) {
     hex_chars := "0123456789abcdef";
     result: [16] u8;
 

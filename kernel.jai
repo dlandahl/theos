@@ -1,34 +1,27 @@
 
-Page_Tables :: struct {
-    pml4: [0x200] u64;
-    pdpt: [0x200] u64;
-    pd:   [0x200] u64;
-
-    boot_pdpt: [0x200] u64;
-    boot_pd:   [0x200] u64;
-}
-
-Boot_Data :: struct {
-    // Stuff handed to us by the bootloader
-    page_tables: Page_Tables;
-
-    kernel_load_buffer: [0x10_0000] u8;
-
-    framebuffer: u64;
-    x_resolution: u32;
-    y_resolution: u32;
-}
+#load "boot_data.jai";
 
 #program_export
-main :: () #no_context {
+kernel_entry :: () #no_context {
+    // #asm { int3; }
     boot_data := cast(*Boot_Data) 0x10_0000;
+    // if boot_data.framebuffer == cast(*u32) (0xffff_ffff_8000_0000 + 4*0x20_0000) #asm { int3; }
 
     framebuffer: [] u32;
     framebuffer.data = cast(*u32) boot_data.framebuffer;
     framebuffer.count = cast(s64) boot_data.x_resolution * boot_data.y_resolution;
 
-    for *framebuffer {
-        it.* = 0xffffffff;
+    x_res := boot_data.x_resolution;
+    y_res := boot_data.y_resolution;
+
+    for y: 0..y_res-1 {
+        r := cast(int) (0xff * ((1.0 / y_res) * y));
+
+        for x: 0..x_res-1 {
+            g := cast(int) (0xff * ((1.0 / x_res) * x));
+
+            framebuffer[x + y * boot_data.stride] = cast(u32) ((r<<16) | (g<<8));
+        }
     }
 
     #asm {

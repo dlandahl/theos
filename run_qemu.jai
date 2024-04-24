@@ -11,7 +11,7 @@
 
 #run {
     // Handy page table calculator
-    x := cast(u64) 0x800_0000;
+    x := cast(u64) 0x8000_0000;
 
     mask: u64 = 0b111111111;
 
