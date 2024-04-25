@@ -1,9 +1,7 @@
-//
-// This file was auto-generated using the following command:
-//
-// jai generate.jai
-//
 
+//
+// Generated from the Lil_Uefi library by Ryan J Fleury
+//
 
 
 LIL_UEFI_COMPILER_CLANG :: 1;
