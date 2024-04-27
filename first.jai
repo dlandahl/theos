@@ -161,9 +161,7 @@ format_disk :: () -> success: bool {
         "mmd -i fat.img ::/EFI",
         "mmd -i fat.img ::/EFI/BOOT",
         "mcopy -i fat.img .build/bootx64.efi ::/EFI/BOOT",
-
         "mcopy -i fat.img .build/kernel ::",
-        "mcopy -i fat.img test_file.txt ::",
 
         "cp fat.img disk_image.img",
         "mv fat.img .build/iso",

@@ -97,7 +97,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             boot_pd[2] = 0x40_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             boot_pd[3] = 0x60_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
 
-            // Where UEFI seems to have put the stack of this program
+            // Where Qemu UEFI seems to put the stack of this program
             boot_pd[64] = 0x800_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             boot_pd[63] = 0x7e0_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             boot_pd[62] = 0x7c0_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
@@ -107,14 +107,16 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             pml4[0x1ff] = cast(u64) pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
             pdpt[0x1fe] = cast(u64) pd.data   | PAGE_PRESENT | PAGE_READ_WRITE;
 
-            pd[0] = 0x100_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-            pd[1] = 0x120_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-            pd[2] = 0x140_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-            pd[3] = 0x160_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            for 0..3 {
+                address := Boot_Data.KERNEL_PHYS_BASE + cast(u64) it * 0x20_0000;
+                pd[it] = address | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            }
 
             // Map the framebuffer
             pd[4] = cast(u64) boot_data.framebuffer             | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             pd[5] = cast(u64) boot_data.framebuffer + 0x20_0000 | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+
+            boot_data.page_directories_used = 6;
 
             // Translate framebuffer address to virtual
             boot_data.framebuffer = cast(*u32) (0xffff_ffff_8000_0000 + 4*0x20_0000);
@@ -152,7 +154,10 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         EFI_CHECK(boot_services.ExitBootServices(loaded_image, mmap_key));
 
         cr3 := boot_data.page_tables.pml4.data;
-        #asm { set_cr3 cr3; }
+        #asm {
+            cli;
+            set_cr3 cr3;
+        }
 
         {
             // Load kernel binary
@@ -182,10 +187,6 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
     return 0;
 }
-
-PAGE_PRESENT    :: 0x1;
-PAGE_READ_WRITE :: 0x2;
-PAGE_SIZE       :: 0x80;
 
 EFI_CHECK :: check_efi_status;
 
@@ -255,45 +256,6 @@ ascii_to_wide :: (input: string, buffer: [] u16) -> *u16 {
 
     buffer[input.count] = 0;
     return buffer.data;
-}
-
-#program_export
-memset :: (target: *void, value: u8, count: s64) -> *void #c_call {
-    #asm {
-        cld;
-
-        count  === c;
-        target === di;
-        value  === a;
-        rep_stos.b target, value, count;
-    }
-
-    return target;
-}
-
-#program_export
-memcpy :: (dst: *void, src: *void, count: s64) -> *void #c_call {
-    #asm {
-        cld;
-
-        src   === si;
-        dst   === di;
-        count === c;
-        rep_movs.b dst, src, count;
-    }
-
-    return dst;
-}
-
-#program_export
-memcmp :: (a: *u8, b: *u8, count: u64) -> s16 #c_call {
-    for 0..(cast(s64) count)-1 {
-        if a[it] != b[it] {
-            return a[it] - b[it];
-        }
-    }
-
-    return 0;
 }
 
 /*
