@@ -1,41 +1,67 @@
 
 #load "boot_data.jai";
 
+Framebuffer :: struct {
+    buffer: *u32;
+    x_resolution: int;
+    y_resolution: int;
+    stride: int;
+}
+
+#add_context framebuffer: Framebuffer;
+
 #program_export
 kernel_entry :: () #no_context {
     boot_data := cast(*Boot_Data) 0x10_0000;
 
-    framebuffer: [] u32;
-    framebuffer.data = cast(*u32) boot_data.framebuffer;
-    framebuffer.count = cast(s64) boot_data.x_resolution * boot_data.y_resolution;
+    c: Context;
+    c.framebuffer.buffer = cast(*u32) boot_data.framebuffer;
+    c.framebuffer.x_resolution = boot_data.x_resolution;
+    c.framebuffer.y_resolution = boot_data.y_resolution;
+    c.framebuffer.stride = boot_data.stride;
 
-    x_res := boot_data.x_resolution;
-    y_res := boot_data.y_resolution;
+    push_context c {
+        fb := context.framebuffer;
 
-    for y: 0..y_res-1 {
-        r := cast(int) (0xff * ((1.0 / y_res) * y));
+        for y: 0..fb.y_resolution-1 {
+            red := cast(int) (0xff * ((1.0 / fb.y_resolution) * y));
 
-        for x: 0..x_res-1 {
-            g := cast(int) (0xff * ((1.0 / x_res) * x));
+            for x: 0..fb.x_resolution-1 {
+                green := cast(int) (0xff * ((1.0 / fb.x_resolution) * x));
 
-            framebuffer[x + y * boot_data.stride] = cast(u32) ((r<<16) | (g<<8));
+                fb.buffer[x + y * fb.stride] = cast(u32) ((red << 16) | (green << 8));
+            }
         }
-    }
 
-    {
-        using boot_data;
+        {
+            using boot_data;
+            page_table_physical_address := 0xffff_ffff_8000_0000 - cast(u64) page_table.data + KERNEL_PHYS_BASE;
+            page_tables.pd[page_directories_used] = page_table_physical_address | PAGE_PRESENT | PAGE_READ_WRITE;
+            virtual_base = cast(*void) 0xffff_ffff_8000_0000 + page_directories_used * 0x20_0000;
+        }
 
-        page_table_physical_address := 0xffff_ffff_8000_0000 - cast(u64) page_table.data + KERNEL_PHYS_BASE;
-        page_tables.pd[page_directories_used] = page_table_physical_address | PAGE_PRESENT | PAGE_READ_WRITE;
+        fb_size := fb.y_resolution * fb.stride;
+        c.framebuffer.buffer = cast(*u32) map_pages(fb_size / 4096 + 1, cast(u64) fb.buffer);
+
+        bluescreen();
     }
 
     #asm { cli; hlt; }
 }
 
+bluescreen :: () {
+    using context.framebuffer;
 
+    for y: 0..y_resolution-1 for x: 0..x_resolution-1 {
+        buffer[x + y * stride] = cast(u32) (0xff0000ff);
+    }
+
+    #asm { cli; hlt; }
+}
 
 pages_mapped: int;
 page_table: [0x200] u64 #align 4096;
+virtual_base: *void;
 
 map_pages :: (count: int, physical_base: u64) -> *void {
     for 0..count-1 {
@@ -44,9 +70,11 @@ map_pages :: (count: int, physical_base: u64) -> *void {
 
         pages_mapped += 1;
         if pages_mapped >= 0x200 {
-            #asm { cli; hlt; }
+            bluescreen();
         }
     }
+
+    return virtual_base + (pages_mapped - count) * 4096;
 }
 
 

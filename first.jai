@@ -37,14 +37,27 @@ main :: () {
         return;
     }
 
+    do_bootloader, do_kernel := true, true;
+    args := get_build_options().compile_time_command_line;
+
+    if args {
+        do_bootloader, do_kernel = false, false;
+
+        for args {
+            if      it == "kernel" do_kernel = true;
+            else if it == "boot" do_bootloader = true;
+            else log_error("Command line argument not understood: %", it);
+        }
+    }
+
     make_directory_if_it_does_not_exist(".build/");
 
-    if !compile_bootloader() {
+    if do_bootloader && !compile_bootloader() {
         log_error("Failed to compile the bootloader.\n");
         return;
     }
 
-    if !compile_kernel() {
+    if do_kernel && !compile_kernel() {
         log_error("Failed to compile the kernel.\n");
         return;
     }

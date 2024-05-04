@@ -26,6 +26,8 @@ Boot_Data :: struct {
     x_resolution: u32;
     y_resolution: u32;
     stride: u32;
+
+    acpi_rsdp: u64;
 }
 
 #program_export
@@ -56,8 +58,7 @@ memcpy :: (dst: *void, src: *void, count: s64) -> *void #c_call {
     return dst;
 }
 
-#program_export
-memcmp :: (a: *u8, b: *u8, count: u64) -> s16 #c_call {
+_memcmp :: (a: *u8, b: *u8, count: u64) -> s16 #c_call {
     start := a;
 
     #asm {

@@ -48,6 +48,21 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             display(cast(u64) boot_data.framebuffer, "\n\r");
         }
 
+        for 0..system_table.NumberOfTableEntries-1 {
+            table := system_table.ConfigurationTable[it];
+            low := << cast(*u64) *table.VendorGuid;
+            high := << (cast(*u64) *table.VendorGuid + 1);
+            display("Table guid: ", high, low, "\n\r");
+
+            EFI_ACPI_TABLE_GUID :: EFI_GUID.{0x8868e871, 0xe4f1, 0x11d3, .[0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81]};
+            if _memcmp(cast(*u8) *table.VendorGuid, cast(*u8) *EFI_ACPI_TABLE_GUID, size_of(EFI_GUID)) == 0 {
+                display("Found ACPI table\n");
+                break;
+            }
+        }
+
+        // while true {}
+
         loaded_image_protocol: *EFI_LOADED_IMAGE_PROTOCOL;
         EFI_CHECK(boot_services.HandleProtocol(loaded_image, *EFI_LOADED_IMAGE_PROTOCOL_GUID, xx *loaded_image_protocol));
 
@@ -176,6 +191,13 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
                     elf + program_header.p_offset,
                     cast(s32) program_header.p_filesz
                 );
+
+                if (program_header.p_memsz > program_header.p_filesz) {
+                    start := program_header.p_vaddr + program_header.p_filesz;
+                    count := program_header.p_memsz - program_header.p_filesz;
+                    memset(cast(*void) start, 0, cast(s64) count);
+
+                }
             }
 
             entry_point := << cast(*() #no_context) *(elf_header.e_entry);
@@ -257,23 +279,3 @@ ascii_to_wide :: (input: string, buffer: [] u16) -> *u16 {
     buffer[input.count] = 0;
     return buffer.data;
 }
-
-/*
-
-        header := cast(*Elf64_Ehdr) kernel_load_buffer;
-        output_string(cast(string) header.e_ident);
-
-        phoff := kernel_load_buffer + header.e_phoff;
-        for 0..header.e_phnum-1 {
-            phent := phoff + header.e_phentsize * it;
-            pheader := cast(*Elf64_Phdr) phent;
-
-            if pheader.p_type == PT_LOAD {
-                output_string("Found pheader\r\n");
-
-                pages_needed := pheader.p_memsz / 4096 + 1;
-                status = boot_services.AllocatePages(.EFI_ALLOCATE_TYPE_AllocateAddress, .EFI_MEMORY_TYPE_EfiLoaderData, xx pages_needed, xx pheader.p_vaddr);
-                uefi_check(status, "AllocatePages");
-            }
-        }
-*/
