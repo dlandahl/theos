@@ -34,16 +34,19 @@ kernel_entry :: () #no_context {
         }
 
         {
-            using boot_data;
-            page_table_physical_address := 0xffff_ffff_8000_0000 - cast(u64) page_table.data + KERNEL_PHYS_BASE;
-            page_tables.pd[page_directories_used] = page_table_physical_address | PAGE_PRESENT | PAGE_READ_WRITE;
-            virtual_base = cast(*void) 0xffff_ffff_8000_0000 + page_directories_used * 0x20_0000;
+            page_table_physical_address := (cast(u64) page_table.data - 0xffff_ffff_8000_0000) + Boot_Data.KERNEL_PHYS_BASE;
+
+            serial_int(cast(u64) page_table.data);
+            serial_int(cast(u64) page_table_physical_address); 
+
+            boot_data.page_tables.pd[boot_data.page_directories_used] = page_table_physical_address | PAGE_PRESENT | PAGE_READ_WRITE;
+            virtual_base = cast(*void) 0xffff_ffff_8000_0000 + boot_data.page_directories_used*0x20_0000;
         }
 
-        fb_size := fb.y_resolution * fb.stride;
-        c.framebuffer.buffer = cast(*u32) map_pages(fb_size / 4096 + 1, cast(u64) fb.buffer);
+        
 
-        bluescreen();
+        // fb_size := fb.y_resolution * fb.stride;
+        // c.framebuffer.buffer = cast(*u32) map_pages(fb_size / 4096 + 1, cast(u64) fb.buffer);
     }
 
     #asm { cli; hlt; }
@@ -66,7 +69,7 @@ virtual_base: *void;
 map_pages :: (count: int, physical_base: u64) -> *void {
     for 0..count-1 {
         physical_address := physical_base + 4096 * cast(u64) it;
-        page_table[it + pages_mapped] = physical_address | PAGE_PRESENT | PAGE_READ_WRITE;
+        page_table[pages_mapped] = physical_address | PAGE_PRESENT | PAGE_READ_WRITE;
 
         pages_mapped += 1;
         if pages_mapped >= 0x200 {
@@ -77,7 +80,30 @@ map_pages :: (count: int, physical_base: u64) -> *void {
     return virtual_base + (pages_mapped - count) * 4096;
 }
 
+serial_string :: (message: string) {
+    for cast([] u8) message {
+        byte := it;
+        port := 0x3f8;
 
+        #asm {
+            byte === a;
+            port === d;
+            out.b port, byte;
+        }
+    }
+}
+
+serial_int :: (value: u64) {
+    hex_chars := "0123456789abcdef";
+    result: [16] u8;
+
+    for 0..15 {
+        result[it] = hex_chars[(value >> (60 - it * 4)) & 0xF];
+    }
+
+    serial_string(cast(string) result);
+    serial_string("\n");
+}
 
 Madt_Acpi_Table :: struct {
     #as header: Acpi_Table_Header;
@@ -85,7 +111,7 @@ Madt_Acpi_Table :: struct {
     flags: u32;
 }
 
-Acpi_Root_Pointer :: struct {
+Acpi_RSDP__Root_System_Description_Pointer :: struct {
     signature: [8] u8;
     checksum: u8;
     oem_id: [6] u8;
@@ -97,8 +123,6 @@ Acpi_Root_Pointer :: struct {
     checksum_2: u8;
     reserved: [3] u8;
 }
-
-#assert (size_of(Acpi_Root_Pointer) == 36);
 
 Acpi_Table_Header :: struct {
     signature: [4] u8;

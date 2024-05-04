@@ -44,24 +44,25 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             boot_data.x_resolution = gop.Mode.info.HorizontalResolution;
             boot_data.y_resolution = gop.Mode.info.VerticalResolution;
             boot_data.stride = gop.Mode.info.PixelsPerScanLine;
-
-            display(cast(u64) boot_data.framebuffer, "\n\r");
         }
 
         for 0..system_table.NumberOfTableEntries-1 {
             table := system_table.ConfigurationTable[it];
+
             low := << cast(*u64) *table.VendorGuid;
             high := << (cast(*u64) *table.VendorGuid + 1);
-            display("Table guid: ", high, low, "\n\r");
 
-            EFI_ACPI_TABLE_GUID :: EFI_GUID.{0x8868e871, 0xe4f1, 0x11d3, .[0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81]};
-            if _memcmp(cast(*u8) *table.VendorGuid, cast(*u8) *EFI_ACPI_TABLE_GUID, size_of(EFI_GUID)) == 0 {
-                display("Found ACPI table\n");
+            acpi_table_guid_low:  u64 = 0x11d3e4f18868e871;
+            acpi_table_guid_high: u64 = 0x81883cc7800022bc;
+
+            if low == acpi_table_guid_low && high == acpi_table_guid_high {
+                magic: string = .{ 8, table.VendorTable };
+                display("Found ACPI table (", magic, ")\n\r");
+
+                boot_data.acpi_rsdp = table.VendorTable;
                 break;
             }
         }
-
-        // while true {}
 
         loaded_image_protocol: *EFI_LOADED_IMAGE_PROTOCOL;
         EFI_CHECK(boot_services.HandleProtocol(loaded_image, *EFI_LOADED_IMAGE_PROTOCOL_GUID, xx *loaded_image_protocol));
@@ -135,7 +136,6 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
             // Translate framebuffer address to virtual
             boot_data.framebuffer = cast(*u32) (0xffff_ffff_8000_0000 + 4*0x20_0000);
-            display(cast(u64) boot_data.framebuffer, "\n\r");
         }
 
         descriptor_size: u64; // Don't assume that memory map entries will match Lil_Uefi's EFI_MEMORY_DESCRIPTOR structure, the Qemu one is larger
@@ -225,7 +225,7 @@ check_efi_status :: (status: EFI_STATUS, loc := #caller_location) {
 
     enum_name := ti.names[index];
 
-    display("Failure on line ", loc.line_number, " with status ", enum_name, "\n\r");
+    display("UEFI call failed on line ", loc.line_number, " with status ", enum_name, "\n\r");
 }
 
 display :: (args: .. Any) {
