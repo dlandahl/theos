@@ -111,7 +111,7 @@ compile_bootloader :: () -> success: bool {
             phase := cast(*Message_Phase) message;
 
             if phase.phase == .READY_FOR_CUSTOM_LINK_COMMAND {
-                link_command := tprint("%/bin/lld-linux -flavor link -subsystem:efi_application -driver -align:16 -base:0x500000 -entry:EfiMain .build/bootloader.o -out:.build/bootx64.efi", JAI_ROOT_DIR);
+                link_command := tprint("%/bin/lld-linux -flavor link -subsystem:efi_application -driver -align:16 -base:0x200000 -entry:EfiMain .build/bootloader.o -out:.build/bootx64.efi", JAI_ROOT_DIR);
                 link_command_array := break_command_into_strings(link_command);
 
                 result := run_command(.. link_command_array);
@@ -153,6 +153,10 @@ compile_kernel :: () -> success: bool {
     compiler_begin_intercept(workspace);
     add_build_file("kernel.jai", workspace);
 
+    command := break_command_into_strings("objdump -x .build/kernel -d -M intel --source");
+    result, stdout := run_command(.. command, capture_and_return_output=true);
+    write_entire_file(".build/kernel.objdump.txt", stdout);
+
     while true {
         message := compiler_wait_for_message();
 
@@ -175,6 +179,7 @@ format_disk :: () -> success: bool {
         "mmd -i fat.img ::/EFI/BOOT",
         "mcopy -i fat.img .build/bootx64.efi ::/EFI/BOOT",
         "mcopy -i fat.img .build/kernel ::",
+        "mcopy -i fat.img startup.nsh ::",
 
         "cp fat.img disk_image.img",
         "mv fat.img .build/iso",

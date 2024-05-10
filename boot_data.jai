@@ -27,7 +27,7 @@ Boot_Data :: struct {
     y_resolution: u32;
     stride: u32;
 
-    acpi_rsdp: u64;
+    acpi_rsdp: *void;
 }
 
 #program_export

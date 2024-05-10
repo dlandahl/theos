@@ -10,6 +10,17 @@ Framebuffer :: struct {
 
 #add_context framebuffer: Framebuffer;
 
+Page_Mapper :: struct {
+    page_table: [0x200] u64;
+    pages_mapped: int;
+    virtual_base: *void;
+
+    PHYSICAL_POOL : u64 : 0x80_0000;
+    physical_pool_pages_used: u64;
+}
+
+page_mapper: Page_Mapper #align 4096;
+
 #program_export
 kernel_entry :: () #no_context {
     boot_data := cast(*Boot_Data) 0x10_0000;
@@ -20,33 +31,43 @@ kernel_entry :: () #no_context {
     c.framebuffer.y_resolution = boot_data.y_resolution;
     c.framebuffer.stride = boot_data.stride;
 
+
+    pm := *page_mapper;
+    page_table_physical_address := (cast(u64) pm.page_table.data - 0xffff_ffff_8000_0000) + Boot_Data.KERNEL_PHYS_BASE;
+
+    boot_data.page_tables.pd[boot_data.page_directories_used] = page_table_physical_address | PAGE_PRESENT | PAGE_READ_WRITE;
+    pm.virtual_base = cast(*void) 0xffff_ffff_8000_0000 + boot_data.page_directories_used*0x20_0000;
+
+    c.allocator.proc = allocator_proc;
+
+
     push_context c {
         fb := context.framebuffer;
 
         for y: 0..fb.y_resolution-1 {
-            red := cast(int) (0xff * ((1.0 / fb.y_resolution) * y));
+            red := cast(int) (0xff * (1.0 / fb.y_resolution) * y);
 
             for x: 0..fb.x_resolution-1 {
-                green := cast(int) (0xff * ((1.0 / fb.x_resolution) * x));
-
+                green := cast(int) (0xff * (1.0 / fb.x_resolution) * x);
                 fb.buffer[x + y * fb.stride] = cast(u32) ((red << 16) | (green << 8));
             }
         }
 
-        {
-            page_table_physical_address := (cast(u64) page_table.data - 0xffff_ffff_8000_0000) + Boot_Data.KERNEL_PHYS_BASE;
+        rsdp := cast(*Acpi_RSDP__Root_System_Description_Pointer) boot_data.acpi_rsdp;
 
-            serial_int(cast(u64) page_table.data);
-            serial_int(cast(u64) page_table_physical_address); 
+        magic_match := true; // cast(string) rsdp.signature == "RSD PTR ";
 
-            boot_data.page_tables.pd[boot_data.page_directories_used] = page_table_physical_address | PAGE_PRESENT | PAGE_READ_WRITE;
-            virtual_base = cast(*void) 0xffff_ffff_8000_0000 + boot_data.page_directories_used*0x20_0000;
+        phys := cast(u64) rsdp.rsdt_address;
+        if rsdp.revision >= 2  phys = rsdp.xsdt_address;
+
+        offset_in_page := phys % 0x1000;
+        virt := map_pages(4, phys);
+
+        rsdt: *Acpi_Table_Header = virt + offset_in_page;
+
+        if (!magic_match || rsdp.revision < 2) {
+            bluescreen();
         }
-
-        
-
-        // fb_size := fb.y_resolution * fb.stride;
-        // c.framebuffer.buffer = cast(*u32) map_pages(fb_size / 4096 + 1, cast(u64) fb.buffer);
     }
 
     #asm { cli; hlt; }
@@ -62,11 +83,12 @@ bluescreen :: () {
     #asm { cli; hlt; }
 }
 
-pages_mapped: int;
-page_table: [0x200] u64 #align 4096;
-virtual_base: *void;
+USE_POOL :: cast,no_check(u64) -1;
+map_pages :: (count: int, _physical_base: u64) -> *void {
+    using page_mapper;
 
-map_pages :: (count: int, physical_base: u64) -> *void {
+    physical_base := ifx _physical_base == USE_POOL then (PHYSICAL_POOL + physical_pool_pages_used * 4096) else _physical_base;
+
     for 0..count-1 {
         physical_address := physical_base + 4096 * cast(u64) it;
         page_table[pages_mapped] = physical_address | PAGE_PRESENT | PAGE_READ_WRITE;
@@ -77,7 +99,21 @@ map_pages :: (count: int, physical_base: u64) -> *void {
         }
     }
 
+    if _physical_base == USE_POOL {
+        physical_pool_pages_used += xx count;
+    }
     return virtual_base + (pages_mapped - count) * 4096;
+}
+
+allocator_proc :: (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
+    if mode != .ALLOCATE && mode != .RESIZE return null;
+
+    new := map_pages(size / 4096 + 1, USE_POOL);
+    if old_memory != null {
+        memcpy(new, old_memory, old_size);
+    }
+
+    return new;
 }
 
 serial_string :: (message: string) {
@@ -105,12 +141,6 @@ serial_int :: (value: u64) {
     serial_string("\n");
 }
 
-Madt_Acpi_Table :: struct {
-    #as header: Acpi_Table_Header;
-    local_apic_address: u32;
-    flags: u32;
-}
-
 Acpi_RSDP__Root_System_Description_Pointer :: struct {
     signature: [8] u8;
     checksum: u8;
@@ -136,26 +166,19 @@ Acpi_Table_Header :: struct {
     creator_revision: u32;
 } #no_padding
 
-Acpi_Fixed_Description_Table :: struct {
+Acpi_MADT__Multiple_Apic_Description_Table :: struct {
+    #as header: Acpi_Table_Header;
+    local_apic_address: u32;
+    flags: u32;
+}
+
+Acpi_FADT__Fixed_Description_Table :: struct {
     #as header: Acpi_Table_Header;
     firmware_ctrl: u32;
     dsdt_address: u32;
 
-    // Does not handle 64bit dsdt address
+    // Todo: doesn't handle 64bit dsdt address
     // https://uefi.org/htmlspecs/ACPI_Spec_6_4_html/05_ACPI_Software_Programming_Model/ACPI_Software_Programming_Model.html?highlight=dsdt#fadt-format
-}
-
-X64_Flags :: enum_flags u64 {
-    CF__carry  :: 0x1;
-    PF__parity :: 0x4;
-    AF__adjust :: 0x10;
-    ZF__zero   :: 0x40;
-    SF__sign   :: 0x80;
-    TF__trap   :: 0x100;
-    IF__interrupt :: 0x200;
-    DF__direction :: 0x400;
-    OF__overflow  :: 0x800;
-    RF__resume    :: 0x10000;
 }
 
 #program_export __libc_start_main :: () {}
