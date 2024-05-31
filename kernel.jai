@@ -40,7 +40,6 @@ kernel_entry :: () #no_context {
 
     c.allocator.proc = allocator_proc;
 
-
     push_context c {
         fb := context.framebuffer;
 
@@ -53,9 +52,16 @@ kernel_entry :: () #no_context {
             }
         }
 
-        rsdp := cast(*Acpi_RSDP__Root_System_Description_Pointer) boot_data.acpi_rsdp;
+        acpi_memory_type_id :: 9;
+        for 0..boot_data.memory_map_entries_used-1 {
+            entry := boot_data.memory_map[it];
 
-        magic_match := true; // cast(string) rsdp.signature == "RSD PTR ";
+            if entry.type == acpi_memory_type_id {
+                map_pages(entry.pages, entry.address);
+            }
+        }
+
+        rsdp := cast(*Acpi_RSDP__Root_System_Description_Pointer) boot_data.acpi_rsdp;
 
         phys := cast(u64) rsdp.rsdt_address;
         if rsdp.revision >= 2  phys = rsdp.xsdt_address;
@@ -65,7 +71,7 @@ kernel_entry :: () #no_context {
 
         rsdt: *Acpi_Table_Header = virt + offset_in_page;
 
-        if (!magic_match || rsdp.revision < 2) {
+        if rsdp.revision < 2 {
             bluescreen();
         }
     }
@@ -182,3 +188,14 @@ Acpi_FADT__Fixed_Description_Table :: struct {
 }
 
 #program_export __libc_start_main :: () {}
+
+
+
+Page :: struct {
+    buddy_next: int; // Index into `pages`. Unused if this is not the first page in a buddy allocator block.
+    ref_count: int;
+}
+
+Buddy_Allocator :: struct {
+    free_blocks: [] int;
+}

@@ -20,7 +20,7 @@ Boot_Data :: struct {
     kernel_load_buffer: [0x10_0000] u8;
 
     page_directories_used: int;
-    KERNEL_PHYS_BASE :: 0x100_0000; // Random choice, don't know if it's a good place
+    KERNEL_PHYS_BASE :: 0x100_0000; // Random choice, really this needs to be dynamically chosen to avoid writing over firmware stuff
 
     framebuffer: *u32;
     x_resolution: u32;
@@ -28,6 +28,14 @@ Boot_Data :: struct {
     stride: u32;
 
     acpi_rsdp: *void;
+
+    memory_map: [100] struct {
+        address: u64;
+        pages: u64;
+        type: u32;
+    };
+
+    memory_map_entries_used: int;
 }
 
 #program_export

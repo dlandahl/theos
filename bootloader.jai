@@ -64,15 +64,12 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             }
         }
 
-        display("Got this far 1\n\r");
         loaded_image_protocol: *EFI_LOADED_IMAGE_PROTOCOL;
         EFI_CHECK(boot_services.HandleProtocol(loaded_image, *EFI_LOADED_IMAGE_PROTOCOL_GUID, xx *loaded_image_protocol));
 
-        display("Got this far 2\n\r");
         file_system: *EFI_SIMPLE_FILE_SYSTEM_PROTOCOL;
         EFI_CHECK(boot_services.HandleProtocol(loaded_image_protocol.DeviceHandle, xx *EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID, xx *file_system));
 
-        display("Got this far 3\n\r");
         boot_volume: *EFI_FILE_PROTOCOL;
         EFI_CHECK(file_system.OpenVolume(file_system, *boot_volume));
 
@@ -80,7 +77,6 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         file_name := cast(*u16) "k\0e\0r\0n\0e\0l\0\0\0".data;
 
 
-        display("Got this far 4\n\r");
         open_file_flags := EFI_FILE_ATTRIBUTES.READ_ONLY | .HIDDEN | .SYSTEM;
         EFI_CHECK(boot_volume.Open(boot_volume, xx *kernel_file, file_name, .Read, open_file_flags));
 
@@ -92,16 +88,13 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         file_info: Efi_File_Info;
         info_size := size_of(Efi_File_Info);
 
-        display("Got this far 5\n\r");
         EFI_CHECK(boot_volume.GetInfo(boot_volume, *EFI_FILE_INFO_GUID, xx *info_size, *file_info));
 
-        display("Got this far 6\n\r");
         size: u64 = 0x10_0000; // file_info.FileSize; // For some reason FileSize is zero, even though boot_volume.GetInfo claims to have returned a valid File_Info
         EFI_CHECK(kernel_file.Read(kernel_file, *size, cast(*void) boot_data.kernel_load_buffer.data));
 
         elf := boot_data.kernel_load_buffer.data;
         elf_header := cast(*Elf64_Ehdr) elf;
-        display("Got this far 6.5\n\r");
 
 
         for 0..size_of(Page_Tables)-1 {
@@ -144,10 +137,11 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             boot_data.framebuffer = cast(*u32) (0xffff_ffff_8000_0000 + 4*0x20_0000);
         }
 
+        // === Firmware Physical Memory Map ===
+
         descriptor_size: u64; // Don't assume that memory map entries will match Lil_Uefi's EFI_MEMORY_DESCRIPTOR structure, the OVMF.fd one is larger
         mmap_size: u64;
 
-        display("Got this far 7\n\r");
         boot_services.GetMemoryMap(*mmap_size, null, null, *descriptor_size, null); // Get the size, don't EFI_CHECK because return status will be BufferTooSmall
 
         mmap_size += 16 * descriptor_size;
@@ -155,23 +149,20 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         mmap_key: EFI_UINTN;
 
-        display("Got this far 8\n\r");
         EFI_CHECK(boot_services.AllocatePool(.EfiLoaderData, mmap_size, cast(**void) *memory_map));
         EFI_CHECK(boot_services.GetMemoryMap(*mmap_size, xx memory_map, *mmap_key, null, null));
 
-        count := mmap_size / descriptor_size;
+        entry_count := mmap_size / descriptor_size;
         memory_types := type_info(EFI_MEMORY_TYPE);
 
-        if false for 0..count-1 {
+        for 0..entry_count-1 {
             desc := cast(*EFI_MEMORY_DESCRIPTOR) (memory_map + it * descriptor_size);
-            display("\n\rType: ");
 
-            for memory_types.values if desc.Type == it {
-                display(memory_types.names[it_index]);
-                break;
-            }
-
-            display(xx desc.Type);
+            boot_data.memory_map[it] = .{
+                address = desc.PhysicalStart,
+                pages   = desc.NumberOfPages,
+                type    = desc.Type,
+            };
         }
 
         EFI_CHECK(boot_services.ExitBootServices(loaded_image, mmap_key));

@@ -11,6 +11,7 @@
     #import "Windows_Utf8";
     #import "Windows";
     #import,dir "modules/Wsl";
+    #import,dir "modules/VirtualBox";
 }
 
 JAI_ROOT_DIR    :: "/mnt/c/jai";
@@ -22,6 +23,7 @@ main :: () {
     set_build_options_dc(.{ do_output = false });
 
     #if OS == .WINDOWS {
+
         log("You are on Windows, but this build program works only on Linux. Attempting to automatically relaunch in WSL");
 
         stdin  := GetStdHandle(STD_INPUT_HANDLE);
@@ -215,7 +217,7 @@ format_disk :: () -> success: bool {
 
 
 
-
+// Failed/WIP attempt to manually format the boot disk FAT
 
 format_fat :: () {
     block_count := 128;
@@ -374,4 +376,74 @@ guid_string_to_binary :: ($$ in: string) -> [16] u8 {
     } else {
         return implementation(in);
     }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#if false {
+    // Failed/WIP VirtualBox SDK attempt
+        load_virtualbox_api_pointers();
+        print("Version: %\n", virtualbox_api.GetAPIVersion());
+
+        client: *IVirtualBoxClient;
+        virtualbox_api.ClientInitialize(null, *client);
+        print("Client: %\n", client);
+
+
+
+        virtualbox: *IVirtualBox;
+        result := client.GetVirtualBox(client, *virtualbox);
+        print("VirtualBox: % nsresult: %\n", virtualbox, result);
+
+        ex: *IErrorInfo;
+        virtualbox_api.GetException(*ex);
+
+        ei: *IVirtualBoxErrorInfo;
+        ex.QueryInterface(ex, *IID_IVirtualBoxErrorInfo, cast(**void) *ei);
+
+        text: *u16;
+        ei.GetText(ei, *text);
+
+        while true {
+            a: string;
+            a.count = 1;
+            if text {
+                a.data = cast(*u8) text;
+                text += 1;
+                print("%", a);
+            }
+        }
+        print("\n");
+
+        session: *ISession;
+        result = client.GetSession(client, *session);
+        print("session: % nsresult: %\n", session, result);
+
+        client.Release(client);
+        virtualbox_api.ClientUninitialize();
+        return;
+
+
+
+
+
+        // machines: **IMachine;
+        // count: u32 = 10;
+        // virtualbox.GetMachines(virtualbox, *count, *machines);
+        // print("Machine count = %\n", count);
+
+        // session: *ISession;
+        // client.GetSession(client, *session);
 }
