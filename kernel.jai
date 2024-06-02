@@ -1,5 +1,6 @@
 
 #load "boot_data.jai";
+#import,file "bootloader_modules/Lil_Uefi.jai";
 
 Framebuffer :: struct {
     buffer: *u32;
@@ -53,6 +54,8 @@ kernel_entry :: () #no_context {
         }
 
         acpi_memory_type_id :: 9;
+        buddy: Buddy_Allocator;
+        buddy_buffer: [500] u8;
 
         for 0..boot_data.memory_map_entries_used-1 {
             entry := boot_data.memory_map[it];
@@ -74,7 +77,16 @@ kernel_entry :: () #no_context {
             serial_out(enum_name);
             serial_out(": ");
             serial_write_int(entry.pages);
-            serial_out("\n");
+
+            if entry.type == .EfiConventionalMemory && entry.pages >= 0x1000 {
+                buddy = make_buddy(entry.address, 0x1000 * 4096, buddy_buffer.data);
+                break;
+            }
+
+            if it == boot_data.memory_map_entries_used-1 {
+                serial_out("Not enough usable contiguous physical memory found\n");
+                bluescreen();
+            }
         }
 
         rsdp := cast(*Acpi_RSDP__Root_System_Description_Pointer) boot_data.acpi_rsdp;
@@ -90,29 +102,9 @@ kernel_entry :: () #no_context {
         // if rsdp.revision < 2 {
         //     bluescreen();
         // }
-
-        // buddy := make_buddy ::
     }
 
     #asm { cli; hlt; }
-}
-EFI_MEMORY_TYPE :: enum s32 {
-    EfiReservedMemoryType      :: 0;
-    EfiLoaderCode              :: 1;
-    EfiLoaderData              :: 2;
-    EfiBootServicesCode        :: 3;
-    EfiBootServicesData        :: 4;
-    EfiRuntimeServicesCode     :: 5;
-    EfiRuntimeServicesData     :: 6;
-    EfiConventionalMemory      :: 7;
-    EfiUnusableMemory          :: 8;
-    EfiACPIReclaimMemory       :: 9;
-    EfiACPIMemoryNVS           :: 10;
-    EfiMemoryMappedIO          :: 11;
-    EfiMemoryMappedIOPortSpace :: 12;
-    EfiPalCode                 :: 13;
-    EfiPersistentMemory        :: 14;
-    EfiMaxMemoryType           :: 15;
 }
 
 bluescreen :: () {

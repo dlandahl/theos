@@ -16,6 +16,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
     push_context c {
         boot_services := system_table.BootServices;
 
+        // Might need to be chosen dynamically in the future, if on some firmwares this memory is not free to use.
         boot_data_address: u64 = 0x10_0000;
         boot_data := cast(*Boot_Data) boot_data_address;
 
@@ -112,14 +113,14 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             boot_pd[2] = 0x40_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             boot_pd[3] = 0x60_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
 
-            // Where Qemu UEFI seems to put the stack of this program
+            // UEFI seems to put the stack at the top of physical memory. For now assume that the machine has 128Mb
             index: u64;
             for< 64..55 {
                 boot_pd[it] = (0x800_0000 - index*0x20_0000) | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
                 index += 1;
             }
 
-            // Higher-half memory for the kernel
+            // 8Mb higher-half memory for the kernel.
             pml4[0x1ff] = cast(u64) pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
             pdpt[0x1fe] = cast(u64) pd.data   | PAGE_PRESENT | PAGE_READ_WRITE;
 
@@ -138,10 +139,16 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             boot_data.framebuffer = cast(*u32) (0xffff_ffff_8000_0000 + 4*0x20_0000);
         }
 
-        // stack: int;
-        // display("Stack: ", cast(u64) *stack, "\n\r");
-        // while true {}
-        
+        // Memory regions that we want to mark as reserved in the kernel's physical memory management, but which will not show up in the UEFI memory map because they're only in the post-bootservices mapping, or which would be LoaderData/Code memory types that the kernel assumes it can overwrite.
+        // This is later coalesced with what UEFI reports as reserved and given to the kernel.
+        manually_reserved_memory_regions = Memory_Region.{
+            // Boot_Data struct
+            .{ address = boot_data_address, pages = size_of(Boot_Data)/4096 + 1 },
+
+            // Kernel binary
+            .{ address = KERNEL_PHYS_BASE, pages = 0x80_0000/4096 },
+        };
+
         // === Firmware Physical Memory Map ===
 
         descriptor_size: u64; // Don't assume that memory map entries will match Lil_Uefi's EFI_MEMORY_DESCRIPTOR structure, the OVMF.fd one is larger
@@ -160,8 +167,11 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         entry_count := mmap_size / descriptor_size;
         memory_types := type_info(EFI_MEMORY_TYPE);
 
+ 
+        last_usability
         for 0..entry_count-1 {
             desc := cast(*EFI_MEMORY_DESCRIPTOR) (memory_map + it * descriptor_size);
+            
 
             boot_data.memory_map[it] = .{
                 address = desc.PhysicalStart,

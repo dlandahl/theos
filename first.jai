@@ -14,8 +14,8 @@
     #import,dir "modules/VirtualBox";
 }
 
-// JAI_ROOT_DIR    :: "/home/dlandahl/jai";
-JAI_ROOT_DIR    :: "/mnt/c/jai";
+JAI_ROOT_DIR    :: "/home/dlandahl/jai";
+// JAI_ROOT_DIR    :: "/mnt/c/jai";
 
 WSL_DISTRO_NAME :: "Ubuntu";
 

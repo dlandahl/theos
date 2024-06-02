@@ -29,12 +29,18 @@ Boot_Data :: struct {
 
     acpi_rsdp: *void;
 
-    memory_map: [30] struct {
-        address: u64;
-        pages: u64;
-        type: u32;
+    Memory_Usability :: enum {
+        RESERVED;
+        USABLE;
     };
 
+    Memory_Region :: struct {
+        address: u64;
+        pages: u64;
+        usability: Memory_Usability;
+    };
+
+    memory_map: [100] Memory_Region;
     memory_map_entries_used: int;
 }
 
