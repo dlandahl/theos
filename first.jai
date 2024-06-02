@@ -14,7 +14,12 @@
     #import,dir "modules/VirtualBox";
 }
 
-JAI_ROOT_DIR    :: "/mnt/c/jai";
+#if OS == .WINDOWS {
+    JAI_ROOT_DIR    :: "/mnt/c/jai";
+} else {
+    JAI_ROOT_DIR    :: "/home/dlandahl/jai";
+}
+
 WSL_DISTRO_NAME :: "Ubuntu";
 
 #run main();
@@ -99,6 +104,8 @@ compile_bootloader :: () -> success: bool {
     compiler_begin_intercept(workspace);
     add_build_file("bootloader.jai", workspace);
 
+    success: bool;
+
     while true {
         message := compiler_wait_for_message();
 
@@ -107,11 +114,11 @@ compile_bootloader :: () -> success: bool {
             compiler_end_intercept(workspace);
 
             complete := cast(*Message_Complete) message;
-            return complete.error_code == .NONE;
+            success = complete.error_code == .NONE;
+            break;
 
           case .PHASE;
             phase := cast(*Message_Phase) message;
-
             if phase.phase == .READY_FOR_CUSTOM_LINK_COMMAND {
                 link_command := tprint("%/bin/lld-linux -flavor link -subsystem:efi_application -driver -align:16 -base:0x200000 -entry:EfiMain .build/bootloader.o -out:.build/bootx64.efi", JAI_ROOT_DIR);
                 link_command_array := break_command_into_strings(link_command);
@@ -126,7 +133,13 @@ compile_bootloader :: () -> success: bool {
         }
     }
 
-    return false;
+    if success {
+        command := break_command_into_strings("objdump -x .build/bootx64.efi -d -M intel --source");
+        result, stdout := run_command(.. command, capture_and_return_output=true);
+        write_entire_file(".build/bootloader.objdump.txt", stdout);
+    }
+
+    return success;
 }
 
 compile_kernel :: () -> success: bool {
@@ -155,9 +168,7 @@ compile_kernel :: () -> success: bool {
     compiler_begin_intercept(workspace);
     add_build_file("kernel.jai", workspace);
 
-    command := break_command_into_strings("objdump -x .build/kernel -d -M intel --source");
-    result, stdout := run_command(.. command, capture_and_return_output=true);
-    write_entire_file(".build/kernel.objdump.txt", stdout);
+    success: bool;
 
     while true {
         message := compiler_wait_for_message();
@@ -165,11 +176,18 @@ compile_kernel :: () -> success: bool {
         if message.kind == .COMPLETE {
             complete := cast(*Message_Complete) message;
 
-            return complete.error_code == .NONE;
+            success = complete.error_code == .NONE;
+            break;
         }
     }
 
-    return false;
+    if success {
+        command := break_command_into_strings("objdump -x .build/kernel -d -M intel --source");
+        result, stdout := run_command(.. command, capture_and_return_output=true);
+        write_entire_file(".build/kernel.objdump.txt", stdout);
+    }
+
+    return success;
 }
 
 format_disk :: () -> success: bool {

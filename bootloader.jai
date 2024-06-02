@@ -64,6 +64,8 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             }
         }
 
+        display("Boot data size: ", size_of(Boot_Data), "\n\r");
+
         loaded_image_protocol: *EFI_LOADED_IMAGE_PROTOCOL;
         EFI_CHECK(boot_services.HandleProtocol(loaded_image, *EFI_LOADED_IMAGE_PROTOCOL_GUID, xx *loaded_image_protocol));
 
@@ -90,11 +92,8 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         EFI_CHECK(boot_volume.GetInfo(boot_volume, *EFI_FILE_INFO_GUID, xx *info_size, *file_info));
 
-        size: u64 = 0x10_0000; // file_info.FileSize; // For some reason FileSize is zero, even though boot_volume.GetInfo claims to have returned a valid File_Info
+        size: u64 = boot_data.kernel_load_buffer.count; // file_info.FileSize; // For some reason FileSize is zero, even though boot_volume.GetInfo claims to have returned a valid File_Info
         EFI_CHECK(kernel_file.Read(kernel_file, *size, cast(*void) boot_data.kernel_load_buffer.data));
-
-        elf := boot_data.kernel_load_buffer.data;
-        elf_header := cast(*Elf64_Ehdr) elf;
 
 
         for 0..size_of(Page_Tables)-1 {
@@ -114,8 +113,10 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             boot_pd[3] = 0x60_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
 
             // Where Qemu UEFI seems to put the stack of this program
-            for 64..55 {
-                boot_pd[it] = (0x800_0000 - cast(u64) it*0x20_0000) | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            index: u64;
+            for< 64..55 {
+                boot_pd[it] = (0x800_0000 - index*0x20_0000) | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+                index += 1;
             }
 
             // Higher-half memory for the kernel
@@ -137,6 +138,10 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             boot_data.framebuffer = cast(*u32) (0xffff_ffff_8000_0000 + 4*0x20_0000);
         }
 
+        // stack: int;
+        // display("Stack: ", cast(u64) *stack, "\n\r");
+        // while true {}
+        
         // === Firmware Physical Memory Map ===
 
         descriptor_size: u64; // Don't assume that memory map entries will match Lil_Uefi's EFI_MEMORY_DESCRIPTOR structure, the OVMF.fd one is larger
@@ -164,6 +169,8 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
                 type    = desc.Type,
             };
         }
+
+        boot_data.memory_map_entries_used = xx entry_count;
 
         EFI_CHECK(boot_services.ExitBootServices(loaded_image, mmap_key));
 
@@ -197,7 +204,6 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
                     start := program_header.p_vaddr + program_header.p_filesz;
                     count := program_header.p_memsz - program_header.p_filesz;
                     memset(cast(*void) start, 0, cast(s64) count);
-
                 }
             }
 

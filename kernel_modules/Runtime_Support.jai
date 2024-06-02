@@ -31,15 +31,18 @@ write_number :: (n: s64, base := 10, to_standard_error := false) #no_context #no
 }
 
 runtime_support_assertion_failed :: (loc: Source_Code_Location, message: string) -> bool {
+    return false;
 }
 
 runtime_support_default_logger :: (message: string, data: *void, info: Log_Info) {
 }
 
 c_style_strlen :: (str: *u8) -> s64 #no_context {
+    return 0;
 }
 
 to_string :: (c_string: *u8) -> string #no_context {
+    return "";
 }
 
 // @Incomplete: Pass loc to Runtime_Support versions.

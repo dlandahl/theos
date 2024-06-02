@@ -5,7 +5,14 @@
 #run {
     set_build_options_dc(.{ do_output = false });
 
-    command := break_command_into_strings("qemu-system-x86_64 -bios OVMF.fd -drive format=raw,file=disk_image.img -chardev stdio,id=char0,logfile=qemu_serial.txt,signal=off -serial chardev:char0");
+    command := break_command_into_strings(#string QEMU_CMD
+        qemu-system-x86_64
+            -bios OVMF.fd
+            -drive format=raw,file=disk_image.img
+            -chardev stdio,id=char0,logfile=qemu_serial.txt,signal=off
+            -serial chardev:char0
+            -m 128M 
+    QEMU_CMD);
     run_command(.. command);
 }
 

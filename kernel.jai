@@ -53,12 +53,28 @@ kernel_entry :: () #no_context {
         }
 
         acpi_memory_type_id :: 9;
+
         for 0..boot_data.memory_map_entries_used-1 {
             entry := boot_data.memory_map[it];
 
-            if entry.type == acpi_memory_type_id {
-                map_pages(entry.pages, entry.address);
+            // if entry.type == acpi_memory_type_id {
+            //     map_pages(xx entry.pages, entry.address);
+            // }
+
+            ti := type_info(EFI_MEMORY_TYPE);
+            index: int = 1;
+
+            for ti.values if it == cast(int) entry.type {
+                index = it_index;
+                break;
             }
+
+            enum_name := ti.names[index];
+
+            serial_out(enum_name);
+            serial_out(": ");
+            serial_write_int(entry.pages);
+            serial_out("\n");
         }
 
         rsdp := cast(*Acpi_RSDP__Root_System_Description_Pointer) boot_data.acpi_rsdp;
@@ -66,17 +82,37 @@ kernel_entry :: () #no_context {
         phys := cast(u64) rsdp.rsdt_address;
         if rsdp.revision >= 2  phys = rsdp.xsdt_address;
 
-        offset_in_page := phys % 0x1000;
+        offset_in_page := phys % 4096;
         virt := map_pages(4, phys);
 
         rsdt: *Acpi_Table_Header = virt + offset_in_page;
 
-        if rsdp.revision < 2 {
-            bluescreen();
-        }
+        // if rsdp.revision < 2 {
+        //     bluescreen();
+        // }
+
+        // buddy := make_buddy ::
     }
 
     #asm { cli; hlt; }
+}
+EFI_MEMORY_TYPE :: enum s32 {
+    EfiReservedMemoryType      :: 0;
+    EfiLoaderCode              :: 1;
+    EfiLoaderData              :: 2;
+    EfiBootServicesCode        :: 3;
+    EfiBootServicesData        :: 4;
+    EfiRuntimeServicesCode     :: 5;
+    EfiRuntimeServicesData     :: 6;
+    EfiConventionalMemory      :: 7;
+    EfiUnusableMemory          :: 8;
+    EfiACPIReclaimMemory       :: 9;
+    EfiACPIMemoryNVS           :: 10;
+    EfiMemoryMappedIO          :: 11;
+    EfiMemoryMappedIOPortSpace :: 12;
+    EfiPalCode                 :: 13;
+    EfiPersistentMemory        :: 14;
+    EfiMaxMemoryType           :: 15;
 }
 
 bluescreen :: () {
@@ -122,8 +158,8 @@ allocator_proc :: (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *
     return new;
 }
 
-serial_string :: (message: string) {
-    for cast([] u8) message {
+serial_out :: (data: string) {
+    for cast([] u8) data {
         byte := it;
         port := 0x3f8;
 
@@ -135,7 +171,7 @@ serial_string :: (message: string) {
     }
 }
 
-serial_int :: (value: u64) {
+serial_write_int :: (value: u64) {
     hex_chars := "0123456789abcdef";
     result: [16] u8;
 
@@ -143,8 +179,8 @@ serial_int :: (value: u64) {
         result[it] = hex_chars[(value >> (60 - it * 4)) & 0xF];
     }
 
-    serial_string(cast(string) result);
-    serial_string("\n");
+    serial_out(cast(string) result);
+    serial_out("\n");
 }
 
 Acpi_RSDP__Root_System_Description_Pointer :: struct {
@@ -192,10 +228,81 @@ Acpi_FADT__Fixed_Description_Table :: struct {
 
 
 Page :: struct {
-    buddy_next: int; // Index into `pages`. Unused if this is not the first page in a buddy allocator block.
     ref_count: int;
 }
 
+#import "Bit_Array";
+#import "Bit_Operations";
+
 Buddy_Allocator :: struct {
-    free_blocks: [] int;
+    freelists: [] int;
+    FREELIST_TERMINATOR :: -1;
+    bitmap: Bit_Array;
+
+    base_address: u64;
+}
+
+make_buddy :: (base: u64, size: s64, buffer: *void) -> Buddy_Allocator {
+    using buddy: Buddy_Allocator;
+    // For now assumes the smallest block size is a page
+
+    // Todo: assert base address is page aligned, size is 2^x, buffer is big enough
+    cursor := buffer;
+    levels := bit_scan_reverse(size) - 13;
+
+    freelists.data = cursor;
+    freelists.count = levels;
+    cursor += freelists.count * size_of(int);
+
+    bitmap.count = 2 * (size / 4096);
+    bitmap_slots := (bitmap.count + 63) >> 6;
+    bitmap.slots.count = bitmap_slots;
+    bitmap.slots.data = cursor;
+    cursor += bitmap.slots.count * size_of(int);
+
+    memset(buffer, 0, xx (cursor - buffer));
+    for *freelists {
+        it.* = Buddy_Allocator.FREELIST_TERMINATOR;
+    }
+
+    base_address = base;
+    return buddy;
+}
+
+buddy_alloc :: (buddy: *Buddy_Allocator, bytes: int) -> u64 {
+
+    level := bit_scan_reverse(bytes) - 13 + 1;
+
+    b0 :=      (1 << level) - 1;
+    b1 := b0 + (1 << level) - 1;
+
+    address: u64;
+
+    for bit: b0..b1 {
+        if buddy.bitmap[bit] continue; // Find a block that's not already allocated
+
+        parent := bit;
+        for level-1..0 {
+            // Set all the parent bits
+            if buddy.bitmap[parent] break;
+
+            set_bit(*buddy.bitmap, parent);
+            parent = (parent - 1) / 2;
+        }
+
+        recursively_set_children :: (buddy: *Buddy_Allocator, bit: int) {
+            left_child := bit * 2 + 1;
+
+            if left_child < buddy.freelists.count {
+                recursively_set_children(buddy, left_child);
+                recursively_set_children(buddy, left_child + 1);
+
+                set_bit(*buddy.bitmap, bit);
+            }
+        }
+
+        recursively_set_children(buddy, bit);
+
+        break;
+    }
 }

@@ -17,7 +17,7 @@ PAGE_SIZE       : u64 : 0x80;
 Boot_Data :: struct {
     page_tables: Page_Tables;
 
-    kernel_load_buffer: [0x10_0000] u8;
+    kernel_load_buffer: [0x5_0000] u8;
 
     page_directories_used: int;
     KERNEL_PHYS_BASE :: 0x100_0000; // Random choice, really this needs to be dynamically chosen to avoid writing over firmware stuff
@@ -29,7 +29,7 @@ Boot_Data :: struct {
 
     acpi_rsdp: *void;
 
-    memory_map: [100] struct {
+    memory_map: [30] struct {
         address: u64;
         pages: u64;
         type: u32;
