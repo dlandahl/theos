@@ -14,11 +14,8 @@
     #import,dir "modules/VirtualBox";
 }
 
-#if OS == .WINDOWS {
-    JAI_ROOT_DIR    :: "/mnt/c/jai";
-} else {
-    JAI_ROOT_DIR    :: "/home/dlandahl/jai";
-}
+// JAI_ROOT_DIR    :: "/home/dlandahl/jai";
+JAI_ROOT_DIR    :: "/mnt/c/jai";
 
 WSL_DISTRO_NAME :: "Ubuntu";
 
