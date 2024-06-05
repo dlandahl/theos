@@ -84,7 +84,7 @@ kernel_entry :: () #no_context {
             }
 
             if it == boot_data.memory_map_entries_used-1 {
-                serial_out("Not enough usable contiguous physical memory found\n");
+                serial_out("Not enough usable contiguous physical memory found.\n");
                 bluescreen();
             }
         }

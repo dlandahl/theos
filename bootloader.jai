@@ -141,7 +141,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         // Memory regions that we want to mark as reserved in the kernel's physical memory management, but which will not show up in the UEFI memory map because they're only in the post-bootservices mapping, or which would be LoaderData/Code memory types that the kernel assumes it can overwrite.
         // This is later coalesced with what UEFI reports as reserved and given to the kernel.
-        manually_reserved_memory_regions = Memory_Region.{
+        manually_reserved_memory_regions := Boot_Data.Usable_Memory_Region.{
             // Boot_Data struct
             .{ address = boot_data_address, pages = size_of(Boot_Data)/4096 + 1 },
 
@@ -167,20 +167,37 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         entry_count := mmap_size / descriptor_size;
         memory_types := type_info(EFI_MEMORY_TYPE);
 
- 
-        last_usability
+        mmap_used: int;
+        manually_reserved_index: int;
+
         for 0..entry_count-1 {
             desc := cast(*EFI_MEMORY_DESCRIPTOR) (memory_map + it * descriptor_size);
-            
 
-            boot_data.memory_map[it] = .{
-                address = desc.PhysicalStart,
-                pages   = desc.NumberOfPages,
-                type    = desc.Type,
-            };
+            region: Boot_Data.Memory_Region;
+
+            if desc.Type == {
+              case EfiLoaderCode; #through
+              case EfiLoaderData; #through
+              case EfiBootServicesCode; #through
+              case EfiBootServicesData; #through
+              case EfiConventionalMemory;
+
+                region.address = desc.PhysicalStart;
+                region.pages   = desc.NumberOfPages;
+
+                boot_data.memory_map[mmap_used] = region;
+
+                mmap_used += 1;
+            }
         }
 
-        boot_data.memory_map_entries_used = xx entry_count;
+        for manually_reserved_memory_regions {
+            // Remove memory manually marked as reserved from the usable memory map
+
+            for boot_data.memory_map {
+                if 
+            }
+        }
 
         EFI_CHECK(boot_services.ExitBootServices(loaded_image, mmap_key));
 
