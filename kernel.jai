@@ -60,26 +60,14 @@ kernel_entry :: () #no_context {
         for 0..boot_data.memory_map_entries_used-1 {
             entry := boot_data.memory_map[it];
 
-            // if entry.type == acpi_memory_type_id {
-            //     map_pages(xx entry.pages, entry.address);
-            // }
+            serial_out("Free region at ");
+            serial_write_int(entry.address);
+            serial_out("Bytes:\n");
+            serial_write_int(entry.pages * 4096);
 
-            ti := type_info(EFI_MEMORY_TYPE);
-            index: int = 1;
-
-            for ti.values if it == cast(int) entry.type {
-                index = it_index;
-                break;
-            }
-
-            enum_name := ti.names[index];
-
-            serial_out(enum_name);
-            serial_out(": ");
-            serial_write_int(entry.pages);
-
-            if entry.type == .EfiConventionalMemory && entry.pages >= 0x1000 {
+            if entry.pages >= 0x1000 {
                 buddy = make_buddy(entry.address, 0x1000 * 4096, buddy_buffer.data);
+                serial_out("(created buddy)\n");
                 break;
             }
 

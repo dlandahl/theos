@@ -20,7 +20,10 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         boot_data_address: u64 = 0x10_0000;
         boot_data := cast(*Boot_Data) boot_data_address;
 
-        EFI_CHECK(boot_services.AllocatePages(.AllocateAddress, .EfiLoaderData, size_of(Boot_Data) / 4096 + 1, *boot_data_address));
+        // Use this memory type when making allocations that should keep the physical memory reserved in the kernel's physical memory management.
+        UserReservedMemoryType : EFI_MEMORY_TYPE : 0x8000_0000;
+
+        EFI_CHECK(boot_services.AllocatePages(.AllocateAddress, UserReservedMemoryType, size_of(Boot_Data) / 4096 + 1, *boot_data_address));
 
         {
             // Get framebuffer and clear the screen
@@ -129,6 +132,12 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
                 pd[it] = address | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             }
 
+            {
+                // Even though this mapping is not needed while boot-services are still active, we create it in the boot-services memory map anyway, so that it gets reported by GetMemoryMap, and the kernel will know the memory is not available.
+                kernel_base: u64 = Boot_Data.KERNEL_PHYS_BASE;
+                EFI_CHECK(boot_services.AllocatePages(.AllocateAddress, UserReservedMemoryType, 0x10_0000 / 4096, *kernel_base));
+            }
+
             // Map the framebuffer
             pd[4] = cast(u64) boot_data.framebuffer             | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             pd[5] = cast(u64) boot_data.framebuffer + 0x20_0000 | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
@@ -139,17 +148,10 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             boot_data.framebuffer = cast(*u32) (0xffff_ffff_8000_0000 + 4*0x20_0000);
         }
 
-        // Memory regions that we want to mark as reserved in the kernel's physical memory management, but which will not show up in the UEFI memory map because they're only in the post-bootservices mapping, or which would be LoaderData/Code memory types that the kernel assumes it can overwrite.
-        // This is later coalesced with what UEFI reports as reserved and given to the kernel.
-        manually_reserved_memory_regions := Boot_Data.Usable_Memory_Region.{
-            // Boot_Data struct
-            .{ address = boot_data_address, pages = size_of(Boot_Data)/4096 + 1 },
-
-            // Kernel binary
-            .{ address = KERNEL_PHYS_BASE, pages = 0x80_0000/4096 },
-        };
-
         // === Firmware Physical Memory Map ===
+        limit :: (region: Boot_Data.Memory_Region) -> u64 {
+            return region.address + region.pages * 4096;
+        }
 
         descriptor_size: u64; // Don't assume that memory map entries will match Lil_Uefi's EFI_MEMORY_DESCRIPTOR structure, the OVMF.fd one is larger
         mmap_size: u64;
@@ -175,12 +177,12 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
             region: Boot_Data.Memory_Region;
 
-            if desc.Type == {
-              case EfiLoaderCode; #through
-              case EfiLoaderData; #through
-              case EfiBootServicesCode; #through
-              case EfiBootServicesData; #through
-              case EfiConventionalMemory;
+            if cast(EFI_MEMORY_TYPE) desc.Type == {
+              case .EfiLoaderCode; #through;
+              case .EfiLoaderData; #through;
+              case .EfiBootServicesCode; #through;
+              case .EfiBootServicesData; #through;
+              case .EfiConventionalMemory;
 
                 region.address = desc.PhysicalStart;
                 region.pages   = desc.NumberOfPages;
@@ -190,14 +192,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
                 mmap_used += 1;
             }
         }
-
-        for manually_reserved_memory_regions {
-            // Remove memory manually marked as reserved from the usable memory map
-
-            for boot_data.memory_map {
-                if 
-            }
-        }
+        boot_data.memory_map_entries_used = mmap_used;
 
         EFI_CHECK(boot_services.ExitBootServices(loaded_image, mmap_key));
 

@@ -20,7 +20,7 @@ Boot_Data :: struct {
     kernel_load_buffer: [0x5_0000] u8;
 
     page_directories_used: int;
-    KERNEL_PHYS_BASE :: 0x100_0000; // Random choice, really this needs to be dynamically chosen to avoid writing over firmware stuff
+    KERNEL_PHYS_BASE :: 0x600_0000; // Random choice, really this needs to be dynamically chosen to avoid writing over firmware stuff
 
     framebuffer: *u32;
     x_resolution: u32;
@@ -34,6 +34,8 @@ Boot_Data :: struct {
         address: u64;
         pages: u64;
     };
+
+    Memory_Region :: Usable_Memory_Region;
 
     memory_map: [100] Usable_Memory_Region;
     memory_map_entries_used: int;
