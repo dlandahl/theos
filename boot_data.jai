@@ -1,23 +1,20 @@
 
-// Shared between bootloader and kernel
+// Stuff that's shared between bootloader and kernel
 
 Page_Tables :: struct {
     pml4: [0x200] u64;
     pdpt: [0x200] u64;
     pd:   [0x200] u64;
 
+    mirror_pdpt:   [0x200] u64;
+    mirror_pd: [64][0x200] u64;
+
     boot_pdpt: [0x200] u64;
     boot_pd:   [0x200] u64;
 }
 
-PAGE_PRESENT    : u64 : 0x1;
-PAGE_READ_WRITE : u64 : 0x2;
-PAGE_SIZE       : u64 : 0x80;
-
 Boot_Data :: struct {
     page_tables: Page_Tables;
-
-    kernel_load_buffer: [0x5_0000] u8;
 
     page_directories_used: int;
     KERNEL_PHYS_BASE :: 0x600_0000; // Random choice, really this needs to be dynamically chosen to avoid writing over firmware stuff
@@ -39,6 +36,17 @@ Boot_Data :: struct {
 
     memory_map: [100] Usable_Memory_Region;
     memory_map_entries_used: int;
+
+    page_frames: *Page_Frame_Desc;
+}
+
+Page_Frame_Desc :: struct {
+    // We want to keep this thing as small as possible because there's one for each physical memory page in the device
+    freelist: s32;
+    FREELIST_TAIL :: -1;
+
+    // Linux puts information in here that lets you find all page tables that map this page.
+    // https://www.kernel.org/doc/gorman/html/understand/understand006.html#toc27
 }
 
 #program_export

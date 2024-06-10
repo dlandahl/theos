@@ -16,14 +16,21 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
     push_context c {
         boot_services := system_table.BootServices;
 
-        // Might need to be chosen dynamically in the future, if on some firmwares this memory is not free to use.
+        // Pretty sure physical memory at 1Mb is free to use on any firmware. Linux does this.
         boot_data_address: u64 = 0x10_0000;
         boot_data := cast(*Boot_Data) boot_data_address;
 
         // Use this memory type when making allocations that should keep the physical memory reserved in the kernel's physical memory management.
         UserReservedMemoryType : EFI_MEMORY_TYPE : 0x8000_0000;
 
-        EFI_CHECK(boot_services.AllocatePages(.AllocateAddress, UserReservedMemoryType, size_of(Boot_Data) / 4096 + 1, *boot_data_address));
+        {
+            // Even though this mapping is not needed while boot-services are still active, we create it in the boot-services memory map anyway, so that it gets reported by GetMemoryMap, and the kernel will know the memory is not available.
+            kernel_base: u64 = Boot_Data.KERNEL_PHYS_BASE;
+            EFI_CHECK(boot_services.AllocatePages(.AllocateAddress, UserReservedMemoryType, 0x10_0000 / 4096, *kernel_base));
+
+            EFI_CHECK(boot_services.AllocatePages(.AllocateAddress, UserReservedMemoryType, size_of(Boot_Data) / 4096 + 1, *boot_data_address));
+            memset(boot_data, 0, size_of(Boot_Data));
+        }
 
         {
             // Get framebuffer and clear the screen
@@ -51,6 +58,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         }
 
         for 0..system_table.NumberOfTableEntries-1 {
+            // Find root ACPI table
             table := system_table.ConfigurationTable[it];
 
             low := << cast(*u64) *table.VendorGuid;
@@ -70,6 +78,8 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         display("Boot data size: ", size_of(Boot_Data), "\n\r");
 
+        // All this stuff is to load the kernel ELF file from the EFI filesystem
+
         loaded_image_protocol: *EFI_LOADED_IMAGE_PROTOCOL;
         EFI_CHECK(boot_services.HandleProtocol(loaded_image, *EFI_LOADED_IMAGE_PROTOCOL_GUID, xx *loaded_image_protocol));
 
@@ -81,7 +91,6 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         kernel_file: *EFI_FILE_PROTOCOL;
         file_name := cast(*u16) "k\0e\0r\0n\0e\0l\0\0\0".data;
-
 
         open_file_flags := EFI_FILE_ATTRIBUTES.READ_ONLY | .HIDDEN | .SYSTEM;
         EFI_CHECK(boot_volume.Open(boot_volume, xx *kernel_file, file_name, .Read, open_file_flags));
@@ -96,9 +105,9 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         EFI_CHECK(boot_volume.GetInfo(boot_volume, *EFI_FILE_INFO_GUID, xx *info_size, *file_info));
 
-        size: u64 = boot_data.kernel_load_buffer.count; // file_info.FileSize; // For some reason FileSize is zero, even though boot_volume.GetInfo claims to have returned a valid File_Info
-        EFI_CHECK(kernel_file.Read(kernel_file, *size, cast(*void) boot_data.kernel_load_buffer.data));
-
+        size: u64 = 0x5_0000; // file_info.FileSize; // For some reason FileSize is zero, even though boot_volume.GetInfo claims to have returned a valid File_Info
+        load_buffer: [0x5_0000] u8;
+        EFI_CHECK(kernel_file.Read(kernel_file, *size, cast(*void) load_buffer.data));
 
         for 0..size_of(Page_Tables)-1 {
             << (cast(*u8) *boot_data.page_tables + it) = 0;
@@ -106,6 +115,10 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         {
             using boot_data.page_tables;
+
+            PAGE_PRESENT    : u64 : 0x1;
+            PAGE_READ_WRITE : u64 : 0x2;
+            PAGE_SIZE       : u64 : 0x80;
 
             pml4[0]      = cast(u64) boot_pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
             boot_pdpt[0] = cast(u64) boot_pd.data   | PAGE_PRESENT | PAGE_READ_WRITE;
@@ -118,7 +131,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
             // UEFI seems to put the stack at the top of physical memory. For now assume that the machine has 128Mb
             index: u64;
-            for< 64..55 {
+            for< 64..45 {
                 boot_pd[it] = (0x800_0000 - index*0x20_0000) | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
                 index += 1;
             }
@@ -132,10 +145,16 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
                 pd[it] = address | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             }
 
-            {
-                // Even though this mapping is not needed while boot-services are still active, we create it in the boot-services memory map anyway, so that it gets reported by GetMemoryMap, and the kernel will know the memory is not available.
-                kernel_base: u64 = Boot_Data.KERNEL_PHYS_BASE;
-                EFI_CHECK(boot_services.AllocatePages(.AllocateAddress, UserReservedMemoryType, 0x10_0000 / 4096, *kernel_base));
+            // Map all physical memory to the bottom of kernel memory. Hardcoded to support 64Gb for now
+            pml4[0x100] = cast(u64) mirror_pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
+
+            for pd: 0..mirror_pd.count-1 {
+                mirror_pdpt[pd] = cast(u64) mirror_pd[pd].data | PAGE_PRESENT | PAGE_READ_WRITE;
+                
+                for pt: 0..0x1ff {
+                    address := cast(u64) (pd*0x4000_0000 + pt*0x20_0000);
+                    mirror_pd[pd][pt] = address | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+                }
             }
 
             // Map the framebuffer
@@ -148,7 +167,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             boot_data.framebuffer = cast(*u32) (0xffff_ffff_8000_0000 + 4*0x20_0000);
         }
 
-        // === Firmware Physical Memory Map ===
+        // === Firmware physical memory map stuff ===
         limit :: (region: Boot_Data.Memory_Region) -> u64 {
             return region.address + region.pages * 4096;
         }
@@ -158,7 +177,8 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         boot_services.GetMemoryMap(*mmap_size, null, null, *descriptor_size, null); // Get the size, don't EFI_CHECK because return status will be BufferTooSmall
 
-        mmap_size += 16 * descriptor_size;
+        mmap_size += 32 * descriptor_size;
+        max_mmap_size := mmap_size;
         memory_map: *u8;
 
         mmap_key: EFI_UINTN;
@@ -167,15 +187,41 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         EFI_CHECK(boot_services.GetMemoryMap(*mmap_size, xx memory_map, *mmap_key, null, null));
 
         entry_count := mmap_size / descriptor_size;
-        memory_types := type_info(EFI_MEMORY_TYPE);
 
-        mmap_used: int;
-        manually_reserved_index: int;
+        // Find size of physical memory and allocate page frame descriptor array
+        highest_address: u64;
 
         for 0..entry_count-1 {
             desc := cast(*EFI_MEMORY_DESCRIPTOR) (memory_map + it * descriptor_size);
 
             region: Boot_Data.Memory_Region;
+
+            region.address = desc.PhysicalStart;
+            region.pages   = desc.NumberOfPages;
+
+            // These are not guaranteed to be sorted by address, so check each one to find the amount of physical memory.
+            if limit(region) > highest_address {
+                highest_address = limit(region);
+            }
+        }
+
+        page_frame_count := highest_address / 4096;
+        EFI_CHECK(boot_services.AllocatePool(UserReservedMemoryType, size_of(Page_Frame_Desc) * page_frame_count, cast(**void) *boot_data.page_frames));
+
+        mmap_key = 0;
+        mmap_size = max_mmap_size;
+        EFI_CHECK(boot_services.GetMemoryMap(*mmap_size, xx memory_map, *mmap_key, null, null));
+
+        entry_count = mmap_size / descriptor_size;
+        boot_data.memory_map_entries_used = 0;
+
+        for 0..entry_count-1 {
+            desc := cast(*EFI_MEMORY_DESCRIPTOR) (memory_map + it * descriptor_size);
+
+            region: Boot_Data.Memory_Region;
+
+            region.address = desc.PhysicalStart;
+            region.pages   = desc.NumberOfPages;
 
             if cast(EFI_MEMORY_TYPE) desc.Type == {
               case .EfiLoaderCode; #through;
@@ -184,19 +230,25 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
               case .EfiBootServicesData; #through;
               case .EfiConventionalMemory;
 
-                region.address = desc.PhysicalStart;
-                region.pages   = desc.NumberOfPages;
+                bd := boot_data;
 
-                boot_data.memory_map[mmap_used] = region;
+                bd.memory_map[bd.memory_map_entries_used] = region;
+                bd.memory_map_entries_used += 1;
 
-                mmap_used += 1;
+                if bd.memory_map_entries_used == bd.memory_map.count {
+                    break;
+                }
             }
         }
-        boot_data.memory_map_entries_used = mmap_used;
 
-        EFI_CHECK(boot_services.ExitBootServices(loaded_image, mmap_key));
+        while boot_services.ExitBootServices(loaded_image, mmap_key) == .InvalidParameter {
+            // ExitBootServices itself can sometimes change the memory map, in which case you just need to call it again. I don't get why this needs to be done by the user.
+            mmap_key = 0;
+            mmap_size = max_mmap_size;
+            boot_services.GetMemoryMap(*mmap_size, xx memory_map, *mmap_key, null, null);
+        }
 
-        gdt_init();
+        // gdt_init();
 
         cr3 := boot_data.page_tables.pml4.data;
         #asm {
@@ -206,7 +258,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         {
             // Load kernel binary
-            elf := boot_data.kernel_load_buffer.data;
+            elf := load_buffer.data;
             elf_header := cast(*Elf64_Ehdr) elf;
 
             for 0..elf_header.e_phnum-1 {
@@ -242,7 +294,10 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 EFI_CHECK :: check_efi_status;
 
 check_efi_status :: (status: EFI_STATUS, loc := #caller_location) {
-    if status == .Success return;
+    if status == .Success {
+        // display("UEFI call succeeded on line ", loc.line_number, "\n\r");
+        return;
+    }
 
     ti := type_info(EFI_STATUS);
     index: int = 1;
@@ -263,19 +318,19 @@ display :: (args: .. Any) {
     ];
 
     for args {
-        if it.type == cast(*Type_Info) string {
+        if it.type == xx string {
             display_string(<< cast(*string) it.value_pointer);
         }
 
         // Can you metaprogram this without string formatting?
-        if it.type == cast(*Type_Info) u8   display_int(cast,no_check(u64) << cast(*u8)  it.value_pointer);
-        if it.type == cast(*Type_Info) s8   display_int(cast,no_check(u64) << cast(*s8)  it.value_pointer);
-        if it.type == cast(*Type_Info) u16  display_int(cast,no_check(u64) << cast(*u16) it.value_pointer);
-        if it.type == cast(*Type_Info) s16  display_int(cast,no_check(u64) << cast(*s16) it.value_pointer);
-        if it.type == cast(*Type_Info) s32  display_int(cast,no_check(u64) << cast(*s32) it.value_pointer);
-        if it.type == cast(*Type_Info) u32  display_int(cast,no_check(u64) << cast(*u32) it.value_pointer);
-        if it.type == cast(*Type_Info) s64  display_int(cast,no_check(u64) << cast(*s64) it.value_pointer);
-        if it.type == cast(*Type_Info) u64  display_int(cast,no_check(u64) << cast(*u64) it.value_pointer);
+        if it.type == xx u8   display_int(xx,no_check << cast(*u8)  it.value_pointer);
+        if it.type == xx s8   display_int(xx,no_check << cast(*s8)  it.value_pointer);
+        if it.type == xx u16  display_int(xx,no_check << cast(*u16) it.value_pointer);
+        if it.type == xx s16  display_int(xx,no_check << cast(*s16) it.value_pointer);
+        if it.type == xx u32  display_int(xx,no_check << cast(*u32) it.value_pointer);
+        if it.type == xx s32  display_int(xx,no_check << cast(*s32) it.value_pointer);
+        if it.type == xx u64  display_int(xx,no_check << cast(*u64) it.value_pointer);
+        if it.type == xx s64  display_int(xx,no_check << cast(*s64) it.value_pointer);
     }
 }
 
@@ -297,8 +352,6 @@ display_int :: (value: u64) {
 
     display(cast(string) result);
 }
-
-// =====================================================
 
 ascii_to_wide :: (input: string, buffer: [] u16) -> *u16 {
     for cast([] u8) input {

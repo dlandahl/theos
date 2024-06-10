@@ -55,6 +55,10 @@ toggle_all_bits :: (using array: *Bit_Array) {
 
 // for_expansion generates 'it' as a boolean, true or false for each bit.
 // A little more code, a little easier to understand?
+min :: (a: $T, b: T) -> T {
+    if a < b return a;
+    return b;
+}
 
 for_expansion :: (array: *Bit_Array, body: Code, flags: For_Flags) #expand {
     #assert(flags == 0);  // No options are supported.
@@ -63,7 +67,7 @@ for_expansion :: (array: *Bit_Array, body: Code, flags: For_Flags) #expand {
 
     for slot, slot_index: array.slots {
         base_index := slot_index * 64;
-        limit      := Basic.min(array.count - base_index - 1, 63);  // Don't go past the number of bits that are actually stored.
+        limit      := min(array.count - base_index - 1, 63);  // Don't go past the number of bits that are actually stored.
 
         bit := 1;
         for i: 0..limit {
