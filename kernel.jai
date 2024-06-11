@@ -9,32 +9,39 @@ Framebuffer :: struct {
     stride: int;
 }
 
-#add_context framebuffer: Framebuffer;
-#add_context boot_data: *Boot_Data;
+Kernel_Globals :: struct {
+    framebuffer: Framebuffer;
+    boot_data: *Boot_Data;
+    page_frames: *Page_Frame_Desc;
+
+    physical_page_pool: Physical_Page_Pool;
+    physical_block_allocator: Block_Allocator;
+    // virtual_block_allocator: Block_Allocator;
+}
+
+using kernel_globals: Kernel_Globals;
 
 #program_export
 kernel_entry :: () #no_context {
-    boot_data := cast(*Boot_Data) 0x10_0000;
-    page_frames := boot_data.page_frames;
+
+    boot_data = cast(*Boot_Data) 0x10_0000;
+    page_frames = boot_data.page_frames;
+
+    framebuffer.buffer = cast(*u32) boot_data.framebuffer;
+    framebuffer.x_resolution = boot_data.x_resolution;
+    framebuffer.y_resolution = boot_data.y_resolution;
+    framebuffer.stride = boot_data.stride;
 
     c: Context;
-    c.framebuffer.buffer = cast(*u32) boot_data.framebuffer;
-    c.framebuffer.x_resolution = boot_data.x_resolution;
-    c.framebuffer.y_resolution = boot_data.y_resolution;
-    c.framebuffer.stride = boot_data.stride;
-
-    c.boot_data = boot_data;
     c.assertion_failed = (location: Source_Code_Location, message: string) -> bool {
         bluescreen();
         return true;
     };
 
-    // page_table_physical_address := (cast(u64) pm.page_table.data - 0xffff_ffff_8000_0000) + Boot_Data.KERNEL_PHYS_BASE;
-
-    c.allocator.proc = allocator_proc;
+    // physical := (*thing - 0xffff_ffff_8000_0000) + Boot_Data.KERNEL_PHYS_BASE;
 
     push_context c {
-        fb := context.framebuffer;
+        fb := framebuffer;
 
         for y: 0..fb.y_resolution-1 {
             red := cast(int) (0xff * (1.0 / fb.y_resolution) * y);
@@ -45,25 +52,26 @@ kernel_entry :: () #no_context {
             }
         }
 
+        // Init memory allocation
+        pool_initted := false;
         for 0..boot_data.memory_map_entries_used-1 {
             entry := boot_data.memory_map[it];
 
-            /*
+            if false {
                 serial_out("Free region at ");
                 serial_write_int(entry.address);
                 serial_out("Bytes:\n");
                 serial_write_int(entry.pages * 4096);
-            */
+            }
 
             if entry.pages >= 1024 {
-                pool := *context.physical_page_pool;
-
-                pool.start = cast(int) (entry.address / 4096);
-                pool.page_count = cast(int) entry.pages;
-                pool.high_watermark = 0;
-                pool.freelist = pool.FREELIST_TAIL;
-
-                break;
+                if !pool_initted {
+                    init_physical_page_pool(entry);
+                    pool_initted = true;
+                } else {
+                    init_block_allocator(*kernel_globals.physical_block_allocator, xx entry.address / 4096, xx entry.pages);
+                    break;
+                }
             }
 
             if it == boot_data.memory_map_entries_used-1 {
@@ -72,18 +80,37 @@ kernel_entry :: () #no_context {
             }
         }
 
-        a := get_page_frame();
-        b := get_page_frame();
-        c := get_page_frame();
+        context.allocator.proc = (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
+            if mode == .ALLOCATE || mode == .RESIZE {
+                new: *void;
 
-        serial_write_int(frame_physical_address(a));
-        serial_write_int(frame_physical_address(b));
-        serial_write_int(frame_physical_address(c));
+                // Minimum allocation size is a page, avoid small allocations
+                if size <= 4096 {
+                    new = cast(*void) (get_page_frame() + DIRECT_MAPPING_BASE);
+                } else {
+                    new = cast(*void) alloc_block(*kernel_globals.physical_block_allocator, size);
+                    new += DIRECT_MAPPING_BASE;
+                    // Todo: fallback path if a contiguous physical block can't be found
+                }
 
-        release_page_frame(c);
-        release_page_frame(b);
-        b = get_page_frame();
-        serial_write_int(frame_physical_address(b));
+                if old_size {
+                    memcpy(new, old_memory, old_size);
+                }
+
+                return new;
+            }
+
+            if mode == .FREE {
+                if size <= 4096 {
+                    phys := cast(u64) old_memory - DIRECT_MAPPING_BASE;
+                    release_page_frame(phys);
+                } else {
+                    free_block(*kernel_globals.physical_block_allocator, cast(u64) old_memory);
+                }
+            }
+
+            return null;
+        };
 
         rsdp := cast(*Acpi_RSDP__Root_System_Description_Pointer) boot_data.acpi_rsdp;
 
@@ -99,20 +126,48 @@ kernel_entry :: () #no_context {
 }
 
 bluescreen :: () {
-    using context.framebuffer;
+    using framebuffer;
 
     for y: 0..y_resolution-1 for x: 0..x_resolution-1 {
         buffer[x + y * stride] = cast(u32) (0xff0000ff);
     }
 
-    while true #asm { cli; hlt; }
+    while true #asm {
+        cli;
+        hlt;
+    }
+}
+
+
+
+// A physical memory allocator that finds discontiguous physical pages. Discontiguous pages are more likely to be available and it doesn't usually matter that they're discontiguous. However it's slower for large allocations, not only because the pages need to be found individually, but they also need to be manually mapped so that the virtual memory is contiguous. For physically contiguous memory, there's already corresponding contiguous virtual memory in the direct mapping.
+
+Physical_Page_Pool :: struct {
+    start: int; // Page frame index
+    page_count: int;
+    high_watermark: int;
+
+    freelist: s32 = FREELIST_TAIL;
+    FREELIST_TAIL :: Page_Frame_Desc.FREELIST_TAIL;
+}
+
+// It might not make sense in the future for this to be in the context, because it'll be used in syscall handlers
+#add_context physical_page_pool: Physical_Page_Pool;
+
+init_physical_page_pool :: (memory: Boot_Data.Memory_Region) {
+    using physical_page_pool;
+
+    start = cast(int) (memory.address / 4096);
+    page_count = cast(int) memory.pages;
+    high_watermark = 0;
+    freelist = FREELIST_TAIL;
 }
 
 get_page_frame :: () -> *Page_Frame_Desc, int {
-    using context.physical_page_pool;
+    using physical_page_pool;
 
     if freelist != FREELIST_TAIL {
-        page := *context.boot_data.page_frames[freelist];
+        page := *page_frames[freelist];
         index := freelist;
 
         freelist = page.freelist;
@@ -125,63 +180,66 @@ get_page_frame :: () -> *Page_Frame_Desc, int {
     }
 
     index := start + high_watermark;
-    page := *context.boot_data.page_frames[index];
+    page := *page_frames[index];
 
     high_watermark += 1;
 
     return page, index;
 }
 
-release_page_frame :: (index: int) {
-    using context.physical_page_pool;
+release_page_frame :: (address: u64) {
+    release_page_frame(cast(int) (address / 4096));
+}
 
-    page_frame := *context.boot_data.page_frames[index];
+release_page_frame :: (index: int) {
+    using physical_page_pool;
+
+    page_frame := *page_frames[index];
     page_frame.freelist = freelist;
     freelist = xx index;
 }
 
 release_page_frame :: (page_frame: *Page_Frame_Desc) {
-    using context.physical_page_pool;
+    using physical_page_pool;
 
     page_frame.freelist = freelist;
     freelist = index(page_frame);
 }
 
-frame_physical_address :: (page_frame: *Page_Frame_Desc) -> u64 {
+get_physical_address :: (page_frame: *Page_Frame_Desc) -> u64 {
     return cast(u64) index(page_frame) * 4096;
 }
 
+get_virtual_address :: (page_frame: *Page_Frame_Desc) -> *void {
+    phys := get_physical_address(page_frame);
+    return cast(*void) phys + DIRECT_MAPPING_BASE;
+}
+
 index :: (page_frame: *Page_Frame_Desc) -> s32 {
-    index := (cast(u64) page_frame - cast(u64) context.boot_data.page_frames) / size_of(Page_Frame_Desc);
+    index := (cast(u64) page_frame - cast(u64) page_frames) / size_of(Page_Frame_Desc);
     return xx index;
 }
 
-Physical_Page_Pool :: struct {
-    start: int;
-    page_count: int;
-    high_watermark: int;
 
-    freelist: s32 = FREELIST_TAIL;
-    FREELIST_TAIL :: Page_Frame_Desc.FREELIST_TAIL;
-}
-
-// I think it won't make sense in the future for this to be in the context, because it'll be used from syscall handlers
-#add_context physical_page_pool: Physical_Page_Pool;
 
 get_or_create_page_table :: (table: *u64, entry: u64) -> *u64 {
     using Page_Flags;
 
     if table[entry] & xx PRESENT {
-        phys := table[entry] & (~0xfff);
-        return cast(*u64) (phys + 0xffff_8000_0000_0000);
+        physical := table[entry] & (~0xfff);
+        return cast(*u64) (physical + DIRECT_MAPPING_BASE);
     }
 
     page := get_page_frame();
-    address := frame_physical_address(page);
+    address := get_physical_address(page);
 
     table[entry] = address | xx PRESENT | READ_WRITE;
 
-    return cast(*u64) (address + 0xffff_8000_0000_0000);
+    return cast(*u64) (address + DIRECT_MAPPING_BASE);
+}
+
+map_page :: (virtual_address: *void, page_frame: *Page_Frame_Desc) {
+    map_page(cast(u64) virtual_address, page_frame);
 }
 
 map_page :: (virtual_address: u64, page_frame: *Page_Frame_Desc) {
@@ -194,7 +252,7 @@ map_page :: (virtual_address: u64, page_frame: *Page_Frame_Desc) {
     pd\ _offset := (virtual_address >> 21) & mask;
     pt\ _offset := (virtual_address >> 12) & mask;
 
-    pml4 := context.boot_data.page_tables.pml4.data;
+    pml4 := boot_data.page_tables.pml4.data;
 
     pdpt := get_or_create_page_table(pml4, pml4_offset);
     pd   := get_or_create_page_table(pdpt, pdpt_offset);
@@ -204,7 +262,7 @@ map_page :: (virtual_address: u64, page_frame: *Page_Frame_Desc) {
         bluescreen();
     }
 
-    physical_address := frame_physical_address(page_frame);
+    physical_address := get_physical_address(page_frame);
 
     pt[pt_offset] = physical_address | cast(u64) PRESENT | READ_WRITE;
 
@@ -226,17 +284,128 @@ Page_Flags :: enum_flags u64 {
     EXECUTE_DISABLE :: 1 << 63;
 }
 
-allocator_proc :: (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
-    if mode != .ALLOCATE && mode != .RESIZE return null;
 
-    // new := map_pages(size / 4096 + 1, USE_POOL);
-    if old_memory != null {
-        // memcpy(new, old_memory, old_size);
+
+// A block allocator that just linearly scans to find a large enough free block. A block is an integer number of pages.
+// Can be used for both virtual and physical memory.
+
+init_block_allocator :: (allocator: *Block_Allocator, start_page: int, total_pages: int) {
+
+    // For bootstrapping, just use a single page to store block descriptors. Todo: fix
+    page := get_page_frame();
+    allocator.blocks.data = cast(*void) get_physical_address(page) + DIRECT_MAPPING_BASE;
+    allocator.max_block_descriptors = 4096 / size_of(Block_Desc);
+
+    allocator.start_page = start_page;
+    allocator.total_pages = total_pages;
+}
+
+alloc_block :: (using allocator: *Block_Allocator, size_bytes: int) -> u64, Block_Desc {
+
+    pages_needed := size_bytes / 4096;
+    if size_bytes % 4096 pages_needed += 1;
+
+    for* blocks {
+        if !it.used && it.size_pages >= pages_needed {
+            it.used = true;
+
+            remaining_pages := it.size_pages - pages_needed;
+            it.size_pages = cast(s32) pages_needed;
+
+            if remaining_pages != 0 {
+                // We didn't use the whole block, make a new one and move the others over
+                if blocks.count >= max_block_descriptors {
+                    bluescreen();
+                }
+
+                for< blocks.count .. it_index+2 {
+                    blocks[it] = blocks[it-1];
+                }
+                blocks.count += 1;
+
+                blocks[it_index+1].start_page = it.start_page + pages_needed;
+                blocks[it_index+1].size_pages = cast(s32) remaining_pages;
+                blocks[it_index+1].used = false;
+            }
+
+            return cast(u64) it.start_page * 4096, it.*;
+        }
     }
 
-    // return new;
-    return null;
+    // If we get here then there wasn't a free block large enough.
+    // The system starts with one big block spanning the whole region, and blocks always get coalesced when deallocating, so there's no memory for us.
+    bluescreen();
+    return 0, .{};
 }
+
+free_block :: (allocator: *Block_Allocator, address: u64) {
+    // Find the block corresponding to that address using binary search
+    // Todo hash table
+
+    start_page := address / 4096 - allocator.start_page;
+
+    blocks := allocator.blocks;
+    defer allocator.blocks = blocks;
+
+    l := 0;
+    r := blocks.count - 1;
+    m: int;
+
+    while l <= r {
+        m := (l + r) / 2;
+        page := blocks[m].start_page;
+
+        if page < start_page {
+            l = m + 1;
+        } else if page > start_page {
+            r = m - 1;
+        } else break;
+    }
+
+    block := *blocks[m];
+
+    if block.start_page != start_page {
+        bluescreen();
+    }
+
+    block.used = false;
+
+    // Coalesce following block
+    if blocks.count > m+1 && !blocks[m+1].used {
+        block.size_pages += blocks[m+1].size_pages;
+
+        for m+2 .. blocks.count-1 {
+            blocks[it-1] = blocks[it];
+        }
+        blocks.count -= 1;
+    }
+
+    // Coalesce preceding block
+    if m > 0 && !blocks[m-1].used {
+        blocks[m-1].size_pages += block.size_pages;
+
+        for m+1 .. blocks.count-1 {
+            blocks[it-1] = blocks[it];
+        }
+        blocks.count -= 1;
+    }
+}
+
+Block_Desc :: struct {
+    start_page: s64; // Relative to the parent start page
+    size_pages: s64;
+    used: bool; // Maybe move this into the high bit of size or start
+}
+
+Block_Allocator :: struct {
+    blocks: [] Block_Desc;
+    max_block_descriptors: int; // How much room has been allocated to describe blocks
+
+    start_page: int;
+    total_pages: int;
+}
+
+
 
 serial_out :: (data: string) {
     for cast([] u8) data {
@@ -415,5 +584,5 @@ buddy_alloc :: (buddy: *Buddy_Allocator, bytes: int) -> u64 {
         break;
     }
 
-    return b0 * 4096;
+    return cast(u64) (b0 * 4096);
 }

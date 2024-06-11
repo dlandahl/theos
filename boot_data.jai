@@ -3,15 +3,21 @@
 
 Page_Tables :: struct {
     pml4: [0x200] u64;
+
+    // Page tables which cover near the top of virtual memory where the kernel executable runs. Framebuffer is also put here.
     pdpt: [0x200] u64;
     pd:   [0x200] u64;
 
-    mirror_pdpt:   [0x200] u64;
-    mirror_pd: [64][0x200] u64;
+    // Page tables which cover the beginning of the upper half of virtual memory
+    direct_pdpt:   [0x200] u64;
+    direct_pd: [64][0x200] u64;
 
+    // Page tables for low memory so the bootloader can keep running after we switch from the UEFI mapping to this one
     boot_pdpt: [0x200] u64;
     boot_pd:   [0x200] u64;
 }
+
+DIRECT_MAPPING_BASE :: 0xffff_8000_0000_0000; // All physical memory will be mapped into virtual at this address (address 0 in physical memory gets mapped to DIRECT_MAPPING_BASE and so on.)
 
 Boot_Data :: struct {
     page_tables: Page_Tables;

@@ -20,7 +20,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         boot_data_address: u64 = 0x10_0000;
         boot_data := cast(*Boot_Data) boot_data_address;
 
-        // Use this memory type when making allocations that should keep the physical memory reserved in the kernel's physical memory management.
+        // Use this memory type when making allocations that should keep the memory reserved in the kernel's physical memory management.
         UserReservedMemoryType : EFI_MEMORY_TYPE : 0x8000_0000;
 
         {
@@ -109,8 +109,8 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         load_buffer: [0x5_0000] u8;
         EFI_CHECK(kernel_file.Read(kernel_file, *size, cast(*void) load_buffer.data));
 
-        for 0..size_of(Page_Tables)-1 {
-            << (cast(*u8) *boot_data.page_tables + it) = 0;
+        for 0..size_of(Page_Tables) / size_of(u64) - 1 {
+            << (cast(*u64) *boot_data.page_tables + it) = 0;
         }
 
         {
@@ -145,15 +145,15 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
                 pd[it] = address | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             }
 
-            // Map all physical memory to the bottom of kernel memory. Hardcoded to support 64Gb for now
-            pml4[0x100] = cast(u64) mirror_pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
+            // Direct-map all physical memory to the bottom of the kernel addresses
+            pml4[0x100] = cast(u64) direct_pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
 
-            for pd: 0..mirror_pd.count-1 {
-                mirror_pdpt[pd] = cast(u64) mirror_pd[pd].data | PAGE_PRESENT | PAGE_READ_WRITE;
+            for pd: 0..direct_pd.count-1 {
+                direct_pdpt[pd] = cast(u64) direct_pd[pd].data | PAGE_PRESENT | PAGE_READ_WRITE;
                 
                 for pt: 0..0x1ff {
                     address := cast(u64) (pd*0x4000_0000 + pt*0x20_0000);
-                    mirror_pd[pd][pt] = address | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+                    direct_pd[pd][pt] = address | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
                 }
             }
 
@@ -167,7 +167,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             boot_data.framebuffer = cast(*u32) (0xffff_ffff_8000_0000 + 4*0x20_0000);
         }
 
-        // === Firmware physical memory map stuff ===
+        // Firmware physical memory map
         limit :: (region: Boot_Data.Memory_Region) -> u64 {
             return region.address + region.pages * 4096;
         }
@@ -232,6 +232,17 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
                 bd := boot_data;
 
+                if bd.memory_map_entries_used != 0 {
+                    // If two available regions are contiguous, just grow the previous one.
+                    // Won't always coalesce perfectly because the firmware doesn't guarantee that memory map entries are sorted by address.
+                    last_region := *bd.memory_map[bd.memory_map_entries_used-1];
+
+                    if limit(last_region.*) == region.address {
+                        last_region.pages += region.pages;
+                        continue;
+                    }
+                }                
+
                 bd.memory_map[bd.memory_map_entries_used] = region;
                 bd.memory_map_entries_used += 1;
 
@@ -248,8 +259,6 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             boot_services.GetMemoryMap(*mmap_size, xx memory_map, *mmap_key, null, null);
         }
 
-        // gdt_init();
-
         cr3 := boot_data.page_tables.pml4.data;
         #asm {
             cli;
@@ -257,7 +266,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         }
 
         {
-            // Load kernel binary
+            // Load kernel executable
             elf := load_buffer.data;
             elf_header := cast(*Elf64_Ehdr) elf;
 
@@ -313,10 +322,6 @@ check_efi_status :: (status: EFI_STATUS, loc := #caller_location) {
 }
 
 display :: (args: .. Any) {
-    integer_types :: Type.[
-        u8, s8, u16, s16, u32, s32, u64, s64
-    ];
-
     for args {
         if it.type == xx string {
             display_string(<< cast(*string) it.value_pointer);
@@ -364,97 +369,3 @@ ascii_to_wide :: (input: string, buffer: [] u16) -> *u16 {
 
 #program_export
 __chkstk :: () {}
-
-
-
-
-
-
-
-
-
-
-
-gdt: [10] u64 #align 0x80;
-
-Gdt_Entry_Flags :: enum {
-    AVAILABLE       :: 0x01 << 52;
-    LONG_MODE_CODE  :: 0x02 << 52;
-    SIZE            :: 0x04 << 52;
-    GRANULARITY     :: 0x08 << 52;
-    ACCESSED        :: 0x01 << 40;
-    READ_WRITE      :: 0x02 << 40;
-    DIRECTION       :: 0x04 << 40;
-    EXECUTABLE      :: 0x08 << 40;
-    DESCRIPTOR_TYPE :: 0x10 << 40;
-    PRIVILEGE0      :: 0x20 << 40;
-    PRIVILEGE1      :: 0x40 << 40;
-    PRESENT         :: 0x80 << 40;
-}
-
-make_gdt_entry :: (base: u64, limit: u32, flags: u64) -> u64 {
-    entry: u64;
-
-    bytes := cast(*u8) *entry;
-
-    bytes[0] = cast(u8) (limit & 0xff);
-    bytes[1] = cast(u8) (limit >> 8) & 0xff;
-    bytes[6] = cast(u8) (limit >> 16) & 0x0f;
-
-    bytes[2] = cast(u8) (base & 0xff);
-    bytes[3] = cast(u8) (base >> 8) & 0xff;
-    bytes[4] = cast(u8) (base >> 16) & 0xff;
-    bytes[7] = cast(u8) (base >> 24) & 0xff;
-
-    entry = << cast(*u64) bytes;
-    entry |= flags;
-    return entry;
-}
-
-Task_State_Segment :: struct {
-    reserved_0: u32;
-    rsp:        [3] u64 #align 4;
-    reserved_1: [2] u32;
-    ist:        [7] u64 #align 4;
-    reserved_2: [2] u32;
-    reserved_3: u16;
-    iobp:       u16;
-}
-
-#assert(size_of(Task_State_Segment) == 0x68);
-
-tss: Task_State_Segment #align 0x80;
-
-gdt_init :: () {
-    using Gdt_Entry_Flags;
-
-    gdt[0] = 0x0;
-    gdt[1] = cast(u64) (READ_WRITE | PRESENT | DESCRIPTOR_TYPE | LONG_MODE_CODE | EXECUTABLE);
-    gdt[2] = cast(u64) (READ_WRITE | PRESENT | DESCRIPTOR_TYPE);
-
-    gdt[3] = cast(u64) (READ_WRITE | PRESENT | DESCRIPTOR_TYPE | PRIVILEGE0 | PRIVILEGE1 | LONG_MODE_CODE | EXECUTABLE);
-    gdt[4] = cast(u64) (READ_WRITE | PRESENT | DESCRIPTOR_TYPE | PRIVILEGE0 | PRIVILEGE1);
-
-    gdt[5] = make_gdt_entry(cast(u64) *tss, size_of(Task_State_Segment), xx SIZE | xx (0x89 << 40));
-    gdt[6] = 0xffff_ffff;
-
-    gdtr: struct {
-        limit: u16;
-        base: u64 #align 2;
-    }
-
-    gdtr.limit = 0x38;
-    gdtr.base = xx gdt.data;
-
-    gdtrp := *gdtr;
-    #asm {
-        lgdt [gdtrp];
-    }
-
-    tss.iobp = size_of(Task_State_Segment);
-
-    // #bytes .[
-    //     0x66, 0xb8, 0x28, 0x00, // mov ax, 0x28
-    //     0x0f, 0x00, 0xd8 // ltr ax
-    // ];
-}
