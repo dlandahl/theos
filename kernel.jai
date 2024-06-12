@@ -2,6 +2,7 @@
 #import "Basic";
 
 #load "boot_data.jai";
+#load "acpi.jai";
 #import,file "bootloader_modules/Lil_Uefi.jai";
 
 Framebuffer :: struct {
@@ -18,6 +19,9 @@ Kernel_Globals :: struct {
 
     physical_page_pool: Physical_Page_Pool;
     physical_block_allocator: Block_Allocator;
+
+    root_acpi_table: *Acpi_Table_Header;
+    acpi_version: int;
     // virtual_block_allocator: Block_Allocator;
 }
 
@@ -36,6 +40,12 @@ kernel_entry :: () #no_context {
 
     c: Context;
     c.assertion_failed = (location: Source_Code_Location, message: string) -> bool {
+        if message.count {
+            serial_out("Assertion failure: ");
+            serial_out(message);
+            serial_out("\n");
+        }
+
         bluescreen();
         return true;
     };
@@ -59,12 +69,7 @@ kernel_entry :: () #no_context {
         for 0..boot_data.memory_map_entries_used-1 {
             entry := boot_data.memory_map[it];
 
-            if false {
-                serial_out("Free region at ");
-                serial_write_int(entry.address);
-                serial_out("Megabytes      ");
-                serial_write_int(entry.pages * 4 / 1024);
-            }
+            print("Free region at % (% KB)\n", formatInt(entry.address, base=16), entry.pages * 4);
 
             if entry.pages >= 1024 {
                 if !pool_initted {
@@ -121,13 +126,17 @@ kernel_entry :: () #no_context {
         context.temporary_storage = *ts;
 
         rsdp := cast(*Acpi_RSDP__Root_System_Description_Pointer) boot_data.acpi_rsdp;
+        acpi_version = rsdp.revision;
 
-        phys: u64;
-        if rsdp.revision >= 2 {
-            phys = rsdp.xsdt_address;
+        assert(acpi_version == 0 || acpi_version == 2);
+
+        if acpi_version >= 2 {
+            root_acpi_table = xx (rsdp.xsdt_address + DIRECT_MAPPING_BASE);
         } else {
-            phys = cast(u64) rsdp.rsdt_address;
+            root_acpi_table = xx (rsdp.rsdt_address + DIRECT_MAPPING_BASE);
         }
+
+        print("FADT: %\n", acpi_get_table_by_signature("FACP"));
     }
 
     while true #asm { cli; hlt; }
@@ -313,19 +322,6 @@ init_block_allocator :: (allocator: *Block_Allocator, start_page: int, total_pag
     };
 }
 
-serial_dump_blocks :: (allocator: *Block_Allocator) {
-    for allocator.blocks {
-        serial_out("=== Block ");
-        if it.used serial_out("(used) ===\n");
-        else       serial_out("(free) ===\n");
-
-        serial_out("Start address: ");
-        serial_write_int((it.start_page + allocator.start_page) * 4096);
-        serial_out("Size:          ");
-        serial_write_int(it.size_pages * 4096);
-    }
-}
-
 alloc_block :: (using allocator: *Block_Allocator, size_bytes: int) -> u64, Block_Desc {
 
     pages_needed := size_bytes / 4096;
@@ -433,12 +429,6 @@ Block_Allocator :: struct {
 
 
 
-inspect :: (data: string, value: $T) {
-    serial_out(data);
-    serial_out(": ");
-    serial_write_int(value);
-}
-
 serial_out :: (data: string) {
     for cast([] u8) data {
         byte := it;
@@ -464,46 +454,6 @@ serial_write_int :: (value: $T) {
 
     serial_out(cast(string) result);
     serial_out("\n");
-}
-
-Acpi_RSDP__Root_System_Description_Pointer :: struct {
-    signature: [8] u8;
-    checksum: u8;
-    oem_id: [6] u8;
-    revision: u8;
-    rsdt_address: u32;
-
-    length: u32;
-    xsdt_address: u64 #align 4;
-    checksum_2: u8;
-    reserved: [3] u8;
-}
-
-Acpi_Table_Header :: struct {
-    signature: [4] u8;
-    length: u32;
-    revision: u8;
-    checksum: u8;
-    oem_id: [6] u8;
-    oem_table_id: [8] u8;
-    oem_revision: u32;
-    creator_id: u32;
-    creator_revision: u32;
-} #no_padding
-
-Acpi_MADT__Multiple_Apic_Description_Table :: struct {
-    #as header: Acpi_Table_Header;
-    local_apic_address: u32;
-    flags: u32;
-}
-
-Acpi_FADT__Fixed_Description_Table :: struct {
-    #as header: Acpi_Table_Header;
-    firmware_ctrl: u32;
-    dsdt_address: u32;
-
-    // Todo: doesn't handle 64bit dsdt address
-    // https://uefi.org/htmlspecs/ACPI_Spec_6_4_html/05_ACPI_Software_Programming_Model/ACPI_Software_Programming_Model.html?highlight=dsdt#fadt-format
 }
 
 #program_export __libc_start_main :: () {}
