@@ -21,7 +21,8 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         boot_data := cast(*Boot_Data) boot_data_address;
 
         // Use this memory type when making allocations that should keep the memory reserved in the kernel's physical memory management.
-        UserReservedMemoryType : EFI_MEMORY_TYPE : 0x8000_0000;
+        // This is supposed to be a custom memory type, so that EfiLoaderData memory can be reused by the kernel, but there's a bug in VirtualBox that makes custom EFI memory types hang the firmware.
+        UserReservedMemoryType : EFI_MEMORY_TYPE : .EfiLoaderData; // 0x8000_0000;
 
         {
             // Even though this mapping is not needed while boot-services are still active, we create it in the boot-services memory map anyway, so that it gets reported by GetMemoryMap, and the kernel will know the memory is not available.
@@ -61,7 +62,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             // Find root ACPI table
             table := system_table.ConfigurationTable[it];
 
-            low := << cast(*u64) *table.VendorGuid;
+            low :=  <<  cast(*u64) *table.VendorGuid;
             high := << (cast(*u64) *table.VendorGuid + 1);
 
             acpi_table_guid_low:  u64 = 0x11d3e4f18868e871;
@@ -227,7 +228,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
             if cast(EFI_MEMORY_TYPE) desc.Type == {
               case .EfiLoaderCode; #through;
-              case .EfiLoaderData; #through;
+              // case .EfiLoaderData; #through;
               case .EfiBootServicesCode; #through;
               case .EfiBootServicesData; #through;
               case .EfiConventionalMemory;
@@ -306,7 +307,6 @@ EFI_CHECK :: check_efi_status;
 
 check_efi_status :: (status: EFI_STATUS, loc := #caller_location) {
     if status == .Success {
-        // display("UEFI call succeeded on line ", loc.line_number, "\n\r");
         return;
     }
 

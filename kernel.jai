@@ -3,7 +3,6 @@
 
 #load "boot_data.jai";
 #load "acpi.jai";
-#import,file "bootloader_modules/Lil_Uefi.jai";
 
 Framebuffer :: struct {
     buffer: *u32;
@@ -19,10 +18,10 @@ Kernel_Globals :: struct {
 
     physical_page_pool: Physical_Page_Pool;
     physical_block_allocator: Block_Allocator;
+    // virtual_block_allocator: Block_Allocator;
 
     root_acpi_table: *Acpi_Table_Header;
     acpi_version: int;
-    // virtual_block_allocator: Block_Allocator;
 }
 
 using kernel_globals: Kernel_Globals;
@@ -136,7 +135,9 @@ kernel_entry :: () #no_context {
             root_acpi_table = xx (rsdp.rsdt_address + DIRECT_MAPPING_BASE);
         }
 
-        print("FADT: %\n", acpi_get_table_by_signature("FACP"));
+        print("FADT: %\n", find_acpi_table("FACP"));
+
+        apic_stuff();
     }
 
     while true #asm { cli; hlt; }

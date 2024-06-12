@@ -24,12 +24,6 @@ Acpi_Table_Header :: struct {
     creator_revision: u32;
 } #no_padding
 
-Acpi_MADT__Multiple_Apic_Description_Table :: struct {
-    #as header: Acpi_Table_Header;
-    local_apic_address: u32;
-    flags: u32;
-}
-
 Acpi_FADT__Fixed_Description_Table :: struct {
     #as header: Acpi_Table_Header;
     firmware_ctrl: u32;
@@ -39,7 +33,7 @@ Acpi_FADT__Fixed_Description_Table :: struct {
     // https://uefi.org/htmlspecs/ACPI_Spec_6_4_html/05_ACPI_Software_Programming_Model/ACPI_Software_Programming_Model.html?highlight=dsdt#fadt-format
 }
 
-acpi_get_table_by_signature :: (signature: string) -> *Acpi_Table_Header {
+find_acpi_table :: (signature: string) -> *Acpi_Table_Header {
     table_size := root_acpi_table.length - size_of(Acpi_Table_Header);
 
     pointer_size := cast(u64) (ifx acpi_version then 8 else 4);
@@ -66,4 +60,35 @@ acpi_get_table_by_signature :: (signature: string) -> *Acpi_Table_Header {
     }
 
     return null;
+}
+
+
+
+Acpi_MADT :: struct {
+    using #as header: Acpi_Table_Header;
+    local_apic_address: u32;
+    flags: u32;
+
+    Interrupt_Controller_Structure :: struct {
+        type: Type;
+        length: u8;
+
+        Type :: enum u8 {
+            LOCAL_APIC :: 0x0;
+            MULTIPROCESSOR_WAKEUP :: 0x10;
+        }
+    }
+}
+
+apic_stuff :: () {
+    acpi_header := cast(*Acpi_MADT) find_acpi_table("APIC");
+
+    cursor := cast(u32) acpi_header + size_of(Acpi_MADT);
+
+    while cursor < cast(u32) acpi_header + acpi_header.length {
+        ics := << cast(*Acpi_MADT.Interrupt_Controller_Structure) cursor;
+
+        print("ICS type: 0x%, length: %\n", formatInt(cast(u64) ics.type, base=16), ics.length);
+        cursor += ics.length;
+    }
 }
