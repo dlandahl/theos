@@ -4,20 +4,20 @@
 Page_Tables :: struct {
     pml4: [0x200] u64;
 
-    // Page tables which cover near the top of virtual memory where the kernel executable runs. Framebuffer is also put here.
+    // Page tables for the kernel executable, at the top of virtual memory
     pdpt: [0x200] u64;
     pd:   [0x200] u64;
 
-    // Page tables which cover the beginning of the upper half of virtual memory
+    // Page tables for the direct mapping
     direct_pdpt:   [0x200] u64;
     direct_pd: [64][0x200] u64;
 
-    // Page tables for low memory so the bootloader can keep running after we switch from the UEFI mapping to this one
+    // Page tables for low memory so the bootloader can keep running
     boot_pdpt: [0x200] u64;
     boot_pd:   [0x200] u64;
 }
 
-DIRECT_MAPPING_BASE :: 0xffff_8000_0000_0000; // All physical memory will be mapped into virtual at this address (address 0 in physical memory gets mapped to DIRECT_MAPPING_BASE and so on.)
+DIRECT_MAPPING_BASE :: 0xffff_8000_0000_0000;
 
 Boot_Data :: struct {
     page_tables: Page_Tables;
@@ -47,12 +47,9 @@ Boot_Data :: struct {
 }
 
 Page_Frame_Desc :: struct {
-    // We want to keep this thing as small as possible because there's one for each physical memory page in the device
+    // We want to keep this struct as small as possible because there's one for each physical memory page in the device
     freelist: s32;
     FREELIST_TAIL :: -1;
-
-    // Linux puts information in here that lets you find all page tables that map this page.
-    // https://www.kernel.org/doc/gorman/html/understand/understand006.html#toc27
 }
 
 #program_export

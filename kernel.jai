@@ -1,4 +1,6 @@
 
+#import "Basic";
+
 #load "boot_data.jai";
 #import,file "bootloader_modules/Lil_Uefi.jai";
 
@@ -60,8 +62,8 @@ kernel_entry :: () #no_context {
             if false {
                 serial_out("Free region at ");
                 serial_write_int(entry.address);
-                serial_out("Bytes:\n");
-                serial_write_int(entry.pages * 4096);
+                serial_out("Megabytes      ");
+                serial_write_int(entry.pages * 4 / 1024);
             }
 
             if entry.pages >= 1024 {
@@ -112,6 +114,12 @@ kernel_entry :: () #no_context {
             return null;
         };
 
+        ts_buffer := alloc(0x1_0000);
+        ts: Temporary_Storage;
+
+        set_initial_data(*ts, 0x1_0000, ts_buffer);
+        context.temporary_storage = *ts;
+
         rsdp := cast(*Acpi_RSDP__Root_System_Description_Pointer) boot_data.acpi_rsdp;
 
         phys: u64;
@@ -137,8 +145,6 @@ bluescreen :: () {
         hlt;
     }
 }
-
-
 
 // A physical memory allocator that finds discontiguous physical pages. Discontiguous pages are more likely to be available and it doesn't usually matter that they're discontiguous. However it's slower for large allocations, not only because the pages need to be found individually, but they also need to be manually mapped so that the virtual memory is contiguous. For physically contiguous memory, there's already corresponding contiguous virtual memory in the direct mapping.
 
@@ -290,14 +296,34 @@ Page_Flags :: enum_flags u64 {
 // Can be used for both virtual and physical memory.
 
 init_block_allocator :: (allocator: *Block_Allocator, start_page: int, total_pages: int) {
-
     // For bootstrapping, just use a single page to store block descriptors. Todo: fix
+
     page := get_page_frame();
     allocator.blocks.data = cast(*void) get_physical_address(page) + DIRECT_MAPPING_BASE;
     allocator.max_block_descriptors = 4096 / size_of(Block_Desc);
 
     allocator.start_page = start_page;
     allocator.total_pages = total_pages;
+
+    allocator.blocks.count = 1;
+    allocator.blocks[0] = .{
+        start_page = 0,
+        size_pages = total_pages,
+        used = false,
+    };
+}
+
+serial_dump_blocks :: (allocator: *Block_Allocator) {
+    for allocator.blocks {
+        serial_out("=== Block ");
+        if it.used serial_out("(used) ===\n");
+        else       serial_out("(free) ===\n");
+
+        serial_out("Start address: ");
+        serial_write_int((it.start_page + allocator.start_page) * 4096);
+        serial_out("Size:          ");
+        serial_write_int(it.size_pages * 4096);
+    }
 }
 
 alloc_block :: (using allocator: *Block_Allocator, size_bytes: int) -> u64, Block_Desc {
@@ -328,7 +354,7 @@ alloc_block :: (using allocator: *Block_Allocator, size_bytes: int) -> u64, Bloc
                 blocks[it_index+1].used = false;
             }
 
-            return cast(u64) it.start_page * 4096, it.*;
+            return cast(u64) (start_page + it.start_page) * 4096, it.*;
         }
     }
 
@@ -342,7 +368,7 @@ free_block :: (allocator: *Block_Allocator, address: u64) {
     // Find the block corresponding to that address using binary search
     // Todo hash table
 
-    start_page := address / 4096 - allocator.start_page;
+    start_page := cast(int) (address / 4096) - allocator.start_page;
 
     blocks := allocator.blocks;
     defer allocator.blocks = blocks;
@@ -352,7 +378,7 @@ free_block :: (allocator: *Block_Allocator, address: u64) {
     m: int;
 
     while l <= r {
-        m := (l + r) / 2;
+        m = (l + r) / 2;
         page := blocks[m].start_page;
 
         if page < start_page {
@@ -392,20 +418,26 @@ free_block :: (allocator: *Block_Allocator, address: u64) {
 }
 
 Block_Desc :: struct {
-    start_page: s64; // Relative to the parent start page
+    start_page: s64; // Relative to the start of the allocator's region
     size_pages: s64;
-    used: bool; // Maybe move this into the high bit of size or start
+    used: bool;
 }
 
 Block_Allocator :: struct {
     blocks: [] Block_Desc;
-    max_block_descriptors: int; // How much room has been allocated to describe blocks
+    max_block_descriptors: int;
 
     start_page: int;
     total_pages: int;
 }
 
 
+
+inspect :: (data: string, value: $T) {
+    serial_out(data);
+    serial_out(": ");
+    serial_write_int(value);
+}
 
 serial_out :: (data: string) {
     for cast([] u8) data {

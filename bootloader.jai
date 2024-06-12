@@ -105,9 +105,11 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         EFI_CHECK(boot_volume.GetInfo(boot_volume, *EFI_FILE_INFO_GUID, xx *info_size, *file_info));
 
-        size: u64 = 0x5_0000; // file_info.FileSize; // For some reason FileSize is zero, even though boot_volume.GetInfo claims to have returned a valid File_Info
-        load_buffer: [0x5_0000] u8;
-        EFI_CHECK(kernel_file.Read(kernel_file, *size, cast(*void) load_buffer.data));
+        size: u64 = 0x10_0000; // file_info.FileSize; // For some reason FileSize is zero, even though boot_volume.GetInfo claims to have returned a valid File_Info
+        load_buffer: *void;
+
+        EFI_CHECK(boot_services.AllocatePool(.EfiLoaderData, size, *load_buffer));
+        EFI_CHECK(kernel_file.Read(kernel_file, *size, load_buffer));
 
         for 0..size_of(Page_Tables) / size_of(u64) - 1 {
             << (cast(*u64) *boot_data.page_tables + it) = 0;
@@ -267,7 +269,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         {
             // Load kernel executable
-            elf := load_buffer.data;
+            elf := load_buffer;
             elf_header := cast(*Elf64_Ehdr) elf;
 
             for 0..elf_header.e_phnum-1 {

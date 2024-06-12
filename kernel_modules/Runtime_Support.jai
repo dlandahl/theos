@@ -59,15 +59,31 @@ __arithmetic_overflow :: (left: s64, right: s64, type_code: u16, line_number: s6
 }
 
 write_string_unsynchronized :: (s: string, to_standard_error := false) #no_context {
+    serial_out(s);
 }
 
 write_string :: (s: string, to_standard_error := false) #no_context #compiler {
+    serial_out(s);
 }
 
 write_strings :: (strings: ..string, to_standard_error := false) #no_context #compiler {
+    for strings serial_out(it);
 }
 
 #scope_module;
+
+serial_out :: (data: string) #no_context {
+    for cast([] u8) data {
+        byte := it;
+        port := 0x3f8;
+
+        #asm {
+            byte === a;
+            port === d;
+            out.b port, byte;
+        }
+    }
+}
 
 write_loc :: (loc: Source_Code_Location, to_standard_error := false) #no_context {
 }
