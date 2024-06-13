@@ -78,6 +78,18 @@ Acpi_MADT :: struct {
             MULTIPROCESSOR_WAKEUP :: 0x10;
         }
     }
+
+    Ics_Local_Apic :: struct {
+        using #as ics: Interrupt_Controller_Structure;
+
+        acpi_processor_uid: u8;
+        apic_id: u8;
+
+        flags: enum u32 {
+            enabled;
+            online_capable;
+        };
+    }
 }
 
 apic_stuff :: () {
@@ -86,9 +98,12 @@ apic_stuff :: () {
     cursor := cast(u32) acpi_header + size_of(Acpi_MADT);
 
     while cursor < cast(u32) acpi_header + acpi_header.length {
-        ics := << cast(*Acpi_MADT.Interrupt_Controller_Structure) cursor;
+        ics := cast(*Acpi_MADT.Interrupt_Controller_Structure) cursor;
 
-        print("ICS type: 0x%, length: %\n", formatInt(cast(u64) ics.type, base=16), ics.length);
+        if ics.type == .LOCAL_APIC {
+            lapic := cast(*Acpi_MADT.Ics_Local_Apic) ics;
+            print("Found Local APIC: %\n", << lapic);
+        }
         cursor += ics.length;
     }
 }

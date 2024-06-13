@@ -49,7 +49,15 @@ kernel_entry :: () #no_context {
         return true;
     };
 
-    // physical := (*thing - 0xffff_ffff_8000_0000) + Boot_Data.KERNEL_PHYS_BASE;
+    c.logger = (message: string, data: *void, info: Log_Info) {
+        serial_out(message);
+        if message[message.count-1] != #char "\n" {
+            serial_out("\n");
+        }
+    };
+
+    c.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = 2;
+    c.print_style.default_format_struct.use_newlines_if_long_form = true;
 
     push_context c {
         fb := framebuffer;
@@ -81,7 +89,7 @@ kernel_entry :: () #no_context {
             }
 
             if it == boot_data.memory_map_entries_used-1 {
-                serial_out("Not enough usable contiguous physical memory found.\n");
+                print("Not enough usable contiguous physical memory found.\n");
                 bluescreen();
             }
         }
@@ -150,10 +158,17 @@ bluescreen :: () {
         buffer[x + y * stride] = cast(u32) (0xff0000ff);
     }
 
+    serial_out("\nStack trace:\n");
+    print_stack_trace(context.stack_trace);
+
     while true #asm {
         cli;
         hlt;
     }
+}
+
+static_to_physical :: (object: *void) -> u64 {
+    return cast(u64) object - 0xffff_ffff_8000_0000 + Boot_Data.KERNEL_PHYS_BASE;
 }
 
 // A physical memory allocator that finds discontiguous physical pages. Discontiguous pages are more likely to be available and it doesn't usually matter that they're discontiguous. However it's slower for large allocations, not only because the pages need to be found individually, but they also need to be manually mapped so that the virtual memory is contiguous. For physically contiguous memory, there's already corresponding contiguous virtual memory in the direct mapping.
@@ -166,9 +181,6 @@ Physical_Page_Pool :: struct {
     freelist: s32 = FREELIST_TAIL;
     FREELIST_TAIL :: Page_Frame_Desc.FREELIST_TAIL;
 }
-
-// It might not make sense in the future for this to be in the context, because it'll be used in syscall handlers
-#add_context physical_page_pool: Physical_Page_Pool;
 
 init_physical_page_pool :: (memory: Boot_Data.Memory_Region) {
     using physical_page_pool;
@@ -431,9 +443,26 @@ Block_Allocator :: struct {
 
 
 serial_out :: (data: string) {
+    COM1 :: 0x3f8;
+
     for cast([] u8) data {
+        for 1..1_0000 {
+            status: u8;
+            port := COM1 + 5;
+
+            #asm {
+                status === a;
+                port   === d;
+                in.b status, port;
+            }
+
+            if status & 0x20 break;
+
+            #asm { pause; }
+        }
+
         byte := it;
-        port := 0x3f8;
+        port := COM1;
 
         #asm {
             byte === a;

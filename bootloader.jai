@@ -26,6 +26,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         {
             // Even though this mapping is not needed while boot-services are still active, we create it in the boot-services memory map anyway, so that it gets reported by GetMemoryMap, and the kernel will know the memory is not available.
+            // Todo: this call fails on VirtualBox
             kernel_base: u64 = Boot_Data.KERNEL_PHYS_BASE;
             EFI_CHECK(boot_services.AllocatePages(.AllocateAddress, UserReservedMemoryType, 0x10_0000 / 4096, *kernel_base));
 
@@ -256,7 +257,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         }
 
         while boot_services.ExitBootServices(loaded_image, mmap_key) == .InvalidParameter {
-            // ExitBootServices itself can sometimes change the memory map, in which case you just need to call it again. I don't get why this needs to be done by the user.
+            // ExitBootServices itself can sometimes change the memory map, in which case you just need to call it again.
             mmap_key = 0;
             mmap_size = max_mmap_size;
             boot_services.GetMemoryMap(*mmap_size, xx memory_map, *mmap_key, null, null);

@@ -25,9 +25,50 @@ __element_duplicate :: (start: *u8, num_elements: s64, size: s64) #c_call #no_ao
 }
 
 write_nonnegative_number :: (n: u64, base := 10, to_standard_error := false) #no_context #no_abc #no_aoc {
+    if n == 0 {
+        write_string("0", to_standard_error);
+        return;
+    }
+
+    if base > 16  base = 16;
+    if base < 2   base = 2;
+
+    ubase := cast,no_check(u64) base;
+
+    // This is of course a horrible hack.
+    // A u64 in base 2 can be up to 64 digits,
+    // so we need at least that much space. Add a few more digits for superstition.
+    buf: [69] u8;
+
+    starting_cursor : s32 = buf.count;
+    cursor := starting_cursor;
+
+
+    while n {
+        cursor -= 1;
+        index := n % ubase;
+        if index <= 9 {
+            buf[cursor] = cast(u8)(index + #char "0");
+        } else {
+            buf[cursor] = cast(u8)(index - 10 + #char "a");
+        }
+
+        n /= ubase;
+    }
+
+    s: string = ---;
+    s.data  = buf.data + cursor;
+    s.count = starting_cursor - cursor;
+    write_string(s, to_standard_error);
 }
 
 write_number :: (n: s64, base := 10, to_standard_error := false) #no_context #no_aoc {
+    if n < 0 {
+        write_string("-", to_standard_error);
+        n = -n;  // Will overflow if this is the most negative s64.
+    }
+
+    write_nonnegative_number(cast,no_check(u64) n, base, to_standard_error = to_standard_error);
 }
 
 runtime_support_assertion_failed :: (loc: Source_Code_Location, message: string) -> bool {
@@ -38,11 +79,19 @@ runtime_support_default_logger :: (message: string, data: *void, info: Log_Info)
 }
 
 c_style_strlen :: (str: *u8) -> s64 #no_context {
-    return 0;
+    p := str;
+    while << p  { p += 1; }
+    return p - str;
 }
 
 to_string :: (c_string: *u8) -> string #no_context {
-    return "";
+    if c_string == null return "";
+
+    s: string = ---;
+    s.data = c_string;
+    s.count = c_style_strlen(c_string);
+
+    return s;
 }
 
 // @Incomplete: Pass loc to Runtime_Support versions.
@@ -72,10 +121,27 @@ write_strings :: (strings: ..string, to_standard_error := false) #no_context #co
 
 #scope_module;
 
-serial_out :: (data: string) #no_context {
+serial_out :: (data: string) {
+    COM1 :: 0x3f8;
+
     for cast([] u8) data {
+        for 1..1_0000 {
+            status: u8;
+            port := COM1 + 5;
+
+            #asm {
+                status === a;
+                port   === d;
+                in.b status, port;
+            }
+
+            if status & 0x20 break;
+
+            #asm { pause; }
+        }
+
         byte := it;
-        port := 0x3f8;
+        port := COM1;
 
         #asm {
             byte === a;
@@ -86,9 +152,15 @@ serial_out :: (data: string) #no_context {
 }
 
 write_loc :: (loc: Source_Code_Location, to_standard_error := false) #no_context {
+    write_strings(loc.fully_pathed_filename, ":", to_standard_error = to_standard_error);
+    write_number(loc.line_number, to_standard_error = to_standard_error);
+    write_string(",", to_standard_error);
+    write_number(loc.character_number, to_standard_error = to_standard_error);
 }
 
 my_panic :: () #no_context {
+    write_string("Panic.\n", to_standard_error = true);
+    while true #asm { cli; hlt; }
 }
 
 __panic_due_to_runtime_call_of_compile_time_procedure :: (line_number: s64, filename: *u8) #no_context {
