@@ -22,9 +22,59 @@ Kernel_Globals :: struct {
 
     root_acpi_table: *Acpi_Table_Header;
     acpi_version: int;
+
+    interrupt_descriptor_table: [256] Interrupt_Gate_Desc #align 128;
+    global_descriptor_table: Global_Descriptor_Table #align 128;
 }
 
 using kernel_globals: Kernel_Globals;
+
+Interrupt_Gate_Desc :: struct {
+    offset_1: u16;
+    selector: u16;
+    ist:      u8;
+    flags:    u8;
+    offset_2: u16;
+    offset_3: u32;
+    reserved: u32;
+}
+
+register_interrupt_gate :: (handler: *void, vector_number: int) {
+    desc := *interrupt_descriptor_table[vector_number];
+    address := cast(u64) handler;
+
+    desc.offset_1  = xx  address        & 0xffff;
+    desc.offset_2  = xx (address >> 16) & 0xffff;
+    desc.offset_3  = xx (address >> 32) & 0xffffffff;
+    desc.selector  = 0x8; // ?????
+    desc.ist       = 0x0;
+    desc.flags     = 0x8e;
+    desc.reserved  = 0x0;
+}
+
+Global_Descriptor_Table :: struct {
+    null_entry: u64;
+    user_code: Gdt_Entry_Flags;
+    user_data: Gdt_Entry_Flags;
+    system_code: Gdt_Entry_Flags;
+    system_data: Gdt_Entry_Flags;
+    terminator: u64;
+}
+
+Gdt_Entry_Flags :: enum u64 {
+    AVAILABLE       :: 0x01 << 52;
+    LONG_MODE_CODE  :: 0x02 << 52;
+    SIZE            :: 0x04 << 52;
+    GRANULARITY     :: 0x08 << 52;
+    ACCESSED        :: 0x01 << 40;
+    READ_WRITE      :: 0x02 << 40;
+    DIRECTION       :: 0x04 << 40;
+    EXECUTABLE      :: 0x08 << 40;
+    DESCRIPTOR_TYPE :: 0x10 << 40;
+    PRIVILEGE0      :: 0x20 << 40;
+    PRIVILEGE1      :: 0x40 << 40;
+    PRESENT         :: 0x80 << 40;
+}
 
 #program_export
 kernel_entry :: () #no_context {
@@ -131,6 +181,47 @@ kernel_entry :: () #no_context {
 
         set_initial_data(*ts, 0x1_0000, ts_buffer);
         context.temporary_storage = *ts;
+
+        {
+            // Global descriptor table boilerplate
+            using Gdt_Entry_Flags;
+
+            global_descriptor_table = Global_Descriptor_Table.{
+                0x0,
+                READ_WRITE|PRESENT|DESCRIPTOR_TYPE|LONG_MODE_CODE|EXECUTABLE,
+                READ_WRITE|PRESENT|DESCRIPTOR_TYPE,
+                READ_WRITE|PRESENT|DESCRIPTOR_TYPE|PRIVILEGE0|PRIVILEGE1|LONG_MODE_CODE|EXECUTABLE,
+                READ_WRITE|PRESENT|DESCRIPTOR_TYPE|PRIVILEGE0|PRIVILEGE1,
+                0xffff_ffff,
+            };
+
+            gdtr: struct {
+                limit: u16;
+                base: *Global_Descriptor_Table #align 2;
+            }
+
+            gdtr.limit = size_of(Global_Descriptor_Table);
+            gdtr.base = *global_descriptor_table;
+
+            gdtrp := *gdtr;
+            #asm { lgdt [gdtrp]; }
+        }
+
+        {
+            // Interrupt descriptor table
+            idt_desc: struct {
+                limit: u16;
+                base:  *Interrupt_Gate_Desc #align 2;
+            }
+
+            idt_desc.limit = size_of(type_of(interrupt_descriptor_table));
+            idt_desc.base = interrupt_descriptor_table.data;
+
+            {
+                pointer := *idt_desc;
+                #asm { lidt [pointer]; }
+            }
+        }
 
         rsdp := cast(*Acpi_RSDP__Root_System_Description_Pointer) boot_data.acpi_rsdp;
         acpi_version = rsdp.revision;
@@ -472,7 +563,7 @@ serial_out :: (data: string) {
     }
 }
 
-serial_write_int :: (value: $T) {
+serial_write_hex :: (value: $T) {
     v := cast,no_check(u64) value;
 
     hex_chars := "0123456789abcdef";
@@ -529,14 +620,14 @@ make_buddy :: (base: u64, size: s64, buffer: *void) -> Buddy_Allocator {
     levels := bit_scan_reverse(size) - 13 + 1;
 
     serial_out("Creating buddy.\n");
-    serial_out("Num levels: "); serial_write_int(xx levels);
+    serial_out("Num levels: "); serial_write_hex(xx levels);
 
     freelists.data = cursor;
     freelists.count = levels;
     cursor += freelists.count * size_of(int);
 
     bitmap.count = 2 * (size / 4096) - 1;
-    serial_out("Bitmap bits: "); serial_write_int(xx bitmap.count);
+    serial_out("Bitmap bits: "); serial_write_hex(xx bitmap.count);
     serial_out("\n\n");
 
     bitmap_slots := (bitmap.count + 63) >> 6;
@@ -560,9 +651,9 @@ buddy_alloc :: (buddy: *Buddy_Allocator, bytes: int) -> u64 {
     b0 := (1 << level) - 1;
     b1 := b0 + b0;
 
-    serial_out("Level: "); serial_write_int(xx level);
-    serial_out("b0: ");    serial_write_int(xx b0);
-    serial_out("b1: ");    serial_write_int(xx b1);
+    serial_out("Level: "); serial_write_hex(xx level);
+    serial_out("b0: ");    serial_write_hex(xx b0);
+    serial_out("b1: ");    serial_write_hex(xx b1);
 
     address: u64;
 

@@ -121,7 +121,7 @@ write_strings :: (strings: ..string, to_standard_error := false) #no_context #co
 
 #scope_module;
 
-serial_out :: (data: string) {
+serial_out :: (data: string) #no_context {
     COM1 :: 0x3f8;
 
     for cast([] u8) data {

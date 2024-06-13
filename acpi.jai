@@ -66,6 +66,7 @@ find_acpi_table :: (signature: string) -> *Acpi_Table_Header {
 
 Acpi_MADT :: struct {
     using #as header: Acpi_Table_Header;
+
     local_apic_address: u32;
     flags: u32;
 
@@ -74,13 +75,15 @@ Acpi_MADT :: struct {
         length: u8;
 
         Type :: enum u8 {
-            LOCAL_APIC :: 0x0;
-            MULTIPROCESSOR_WAKEUP :: 0x10;
+            LOCAL_APIC                :: 0x0;
+            INTERRUPT_SOURCE_OVERRIDE :: 0x1;
+            NON_MASKABLE_INTERRUPT    :: 0x4;
+            MULTIPROCESSOR_WAKEUP     :: 0x10;
         }
     }
 
     Ics_Local_Apic :: struct {
-        using #as ics: Interrupt_Controller_Structure;
+        using ics: Interrupt_Controller_Structure;
 
         acpi_processor_uid: u8;
         apic_id: u8;
@@ -89,6 +92,23 @@ Acpi_MADT :: struct {
             enabled;
             online_capable;
         };
+    }
+
+    Ics_Source_Override :: struct {
+        using ics: Interrupt_Controller_Structure;
+
+        bus: u8;
+        source: u8;
+        global_system_interrupt: u32;
+        flags: u16;
+    }
+
+    Ics_Non_Maskable_Interrupt :: struct {
+        using ics: Interrupt_Controller_Structure;
+
+        processor_uid: u8;
+        flags: u16 #align 1;
+        lapic_lint: u8;
     }
 }
 
@@ -100,10 +120,14 @@ apic_stuff :: () {
     while cursor < cast(u32) acpi_header + acpi_header.length {
         ics := cast(*Acpi_MADT.Interrupt_Controller_Structure) cursor;
 
-        if ics.type == .LOCAL_APIC {
+        if ics.type == {
+          case .LOCAL_APIC;
             lapic := cast(*Acpi_MADT.Ics_Local_Apic) ics;
             print("Found Local APIC: %\n", << lapic);
+          case;
+            print("ICS type %\n", cast(u8) ics.type);
         }
+
         cursor += ics.length;
     }
 }
