@@ -147,7 +147,31 @@ Acpi_Lvt :: struct {
     };
 }
 
+tock: bool;
+
+#program_export
+timer_interrupt :: (stack: *void) #c_call {
+    push_context .{} {
+        serial_out(ifx tock then "tock\n" else "tick\n");
+        tock = !tock;
+
+        write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
+    }
+} @InterruptHandler
+
+#program_export
+fault :: (stack: *void) #c_call {
+    push_context .{} {
+        serial_out("Something bad happened\n");
+        #asm { cli; hlt; }
+    }
+} @InterruptHandler
+
 apic_stuff :: () {
+    for 0..32 {
+        register_interrupt_gate(xx fault, it);
+    }
+
     acpi_header := cast(*Acpi_MADT) find_acpi_table("APIC");
 
     cursor := cast(u32) acpi_header + size_of(Acpi_MADT);
@@ -182,26 +206,16 @@ apic_stuff :: () {
     assert(0xfee0_0000 == physical);
     assert(acpi_header.local_apic_address == cast(u32) physical);
 
-    virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096);
+    // Manual memory mapping because cache needs to be disabled for APIC accesses
+    virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096); // Allocating an individual page using the block allocator because we don't have anything better for virtual memory right now...
     map_page(virtual, physical, Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE);
 
     apic = cast(*void) virtual;
     version := read_apic_register(.APIC_VERSION);
 
-    print("Did APIC stuff. Version: %\n", formatInt(version, base=16));
+    register_interrupt_gate(xx timer_interrupt_wrapper, 49);
 
-    timer_handler :: () {
-        #asm { cli; }
-        push_context .{} {
-            serial_out("Received timer interrupt\n");
-        }
-
-        while true #asm { cli; hlt; }
-    }
-
-    register_interrupt_gate(xx timer_handler, 49);
-
-    write_apic_register(.TIC__TIMER_INITIAL, 0xffff_ffff);
+    write_apic_register(.TIC__TIMER_INITIAL, 0x1000_0000);
 
     lvtt := << cast(*Acpi_Lvt) *read_apic_register(.LVT__TIMER);
     lvtt.vector = 49;
@@ -213,7 +227,7 @@ apic_stuff :: () {
     }
 
     while true {
-        tcc := read_apic_register(.TCC__TIMER_CURRENT);
-        serial_write_hex(tcc);
+        // tcc := read_apic_register(.TCC__TIMER_CURRENT);
+        // serial_write_hex(tcc);
     }
 }

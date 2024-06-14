@@ -31,6 +31,8 @@ Kernel_Globals :: struct {
 
 using kernel_globals: Kernel_Globals;
 
+Interrupts :: #library,no_dll ".build/interrupts";
+
 Interrupt_Gate_Desc :: struct {
     offset_1: u16;
     selector: u16;

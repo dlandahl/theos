@@ -41,6 +41,12 @@ main :: () {
         return;
     }
 
+    nasm_result := run_command("nasm", "-v");
+    if nasm_result.exit_code != 0 {
+        log_error("\nThe NASM assembler is required by this build program to assemble the interrupt routines. Please install it and try again. The command might be \"sudo apt install nasm\"");
+        return;
+    }
+
     do_bootloader, do_kernel := true, true;
     args := get_build_options().compile_time_command_line;
 
@@ -123,6 +129,7 @@ compile_bootloader :: () -> success: bool {
                 result := run_command(.. link_command_array);
                 if result.exit_code {
                     compiler_set_workspace_status(.FAILED, workspace);
+                    log_error("Linking failed. It's possible you need to set JAI_ROOT_DIR in first.jai.");
                 }
 
                 compiler_custom_link_command_is_complete(workspace);
@@ -165,7 +172,12 @@ compile_kernel :: () -> success: bool {
     compiler_begin_intercept(workspace);
     add_build_file("kernel.jai", workspace);
 
+    interrupt_assembly: String_Builder;
+    append(*interrupt_assembly, ASSEMBLY_HEADER);
+    found_interrupts: [..] string;
+
     success: bool;
+    added: bool;
 
     while true {
         message := compiler_wait_for_message();
@@ -174,7 +186,48 @@ compile_kernel :: () -> success: bool {
             complete := cast(*Message_Complete) message;
 
             success = complete.error_code == .NONE;
+
             break;
+        }
+
+        if message.kind == .PHASE {
+            phase := cast(*Message_Phase) message;
+            if phase.phase == .ALL_TARGET_CODE_BUILT {
+
+                log("Assembling interrupt routines");
+
+                write_entire_file(".build/interrupts.asm", builder_to_string(*interrupt_assembly));
+                command := break_command_into_strings("nasm .build/interrupts.asm -o .build/interrupts.so -f elf64 -wall");
+
+                // Implement interrupt calling convention using metaprogramming
+                result := run_command(.. command);
+                if result.exit_code != 0 {
+                    log_error("Failed to assemble interrupt routines.");
+                    compiler_set_workspace_status(.FAILED, workspace);
+                    return false;
+                }
+            }
+
+            if phase.phase == .TYPECHECKED_ALL_WE_CAN {
+                for found_interrupts {
+                    add_build_string(tprint("%_wrapper :: () #foreign Interrupts;", it), workspace);
+                }
+
+                array_reset(*found_interrupts);
+            }
+        }
+
+        if message.kind == .TYPECHECKED {
+            typed := cast(*Message_Typechecked) message;
+            for header: typed.procedure_headers {
+                proc := header.expression;
+
+                for proc.notes {
+                    if it.text != "InterruptHandler" continue;
+                    print_to_builder(*interrupt_assembly, INTERRUPT_STUB_FORMAT, proc.name);
+                    array_add(*found_interrupts, proc.name);
+                }
+            }
         }
     }
 
@@ -208,8 +261,6 @@ format_disk :: () -> success: bool {
     for script {
         if !it.count continue;
 
-        // log("'%'\n", it);
-
         command := break_command_into_strings(it);
         result := run_command(.. command);
 
@@ -223,10 +274,121 @@ format_disk :: () -> success: bool {
 
 
 
+ASSEMBLY_HEADER :: #string END
+
+section .text
+
+[bits 64]
+
+%macro push_all 0
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+    push rbp
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+%endmacro
+
+%macro pop_all 0
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+%endmacro
+
+
+global task_switch
+
+; **current_task is in rax
+; *new_task is in rbx
+
+align 0x8
+task_switch:
+    cli
+    push_all
+
+    mov rcx, [rax]
+    mov r8, [rcx + 16]
+    fxsave64 [r8] ; Store FPU and SIMD state in the old task's xsave_area
+    mov [rcx], rsp ; Store current stack on current (old) task
+
+    mov [rax], rbx ; Set the current task to the new task
+    mov r8, [rbx + 16]
+    fxrstor64 [r8] ; Load FPU and SIMD state from the new task's xsave_area
+
+    mov rsp, [rbx] ; Restore the stack pointer from the current (new) task
+    mov rdx, [rbx + 8]
+    mov cr3, rdx ; Restore the page table from the current (new) task
+    pop_all
+
+    iretq
 
 
 
+global syscall_entry
 
+align 0x10
+syscall_entry:
+    push rcx
+    mov r8, rsp
+    and rsp, ~0xf
+
+    pushfq
+    cli
+    push_all
+
+    mov rdi, rsp
+    ; call syscall_interrupt
+
+    pop_all
+    popfq
+
+    mov rsp, r8
+    ret
+
+
+END;
+
+
+INTERRUPT_STUB_FORMAT :: #string END
+
+extern %1
+global %1_wrapper
+
+align 0x8
+%1_wrapper:
+    sub rsp, 8
+    cli
+
+    push_all
+    mov rdi, rsp
+    call %1
+    pop_all
+
+    add rsp, 8
+    iretq
+
+END;
 
 
 
