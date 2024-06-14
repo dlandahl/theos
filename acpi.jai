@@ -112,6 +112,41 @@ Acpi_MADT :: struct {
     }
 }
 
+APIC_Register :: enum {
+    APIC_ID                   :: 0x20;
+    APIC_VERSION              :: 0x30;
+    TPR__TASK_PRIORITY        :: 0x80;
+    APR__ARBITRATION_PRIORITY :: 0x90;
+    PPR__PROCESSOR_PRIORITY   :: 0xa0;
+    EOI__END_OF_INTERRUPT     :: 0xb0;
+    SPURIOUS_INTERRUPT        :: 0xf0;
+    LVT__TIMER                :: 0x320;
+    TIC__TIMER_INITIAL        :: 0x380;
+    TCC__TIMER_CURRENT        :: 0x390;
+    DV__TIMER_DIVIDE          :: 0x3e0;
+}
+
+read_apic_register :: (register: APIC_Register) -> u32 {
+    return << cast(*u32) (apic + cast(u64) register);
+}
+
+write_apic_register :: (register: APIC_Register, value: u32) {
+    << cast(*u32) (apic + cast(u64) register) = value;
+}
+
+Acpi_Lvt :: struct {
+    vector: u8;
+
+#place vector;
+    flags: enum_flags u32 {
+        DS__delivery_status :: 1 << 12;
+        RIR__remote_irr     :: 1 << 14;
+        TGM__trigger_mode   :: 1 << 15;
+        M__mask             :: 1 << 16;
+        TMM__timer_mode     :: 1 << 17;
+    };
+}
+
 apic_stuff :: () {
     acpi_header := cast(*Acpi_MADT) find_acpi_table("APIC");
 
@@ -151,7 +186,34 @@ apic_stuff :: () {
     map_page(virtual, physical, Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE);
 
     apic = cast(*void) virtual;
-    version := << cast(*u32) (apic + cast(u64) APIC_Register_Offset.APIC_VERSION);
+    version := read_apic_register(.APIC_VERSION);
 
     print("Did APIC stuff. Version: %\n", formatInt(version, base=16));
+
+    timer_handler :: () {
+        #asm { cli; }
+        push_context .{} {
+            serial_out("Received timer interrupt\n");
+        }
+
+        while true #asm { cli; hlt; }
+    }
+
+    register_interrupt_gate(xx timer_handler, 49);
+
+    write_apic_register(.TIC__TIMER_INITIAL, 0xffff_ffff);
+
+    lvtt := << cast(*Acpi_Lvt) *read_apic_register(.LVT__TIMER);
+    lvtt.vector = 49;
+    lvtt.flags &= ~.M__mask;
+    write_apic_register(.LVT__TIMER, << cast(*u32) *lvtt);
+
+    #asm {
+        sti;
+    }
+
+    while true {
+        tcc := read_apic_register(.TCC__TIMER_CURRENT);
+        serial_write_hex(tcc);
+    }
 }

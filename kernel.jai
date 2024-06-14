@@ -31,15 +31,6 @@ Kernel_Globals :: struct {
 
 using kernel_globals: Kernel_Globals;
 
-APIC_Register_Offset :: enum {
-    APIC_ID                   :: 0x20;
-    APIC_VERSION              :: 0x30;
-    TPR__TASK_PRIORITY        :: 0x80;
-    APR__ARBITRATION_PRIORITY :: 0x90;
-    PPR__PROCESSOR_PRIORITY   :: 0xa0;
-    EOI__END_OF_INTERRUPT     :: 0xb0;
-}
-
 Interrupt_Gate_Desc :: struct {
     offset_1: u16;
     selector: u16;
@@ -243,11 +234,11 @@ kernel_entry :: () #no_context {
 
         {
             // Put a virtual memory heap after the direct mapping
-            one_gb :: 0x4000_0000;
-            direct_mapping_size := boot_data.page_tables.direct_pd.count * one_gb;
+            GB :: 0x4000_0000;
+            direct_mapping_size := boot_data.page_tables.direct_pd.count * GB;
 
             heap_base := DIRECT_MAPPING_BASE + direct_mapping_size;
-            heap_size := 64 * one_gb;
+            heap_size := 64 * GB;
 
             init_block_allocator(*virtual_block_allocator, heap_base / 4096, heap_size / 4096);
         }
