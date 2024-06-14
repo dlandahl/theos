@@ -23,8 +23,8 @@ Kernel_Globals :: struct {
     root_acpi_table: *Acpi_Table_Header;
     acpi_version: int;
 
-    interrupt_descriptor_table: [256] Interrupt_Gate_Desc #align 128;
-    global_descriptor_table: Global_Descriptor_Table #align 128;
+    interrupt_descriptor_table: [256] Interrupt_Gate_Desc #align 16; // Hardware requires 16 byte alignment on IDT
+    global_descriptor_table: Global_Descriptor_Table #align 64; // Align to cache block so no extra memory accesses are required on context switch
 }
 
 using kernel_globals: Kernel_Globals;
@@ -46,7 +46,7 @@ register_interrupt_gate :: (handler: *void, vector_number: int) {
     desc.offset_1  = xx  address        & 0xffff;
     desc.offset_2  = xx (address >> 16) & 0xffff;
     desc.offset_3  = xx (address >> 32) & 0xffffffff;
-    desc.selector  = 0x8; // ?????
+    desc.selector  = 0x8;
     desc.ist       = 0x0;
     desc.flags     = 0x8e;
     desc.reserved  = 0x0;
@@ -54,10 +54,10 @@ register_interrupt_gate :: (handler: *void, vector_number: int) {
 
 Global_Descriptor_Table :: struct {
     null_entry: u64;
-    user_code: Gdt_Entry_Flags;
-    user_data: Gdt_Entry_Flags;
-    system_code: Gdt_Entry_Flags;
-    system_data: Gdt_Entry_Flags;
+    ring0_code: Gdt_Entry_Flags;
+    ring0_data: Gdt_Entry_Flags;
+    ring3_code: Gdt_Entry_Flags;
+    ring3_data: Gdt_Entry_Flags;
     terminator: u64;
 }
 
@@ -146,31 +146,48 @@ kernel_entry :: () #no_context {
 
         context.allocator.proc = (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
             if mode == .ALLOCATE || mode == .RESIZE {
-                new: *void;
+                physical: u64;
 
                 // Minimum allocation size is a page, avoid small allocations
                 if size <= 4096 {
-                    new = cast(*void) (get_page_frame() + DIRECT_MAPPING_BASE);
+                    page := get_page_frame();
+                    address := get_physical_address(page);
                 } else {
-                    new = cast(*void) alloc_block(*kernel_globals.physical_block_allocator, size);
-                    new += DIRECT_MAPPING_BASE;
+                    physical =  alloc_block(*kernel_globals.physical_block_allocator, size);
                     // Todo: fallback path if a contiguous physical block can't be found
                 }
+
+                new := cast(*void) physical + DIRECT_MAPPING_BASE;
 
                 if old_size {
                     memcpy(new, old_memory, old_size);
                 }
 
+                page := *page_frames[physical / 4096];
+                page.flags |= ifx size <= 4096 then .ALLOCATOR_TAG_SINGLE_PAGE else .ALLOCATOR_TAG_BLOCK;
+
                 return new;
             }
 
             if mode == .FREE {
-                if size <= 4096 {
-                    phys := cast(u64) old_memory - DIRECT_MAPPING_BASE;
-                    release_page_frame(phys);
+                phys := cast(u64) old_memory - DIRECT_MAPPING_BASE;
+                index := phys / 4096;
+
+                page := *page_frames[index];
+
+                if page.flags & .ALLOCATOR_TAG_BLOCK {
+                    free_block(*kernel_globals.physical_block_allocator, phys);
+                } else if page.flags & .ALLOCATOR_TAG_SINGLE_PAGE {
+                    release_page_frame(page);
                 } else {
-                    free_block(*kernel_globals.physical_block_allocator, cast(u64) old_memory);
+                    bluescreen();
                 }
+
+                page.flags &= ~(Page_Frame_Desc.Flags.ALLOCATOR_TAG_SINGLE_PAGE | .ALLOCATOR_TAG_BLOCK);
+            }
+
+            if mode == .CAPS {
+                return cast(*void) Allocator_Caps.FREE | .ACTUALLY_RESIZE | .HINT_I_AM_A_GENERAL_HEAP_ALLOCATOR;
             }
 
             return null;
@@ -464,7 +481,7 @@ alloc_block :: (using allocator: *Block_Allocator, size_bytes: int) -> u64, Bloc
     return 0, .{};
 }
 
-free_block :: (allocator: *Block_Allocator, address: u64) {
+free_block :: (allocator: *Block_Allocator, address: u64) -> bool {
     // Find the block corresponding to that address using binary search
     // Todo hash table
 
@@ -492,6 +509,7 @@ free_block :: (allocator: *Block_Allocator, address: u64) {
 
     if block.start_page != start_page {
         bluescreen();
+        return false;
     }
 
     block.used = false;
@@ -515,6 +533,8 @@ free_block :: (allocator: *Block_Allocator, address: u64) {
         }
         blocks.count -= 1;
     }
+
+    return true;
 }
 
 Block_Desc :: struct {

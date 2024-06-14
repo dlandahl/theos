@@ -50,6 +50,14 @@ Page_Frame_Desc :: struct {
     // We want to keep this struct as small as possible because there's one for each physical memory page in the device
     freelist: s32;
     FREELIST_TAIL :: -1;
+
+    flags: Flags;
+
+    Flags :: enum_flags u32 {
+        ALLOCATOR_TAG_SINGLE_PAGE;
+        ALLOCATOR_TAG_BLOCK;
+        ALLOCATOR_TAG_BUDDY;
+    };
 }
 
 #program_export
