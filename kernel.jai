@@ -18,16 +18,27 @@ Kernel_Globals :: struct {
 
     physical_page_pool: Physical_Page_Pool;
     physical_block_allocator: Block_Allocator;
-    // virtual_block_allocator: Block_Allocator;
+    virtual_block_allocator: Block_Allocator;
 
     root_acpi_table: *Acpi_Table_Header;
     acpi_version: int;
 
     interrupt_descriptor_table: [256] Interrupt_Gate_Desc #align 16; // Hardware requires 16 byte alignment on IDT
     global_descriptor_table: Global_Descriptor_Table #align 64; // Align to cache block so no extra memory accesses are required on context switch
+
+    apic: *void;
 }
 
 using kernel_globals: Kernel_Globals;
+
+APIC_Register_Offset :: enum {
+    APIC_ID                   :: 0x20;
+    APIC_VERSION              :: 0x30;
+    TPR__TASK_PRIORITY        :: 0x80;
+    APR__ARBITRATION_PRIORITY :: 0x90;
+    PPR__PROCESSOR_PRIORITY   :: 0xa0;
+    EOI__END_OF_INTERRUPT     :: 0xb0;
+}
 
 Interrupt_Gate_Desc :: struct {
     offset_1: u16;
@@ -76,11 +87,48 @@ Gdt_Entry_Flags :: enum u64 {
     PRESENT         :: 0x80 << 40;
 }
 
+Ia32_Model_Specific_Register :: enum {
+    APIC_BASE__Apic_Base      :: 0x0000_001b;
+    PAT__Page_Attribute_Table :: 0x0000_0277;
+    EFER__Extended_Features   :: 0xc000_0080;
+    STAR__Syscall_Segment     :: 0xc000_0081;
+    LSTAR__Syscall_Address    :: 0xc000_0082;
+    FMASK__Syscall_Flags      :: 0xc000_0084;
+}
+
+write_msr :: (msr: Ia32_Model_Specific_Register, value: u64) {
+    high := value >> 32;
+    low := value & 0xffff_ffff;
+
+    #asm {
+        msr === c;
+        high === d;
+        low  === a;
+
+        wrmsr high, low, msr;
+    }
+}
+
+read_msr :: (msr: Ia32_Model_Specific_Register) -> u64 {
+    low: u64;
+    high: u64;
+
+    #asm {
+        msr === c;
+        high === d;
+        low === a;
+
+        rdmsr high, low, msr;
+    }
+
+    return low | (high << 32);
+}
+
 #program_export
 kernel_entry :: () #no_context {
 
     boot_data = cast(*Boot_Data) 0x10_0000;
-    page_frames = boot_data.page_frames;
+    page_frames = boot_data.page_frames.data;
 
     framebuffer.buffer = cast(*u32) boot_data.framebuffer;
     framebuffer.x_resolution = boot_data.x_resolution;
@@ -151,9 +199,9 @@ kernel_entry :: () #no_context {
                 // Minimum allocation size is a page, avoid small allocations
                 if size <= 4096 {
                     page := get_page_frame();
-                    address := get_physical_address(page);
+                    physical = get_physical_address(page);
                 } else {
-                    physical =  alloc_block(*kernel_globals.physical_block_allocator, size);
+                    physical = alloc_block(*kernel_globals.physical_block_allocator, size);
                     // Todo: fallback path if a contiguous physical block can't be found
                 }
 
@@ -193,6 +241,17 @@ kernel_entry :: () #no_context {
             return null;
         };
 
+        {
+            // Put a virtual memory heap after the direct mapping
+            one_gb :: 0x4000_0000;
+            direct_mapping_size := boot_data.page_tables.direct_pd.count * one_gb;
+
+            heap_base := DIRECT_MAPPING_BASE + direct_mapping_size;
+            heap_size := 64 * one_gb;
+
+            init_block_allocator(*virtual_block_allocator, heap_base / 4096, heap_size / 4096);
+        }
+
         ts_buffer := alloc(0x1_0000);
         ts: Temporary_Storage;
 
@@ -212,32 +271,30 @@ kernel_entry :: () #no_context {
                 0xffff_ffff,
             };
 
-            gdtr: struct {
+            gdt_desc: struct {
                 limit: u16;
                 base: *Global_Descriptor_Table #align 2;
             }
 
-            gdtr.limit = size_of(Global_Descriptor_Table);
-            gdtr.base = *global_descriptor_table;
+            gdt_desc.limit = size_of(Global_Descriptor_Table);
+            gdt_desc.base = *global_descriptor_table;
 
-            gdtrp := *gdtr;
-            #asm { lgdt [gdtrp]; }
+            pointer := *gdt_desc;
+            #asm { lgdt [pointer]; }
         }
 
         {
             // Interrupt descriptor table
             idt_desc: struct {
                 limit: u16;
-                base:  *Interrupt_Gate_Desc #align 2;
+                base: *Interrupt_Gate_Desc #align 2;
             }
 
             idt_desc.limit = size_of(type_of(interrupt_descriptor_table));
             idt_desc.base = interrupt_descriptor_table.data;
 
-            {
-                pointer := *idt_desc;
-                #asm { lidt [pointer]; }
-            }
+            pointer := *idt_desc;
+            #asm { lidt [pointer]; }
         }
 
         rsdp := cast(*Acpi_RSDP__Root_System_Description_Pointer) boot_data.acpi_rsdp;
@@ -251,6 +308,7 @@ kernel_entry :: () #no_context {
             root_acpi_table = xx (rsdp.rsdt_address + DIRECT_MAPPING_BASE);
         }
 
+        print("Finding facp\n");
         print("FADT: %\n", find_acpi_table("FACP"));
 
         apic_stuff();
@@ -374,11 +432,11 @@ get_or_create_page_table :: (table: *u64, entry: u64) -> *u64 {
     return cast(*u64) (address + DIRECT_MAPPING_BASE);
 }
 
-map_page :: (virtual_address: *void, page_frame: *Page_Frame_Desc) {
-    map_page(cast(u64) virtual_address, page_frame);
+map_page :: (virtual_address: *void, physical_address: u64, flags := Page_Flags.PRESENT | .READ_WRITE) {
+    map_page(cast(u64) virtual_address, physical_address);
 }
 
-map_page :: (virtual_address: u64, page_frame: *Page_Frame_Desc) {
+map_page :: (virtual_address: u64, physical_address: u64, flags := Page_Flags.PRESENT | .READ_WRITE) {
     using Page_Flags;
 
     mask: u64 = 0b111111111;
@@ -398,9 +456,7 @@ map_page :: (virtual_address: u64, page_frame: *Page_Frame_Desc) {
         bluescreen();
     }
 
-    physical_address := get_physical_address(page_frame);
-
-    pt[pt_offset] = physical_address | cast(u64) PRESENT | READ_WRITE;
+    pt[pt_offset] = physical_address | cast(u64) flags;
 
     pg := *virtual_address;
     #asm {

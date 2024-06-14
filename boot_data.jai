@@ -20,7 +20,7 @@ Page_Tables :: struct {
 DIRECT_MAPPING_BASE :: 0xffff_8000_0000_0000;
 
 Boot_Data :: struct {
-    page_tables: Page_Tables;
+    page_tables: Page_Tables; // This should be the first field to ensure alignment of page tables to a page boundary
 
     page_directories_used: int;
     KERNEL_PHYS_BASE :: 0x600_0000; // Random choice, really this needs to be dynamically chosen to avoid writing over firmware stuff
@@ -43,7 +43,7 @@ Boot_Data :: struct {
     memory_map: [100] Usable_Memory_Region;
     memory_map_entries_used: int;
 
-    page_frames: *Page_Frame_Desc;
+    page_frames: [] Page_Frame_Desc;
 }
 
 Page_Frame_Desc :: struct {
@@ -53,7 +53,7 @@ Page_Frame_Desc :: struct {
 
     flags: Flags;
 
-    Flags :: enum_flags u32 {
+    Flags :: enum_flags u8 {
         ALLOCATOR_TAG_SINGLE_PAGE;
         ALLOCATOR_TAG_BLOCK;
         ALLOCATOR_TAG_BUDDY;

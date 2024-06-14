@@ -113,11 +113,62 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         EFI_CHECK(boot_services.AllocatePool(.EfiLoaderData, size, *load_buffer));
         EFI_CHECK(kernel_file.Read(kernel_file, *size, load_buffer));
 
-        for 0..size_of(Page_Tables) / size_of(u64) - 1 {
-            << (cast(*u64) *boot_data.page_tables + it) = 0;
+        // Firmware physical memory map
+        limit :: (region: Boot_Data.Memory_Region) -> u64 {
+            return region.address + region.pages * 4096;
+        }
+
+        descriptor_size: u64; // Don't assume that memory map entries will match Lil_Uefi's EFI_MEMORY_DESCRIPTOR structure, the OVMF.fd one is larger
+        mmap_size: u64;
+
+        boot_services.GetMemoryMap(*mmap_size, null, null, *descriptor_size, null); // Get the size, don't EFI_CHECK because return status will be BufferTooSmall
+
+        mmap_size += 32 * descriptor_size;
+        max_mmap_size := mmap_size;
+        memory_map: *u8;
+
+        mmap_key: EFI_UINTN;
+
+        EFI_CHECK(boot_services.AllocatePool(.EfiLoaderData, mmap_size, cast(**void) *memory_map));
+        EFI_CHECK(boot_services.GetMemoryMap(*mmap_size, xx memory_map, *mmap_key, null, null));
+
+        entry_count := mmap_size / descriptor_size;
+
+        // Find size of physical memory and allocate page frame descriptor array
+        highest_address: u64;
+
+        for 0..entry_count-1 {
+            desc := cast(*EFI_MEMORY_DESCRIPTOR) (memory_map + it * descriptor_size);
+
+            if cast(EFI_MEMORY_TYPE) desc.Type == {
+              case .EfiUnusableMemory; #through;
+              case .EfiMemoryMappedIO; #through;
+              case .EfiMemoryMappedIOPortSpace;
+                continue;
+            }
+
+            region: Boot_Data.Memory_Region;
+
+            region.address = desc.PhysicalStart;
+            region.pages   = desc.NumberOfPages;
+
+            // These are not guaranteed to be sorted by address, so check each one to find the amount of physical memory.
+            if limit(region) > highest_address {
+                highest_address = limit(region);
+            }
         }
 
         {
+            // Reserve physical memory for page frame descriptors. We'll remap this to a kernel address in a moment
+            count := highest_address / 4096;
+            EFI_CHECK(boot_services.AllocatePool(UserReservedMemoryType, size_of(Page_Frame_Desc) * count, cast(**void) boot_data.page_frames.data));
+            boot_data.page_frames.count = cast(s64) count;
+        }
+
+        {
+            // Page tables
+            memset(*boot_data.page_tables, 0, size_of(Page_Tables));
+
             using boot_data.page_tables;
 
             PAGE_PRESENT    : u64 : 0x1;
@@ -165,52 +216,22 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             pd[4] = cast(u64) boot_data.framebuffer             | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             pd[5] = cast(u64) boot_data.framebuffer + 0x20_0000 | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
 
-            boot_data.page_directories_used = 6;
+            // Map the page frame descriptors
+            page_directories_needed := (boot_data.page_frames.count * size_of(Page_Frame_Desc)) / (0x20_0000) + 1;
+
+            for 0..page_directories_needed-1 {
+                base := cast(u64) boot_data.page_frames.data + cast(u64) it * 0x20_0000;
+                pd[6 + it] = base | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            }
+
+            boot_data.page_directories_used = 6 + page_directories_needed;
 
             // Translate framebuffer address to virtual
             boot_data.framebuffer = cast(*u32) (0xffff_ffff_8000_0000 + 4*0x20_0000);
+
+            // Translate page frame descriptor array address to virtual
+            boot_data.page_frames.data = cast(*Page_Frame_Desc) (0xffff_ffff_8000_0000 + 6*0x20_0000);
         }
-
-        // Firmware physical memory map
-        limit :: (region: Boot_Data.Memory_Region) -> u64 {
-            return region.address + region.pages * 4096;
-        }
-
-        descriptor_size: u64; // Don't assume that memory map entries will match Lil_Uefi's EFI_MEMORY_DESCRIPTOR structure, the OVMF.fd one is larger
-        mmap_size: u64;
-
-        boot_services.GetMemoryMap(*mmap_size, null, null, *descriptor_size, null); // Get the size, don't EFI_CHECK because return status will be BufferTooSmall
-
-        mmap_size += 32 * descriptor_size;
-        max_mmap_size := mmap_size;
-        memory_map: *u8;
-
-        mmap_key: EFI_UINTN;
-
-        EFI_CHECK(boot_services.AllocatePool(.EfiLoaderData, mmap_size, cast(**void) *memory_map));
-        EFI_CHECK(boot_services.GetMemoryMap(*mmap_size, xx memory_map, *mmap_key, null, null));
-
-        entry_count := mmap_size / descriptor_size;
-
-        // Find size of physical memory and allocate page frame descriptor array
-        highest_address: u64;
-
-        for 0..entry_count-1 {
-            desc := cast(*EFI_MEMORY_DESCRIPTOR) (memory_map + it * descriptor_size);
-
-            region: Boot_Data.Memory_Region;
-
-            region.address = desc.PhysicalStart;
-            region.pages   = desc.NumberOfPages;
-
-            // These are not guaranteed to be sorted by address, so check each one to find the amount of physical memory.
-            if limit(region) > highest_address {
-                highest_address = limit(region);
-            }
-        }
-
-        page_frame_count := highest_address / 4096;
-        EFI_CHECK(boot_services.AllocatePool(UserReservedMemoryType, size_of(Page_Frame_Desc) * page_frame_count, cast(**void) *boot_data.page_frames));
 
         mmap_key = 0;
         mmap_size = max_mmap_size;
