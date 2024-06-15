@@ -161,7 +161,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         {
             // Reserve physical memory for page frame descriptors. We'll remap this to a kernel address in a moment
             count := highest_address / 4096;
-            EFI_CHECK(boot_services.AllocatePool(UserReservedMemoryType, size_of(Page_Frame_Desc) * count, cast(**void) boot_data.page_frames.data));
+            EFI_CHECK(boot_services.AllocatePool(UserReservedMemoryType, size_of(Page_Frame_Desc) * count, cast(**void) *boot_data.page_frames.data));
             boot_data.page_frames.count = cast(s64) count;
         }
 
@@ -212,25 +212,29 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
                 }
             }
 
+            virtual_base : u64 : 0xffff_ffff_8000_0000;
+            offset := cast(u64) boot_data.framebuffer & 0x1fffff;
+
             // Map the framebuffer
-            pd[4] = cast(u64) boot_data.framebuffer             | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-            pd[5] = cast(u64) boot_data.framebuffer + 0x20_0000 | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            pd[4] = (cast(u64) boot_data.framebuffer - offset            ) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            pd[5] = (cast(u64) boot_data.framebuffer - offset + 0x20_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+
+            // Translate framebuffer address to virtual
+            boot_data.framebuffer = cast(*u32) (virtual_base + 4*0x20_0000 + offset);
 
             // Map the page frame descriptors
-            page_directories_needed := (boot_data.page_frames.count * size_of(Page_Frame_Desc)) / (0x20_0000) + 1;
+            page_directories_needed := (boot_data.page_frames.count * size_of(Page_Frame_Desc)) / (0x20_0000) + 2;
+            offset = cast(u64) boot_data.page_frames.data & 0x1fffff;
 
             for 0..page_directories_needed-1 {
-                base := cast(u64) boot_data.page_frames.data + cast(u64) it * 0x20_0000;
+                base := cast(u64) boot_data.page_frames.data - offset + cast(u64) it * 0x20_0000;
                 pd[6 + it] = base | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             }
 
-            boot_data.page_directories_used = 6 + page_directories_needed;
-
-            // Translate framebuffer address to virtual
-            boot_data.framebuffer = cast(*u32) (0xffff_ffff_8000_0000 + 4*0x20_0000);
-
             // Translate page frame descriptor array address to virtual
-            boot_data.page_frames.data = cast(*Page_Frame_Desc) (0xffff_ffff_8000_0000 + 6*0x20_0000);
+            boot_data.page_frames.data = cast(*Page_Frame_Desc) (virtual_base + 6*0x20_0000 + offset);
+
+            boot_data.page_directories_used = 6 + page_directories_needed;
         }
 
         mmap_key = 0;

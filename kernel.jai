@@ -33,6 +33,49 @@ using kernel_globals: Kernel_Globals;
 
 Interrupts :: #library,no_dll ".build/interrupts";
 
+X64_Flags :: enum_flags u64 {
+    CF__carry  :: 0x1;
+    PF__parity :: 0x4;
+    AF__adjust :: 0x10;
+    ZF__zero   :: 0x40;
+    SF__sign   :: 0x80;
+    TF__trap   :: 0x100;
+    IF__interrupt :: 0x200;
+    DF__direction :: 0x400;
+    OF__overflow  :: 0x800;
+    RF__resume    :: 0x10000;
+}
+
+Interrupt_Stack_Frame :: struct (with_error_code: bool) {
+#if with_error_code {
+    error_code: u64;
+}
+    ip:    u64;
+    cs:    u64;
+    flags: X64_Flags;
+    sp:    u64;
+    ss:    u64;
+}
+
+Interrupt_Data :: struct (with_error_code: bool) {
+    r15:  u64;
+    r14:  u64;
+    r13:  u64;
+    r12:  u64;
+    r11:  u64;
+    r10:  u64;
+    r9 :  u64;
+    r8 :  u64;
+    rbp:  u64;
+    rdi:  u64;
+    rsi:  u64;
+    rdx:  u64;
+    rcx:  u64;
+    rbx:  u64;
+    rax:  u64;
+    using interrupt_frame: Interrupt_Stack_Frame(with_error_code);
+}
+
 Interrupt_Gate_Desc :: struct {
     offset_1: u16;
     selector: u16;
@@ -117,6 +160,11 @@ read_msr :: (msr: Ia32_Model_Specific_Register) -> u64 {
     return low | (high << 32);
 }
 
+// To get the stack trace after a fault
+main_thread_context: *Context;
+
+init_segment_registers :: () #foreign Interrupts;
+
 #program_export
 kernel_entry :: () #no_context {
 
@@ -151,6 +199,8 @@ kernel_entry :: () #no_context {
     c.print_style.default_format_struct.use_newlines_if_long_form = true;
 
     push_context c {
+        main_thread_context = *context;
+
         fb := framebuffer;
 
         for y: 0..fb.y_resolution-1 {
@@ -271,9 +321,12 @@ kernel_entry :: () #no_context {
 
             gdt_desc.limit = size_of(Global_Descriptor_Table);
             gdt_desc.base = *global_descriptor_table;
-
             pointer := *gdt_desc;
             #asm { lgdt [pointer]; }
+
+            print("Initting segments\n");
+            init_segment_registers();
+            print("Initted segments\n");
         }
 
         {

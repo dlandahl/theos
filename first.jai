@@ -367,6 +367,20 @@ syscall_entry:
     ret
 
 
+global init_segment_registers
+align 0x8
+init_segment_registers:
+    push 0x8
+    lea rax, [rel .reload_cs]
+    push rax
+    retfq
+  .reload_cs:
+    mov   ax, 0x10
+    mov   ds, ax
+    mov   es, ax
+    mov   ss, ax
+    ret
+
 END;
 
 
@@ -377,7 +391,7 @@ global %1_wrapper
 
 align 0x8
 %1_wrapper:
-    sub rsp, 8
+    ; sub rsp, 8
     cli
 
     push_all
@@ -385,7 +399,7 @@ align 0x8
     call %1
     pop_all
 
-    add rsp, 8
+    ; add rsp, 8
     iretq
 
 END;

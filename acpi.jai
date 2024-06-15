@@ -159,18 +159,159 @@ timer_interrupt :: (stack: *void) #c_call {
     }
 } @InterruptHandler
 
+
 #program_export
-fault :: (stack: *void) #c_call {
+fault_0 :: (stack: *void) #c_call {
     push_context .{} {
-        serial_out("Something bad happened\n");
-        #asm { cli; hlt; }
+        serial_out("Something bad happened (0)\n");
+        while true #asm { cli; hlt; }
+    }
+} @InterruptHandler
+
+#program_export
+fault_1 :: (stack: *void) #c_call {
+    push_context .{} {
+        serial_out("Something bad happened (1)\n");
+        while true #asm { cli; hlt; }
+    }
+} @InterruptHandler
+
+#program_export
+fault_2 :: (stack: *void) #c_call {
+    push_context .{} {
+        serial_out("Something bad happened (2)\n");
+        while true #asm { cli; hlt; }
+    }
+} @InterruptHandler
+
+#program_export
+fault_3 :: (stack: *void) #c_call {
+    push_context .{} {
+        serial_out("Something bad happened (3)\n");
+        while true #asm { cli; hlt; }
+    }
+} @InterruptHandler
+
+#program_export
+fault_4 :: (stack: *void) #c_call {
+    push_context .{} {
+        serial_out("Something bad happened (4)\n");
+        while true #asm { cli; hlt; }
+    }
+} @InterruptHandler
+
+#program_export
+fault_5 :: (stack: *void) #c_call {
+    push_context .{} {
+        serial_out("Something bad happened (5)\n");
+        while true #asm { cli; hlt; }
+    }
+} @InterruptHandler
+
+#program_export
+fault_6 :: (stack: *void) #c_call {
+    push_context .{} {
+        serial_out("Something bad happened (6)\n");
+        while true #asm { cli; hlt; }
+    }
+} @InterruptHandler
+
+#program_export
+fault_7 :: (stack: *void) #c_call {
+    push_context .{} {
+        serial_out("Something bad happened (7)\n");
+        while true #asm { cli; hlt; }
+    }
+} @InterruptHandler
+
+#program_export
+fault_8 :: (stack: *void) #c_call {
+    push_context .{} {
+        serial_out("Something bad happened (8)\n");
+        while true #asm { cli; hlt; }
+    }
+} @InterruptHandler
+
+#program_export
+fault_9 :: (stack: *void) #c_call {
+    push_context .{} {
+        serial_out("Something bad happened (9)\n");
+        while true #asm { cli; hlt; }
+    }
+} @InterruptHandler
+
+#program_export
+fault_10 :: (stack: *void) #c_call {
+    push_context .{} {
+        serial_out("Something bad happened (10)\n");
+        while true #asm { cli; hlt; }
+    }
+} @InterruptHandler
+
+#program_export
+fault_11 :: (stack: *void) #c_call {
+    push_context .{} {
+        serial_out("Something bad happened (11)\n");
+        while true #asm { cli; hlt; }
+    }
+} @InterruptHandler
+
+#program_export
+fault_12 :: (stack: *void) #c_call {
+    push_context .{} {
+        serial_out("Something bad happened (12)\n");
+        while true #asm { cli; hlt; }
+    }
+} @InterruptHandler
+
+#program_export
+general_protection_fault :: (stack: *Interrupt_Data(true)) #c_call {
+    push_context .{} {
+        print("General Protection Fault.\n");
+        print("RIP: 0x%\n", formatInt(stack.ip, base=16));
+        print("RSP: 0x%\n", formatInt(stack.sp, base=16));
+        print("SS: 0x%\n", formatInt(stack.ss, base=16));
+        print("CS: 0x%\n", formatInt(stack.cs, base=16));
+        print("Error Code: 0x%\n", formatInt(stack.error_code, base=16));
+        print_stack_trace(main_thread_context.stack_trace);
+
+        while true #asm { cli; hlt; }
+    }
+} @InterruptHandler
+
+#program_export
+fault_14 :: (stack: *void) #c_call {
+    push_context .{} {
+        serial_out("Something bad happened (14)\n");
+        while true #asm { cli; hlt; }
+    }
+} @InterruptHandler
+
+#program_export
+fault_15 :: (stack: *void) #c_call {
+    push_context .{} {
+        serial_out("Something bad happened (15)\n");
+        while true #asm { cli; hlt; }
     }
 } @InterruptHandler
 
 apic_stuff :: () {
-    for 0..32 {
-        register_interrupt_gate(xx fault, it);
-    }
+    register_interrupt_gate(xx fault_0_wrapper, 0);
+    register_interrupt_gate(xx fault_1_wrapper, 1);
+    register_interrupt_gate(xx fault_2_wrapper, 2);
+    register_interrupt_gate(xx fault_3_wrapper, 3);
+    register_interrupt_gate(xx fault_4_wrapper, 4);
+    register_interrupt_gate(xx fault_5_wrapper, 5);
+    register_interrupt_gate(xx fault_6_wrapper, 6);
+    register_interrupt_gate(xx fault_7_wrapper, 7);
+    register_interrupt_gate(xx fault_8_wrapper, 8);
+    register_interrupt_gate(xx fault_9_wrapper, 9);
+    register_interrupt_gate(xx fault_10_wrapper, 10);
+    register_interrupt_gate(xx fault_11_wrapper, 11);
+    register_interrupt_gate(xx fault_12_wrapper, 12);
+    register_interrupt_gate(xx general_protection_fault_wrapper, 13);
+    register_interrupt_gate(xx fault_14_wrapper, 14);
+    register_interrupt_gate(xx fault_15_wrapper, 15);
 
     acpi_header := cast(*Acpi_MADT) find_acpi_table("APIC");
 
@@ -207,7 +348,7 @@ apic_stuff :: () {
     assert(acpi_header.local_apic_address == cast(u32) physical);
 
     // Manual memory mapping because cache needs to be disabled for APIC accesses
-    virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096); // Allocating an individual page using the block allocator because we don't have anything better for virtual memory right now...
+    virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096); // Allocating an individual page using the block allocator because we don't have anything better for virtual memory yet
     map_page(virtual, physical, Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE);
 
     apic = cast(*void) virtual;
