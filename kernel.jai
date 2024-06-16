@@ -27,6 +27,9 @@ Kernel_Globals :: struct {
     global_descriptor_table: Global_Descriptor_Table #align 64; // Align to cache block so no extra memory accesses are required on context switch
 
     apic: *void;
+    io_apic: *u32;
+
+    high_precision_timer: HPET;
 }
 
 using kernel_globals: Kernel_Globals;
@@ -57,7 +60,7 @@ Interrupt_Stack_Frame :: struct (with_error_code: bool) {
     ss:    u64;
 }
 
-Interrupt_Data :: struct (with_error_code: bool) {
+Interrupt_Data :: struct (with_error_code := false) {
     r15:  u64;
     r14:  u64;
     r13:  u64;
@@ -324,9 +327,7 @@ kernel_entry :: () #no_context {
             pointer := *gdt_desc;
             #asm { lgdt [pointer]; }
 
-            print("Initting segments\n");
             init_segment_registers();
-            print("Initted segments\n");
         }
 
         {
@@ -353,9 +354,6 @@ kernel_entry :: () #no_context {
         } else {
             root_acpi_table = xx (rsdp.rsdt_address + DIRECT_MAPPING_BASE);
         }
-
-        print("Finding facp\n");
-        print("FADT: %\n", find_acpi_table("FACP"));
 
         apic_stuff();
     }

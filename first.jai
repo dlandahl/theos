@@ -210,7 +210,7 @@ compile_kernel :: () -> success: bool {
 
             if phase.phase == .TYPECHECKED_ALL_WE_CAN {
                 for found_interrupts {
-                    add_build_string(tprint("%_wrapper :: () #foreign Interrupts;", it), workspace);
+                    add_build_string(tprint("int__% :: () #foreign Interrupts;", it), workspace);
                 }
 
                 array_reset(*found_interrupts);
@@ -346,7 +346,6 @@ task_switch:
 
 
 global syscall_entry
-
 align 0x10
 syscall_entry:
     push rcx
@@ -377,9 +376,27 @@ init_segment_registers:
   .reload_cs:
     mov   ax, 0x10
     mov   ds, ax
-    mov   es, ax
     mov   ss, ax
+    mov   es, ax
+    mov   gs, ax
+    mov   fs, ax
     ret
+
+[bits 16]
+
+extern ap_startup
+global ap_startup_asm
+align 4096
+ap_startup_asm:
+    mov ax, 66
+    mov dx, 0x3f8
+    out dx, al
+  .end:
+    cli
+    hlt
+    jmp .end
+
+[bits 64]
 
 END;
 
@@ -387,10 +404,10 @@ END;
 INTERRUPT_STUB_FORMAT :: #string END
 
 extern %1
-global %1_wrapper
+global int__%1
 
 align 0x8
-%1_wrapper:
+int__%1:
     ; sub rsp, 8
     cli
 
