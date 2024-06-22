@@ -283,6 +283,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         while boot_services.ExitBootServices(loaded_image, mmap_key) == .InvalidParameter {
             // ExitBootServices itself can sometimes change the memory map, in which case you just need to call it again.
+            // Todo: does this mean we need to update the one we give the kernel?
             mmap_key = 0;
             mmap_size = max_mmap_size;
             boot_services.GetMemoryMap(*mmap_size, xx memory_map, *mmap_key, null, null);

@@ -67,6 +67,7 @@ main :: () {
         return;
     }
 
+
     if do_kernel && !compile_kernel() {
         log_error("Failed to compile the kernel.\n");
         return;
@@ -147,6 +148,17 @@ compile_bootloader :: () -> success: bool {
 }
 
 compile_kernel :: () -> success: bool {
+    log("Assembling AP Startup Code");
+
+    write_entire_file(".build/ap_startup.asm", AP_STARTUP_CODE);
+    command := break_command_into_strings("nasm .build/ap_startup.asm -o .build/ap_startup.bin -f bin -wall");
+
+    result := run_command(.. command);
+    if result.exit_code != 0 {
+        log_error("Failed to assemble AP startup code.");
+        return false;
+    }
+
     log("Compiling kernel");
     workspace := compiler_create_workspace("Kernel");
 
@@ -170,6 +182,8 @@ compile_kernel :: () -> success: bool {
     }
 
     compiler_begin_intercept(workspace);
+    defer compiler_end_intercept(workspace); // Is this a reasonable thing to do?
+
     add_build_file("kernel.jai", workspace);
 
     interrupt_assembly: String_Builder;
@@ -199,7 +213,7 @@ compile_kernel :: () -> success: bool {
                 write_entire_file(".build/interrupts.asm", builder_to_string(*interrupt_assembly));
                 command := break_command_into_strings("nasm .build/interrupts.asm -o .build/interrupts.so -f elf64 -wall");
 
-                // Implement interrupt calling convention using metaprogramming
+                // Generate assembly wrappers for interrupts handlers using metaprogramming
                 result := run_command(.. command);
                 if result.exit_code != 0 {
                     log_error("Failed to assemble interrupt routines.");
@@ -381,23 +395,6 @@ init_segment_registers:
     mov   gs, ax
     mov   fs, ax
     ret
-
-[bits 16]
-
-extern ap_startup
-global ap_startup_asm
-align 4096
-ap_startup_asm:
-    mov ax, 66
-    mov dx, 0x3f8
-    out dx, al
-  .end:
-    cli
-    hlt
-    jmp .end
-
-[bits 64]
-
 END;
 
 
@@ -421,6 +418,94 @@ int__%1:
 
 END;
 
+
+AP_STARTUP_CODE :: #string END
+
+[org 0x8000]
+[bits 16]
+
+%define segment_code     0x0008
+%define segment_data     0x0010
+
+ap_startup_asm:
+start equ $
+    cli
+    cld
+
+    lidt [idt]
+
+    ; Enable paging and memory protection
+    mov eax, 10100000b
+    mov cr4, eax
+
+    mov edx, [pml4]
+    mov cr3, edx
+
+    mov ecx, 0xc0000080
+    rdmsr
+
+    or eax, 0x00000100
+    wrmsr
+
+    mov ebx, cr0
+    or ebx, 0x80000001
+    mov cr0, ebx
+
+    lgdt [gdt]
+
+    jmp segment_code:ap_long_mode_start
+
+align 8
+gdt:
+    dw .end - .start - 1
+    dd .start
+
+align 8
+  .start:
+    dq 0x0000000000000000
+    dq 0x00209a0000000000
+    dq 0x0000920000000000
+  .end:
+
+align 8
+idt:
+  .length       dw 0
+  .base         dd 0
+
+times 512-($-start) db 0
+stack: dq 0
+jai:   dq 0
+pml4:  dd 0
+
+serial:
+    mov ax, 66
+    mov dx, 0x3f8
+    out dx, al
+  .end:
+    cli
+    hlt
+    jmp .end
+
+[bits 64]
+
+ap_long_mode_start:
+    mov ax, segment_data
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+
+    mov rsp, stack
+    mov rbp, rsp
+
+    call [jai]
+    int3
+    jmp $
+
+times 4096-($-$$) db 0
+
+END;
 
 
 

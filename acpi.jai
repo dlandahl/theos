@@ -267,22 +267,34 @@ apic_stuff :: () {
 
     for other_apic_ids print("APIC ID: %\n", it);
 
-//    for other_apic_ids {
-        write_apic_register(.DES__INTERRUPT_DEST, 1 << 24);
+    memcpy(cast(*void) 0x8000 + DIRECT_MAPPING_BASE, ap_startup_asm.data, 4096);
+
+    stack := alloc_block(*physical_block_allocator, 0x20_0000) + DIRECT_MAPPING_BASE;
+    << cast(*u64)  (0x8200 + DIRECT_MAPPING_BASE) = stack; // Hardcoded offset from ap_startup_asm
+    << cast(**void) (0x8208 + DIRECT_MAPPING_BASE) = cast(*void) ap_startup;
+    << cast(*u32)  (0x8210 + DIRECT_MAPPING_BASE) = cast(u32) boot_data.page_tables.pml4.data;
+
+    if false for other_apic_ids {
+        write_apic_register(.DES__INTERRUPT_DEST, it << 24);
 
         command: u32;
         command = (0b101 << 8) | (1 << 14); // INIT IPI
         write_apic_register(.ICR__INTERRUPT_COMMAND, command);
 
-        memcpy(cast(*void) 0x8000 + DIRECT_MAPPING_BASE, cast(*void) ap_startup_asm, 4096);
         command = (0b110 << 8) | 8; // STARTUP IPI
         write_apic_register(.ICR__INTERRUPT_COMMAND, command);
-//    }
+    }
 
     while true #asm { hlt; }
 }
 
-ap_startup_asm :: () #foreign Interrupts;
+ap_startup_asm :: #run,host -> [] u8 {
+    #import "Compiler";
+    #import "File";
+
+    code := read_entire_file(".build/ap_startup.bin");
+    return add_global_data(cast([] u8) code, .WRITABLE);
+}
 
 #program_export
 ap_startup :: () #c_call {
