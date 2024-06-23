@@ -405,7 +405,6 @@ global int__%1
 
 align 0x8
 int__%1:
-    ; sub rsp, 8
     cli
 
     push_all
@@ -413,7 +412,6 @@ int__%1:
     call %1
     pop_all
 
-    ; add rsp, 8
     iretq
 
 END;

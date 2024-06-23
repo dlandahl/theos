@@ -356,9 +356,11 @@ kernel_entry :: () #no_context {
         }
 
         apic_stuff();
+
+        init_hpet();
     }
 
-    while true #asm { cli; hlt; }
+    while true #asm { hlt; }
 }
 
 bluescreen :: () {

@@ -196,12 +196,12 @@ apic_stuff :: () {
 
     acpi_header := cast(*Acpi_MADT) find_acpi_table("APIC");
 
-    cursor := cast(u32) acpi_header + size_of(Acpi_MADT);
+    cursor := cast(u64) acpi_header + size_of(Acpi_MADT);
 
     my_id := read_apic_register(.APIC_ID);
     other_apic_ids: [..] u32;
 
-    while cursor < cast(u32) acpi_header + acpi_header.length {
+    while cursor < cast(u64) acpi_header + acpi_header.length {
         ics := cast(*Acpi_MADT.Interrupt_Controller_Structure) cursor;
 
         if ics.type == .LOCAL_APIC {
@@ -211,6 +211,8 @@ apic_stuff :: () {
                 array_add(*other_apic_ids, lapic.apic_id);
             }
         } else if ics.type == .IO_APIC {
+            assert(kernel_globals.io_apic == null);
+
             ioapic_ics := cast(*Acpi_MADT.Ics_Io_Apic) ics;
             virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096);
             map_page(virtual, ioapic_ics.address, Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE);
@@ -218,12 +220,9 @@ apic_stuff :: () {
             assert(ioapic_ics.address == 0xfec0_0000);
 
             kernel_globals.io_apic = cast(*u32) virtual;
-
-            // Version test.
-            io_apic.* = 0x1;
-            version := (io_apic + 0x4).*;
-
-            print("IO Apic version: 0x%\n", formatInt(version, base=16));
+        } else if ics.type == .INTERRUPT_SOURCE_OVERRIDE {
+            iso := cast(*Acpi_MADT.Ics_Source_Override) ics;
+            print("Interrupt source override: %\n", << iso);
         }
 
         cursor += ics.length;
@@ -245,7 +244,6 @@ apic_stuff :: () {
     assert(0xfee0_0000 == physical);
     assert(acpi_header.local_apic_address == cast(u32) physical);
 
-    // Manual memory mapping because cache needs to be disabled for APIC accesses
     virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096); // Allocating an individual page using the block allocator because we don't have anything better for virtual memory yet
     map_page(virtual, physical, Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE);
 
@@ -265,17 +263,18 @@ apic_stuff :: () {
         sti;
     }
 
-    for other_apic_ids print("APIC ID: %\n", it);
+    for other_apic_ids print("Found APIC ID: %\n", it);
 
-    memcpy(cast(*void) 0x8000 + DIRECT_MAPPING_BASE, ap_startup_asm.data, 4096);
+    // Load the 16 bit AP initialization routine that was placed into static memory using metaprogramming
+    memcpy(cast(*void) 0x8000 + DIRECT_MAPPING_BASE, ap_startup_bin.data, 4096);
 
     stack := alloc_block(*physical_block_allocator, 0x20_0000) + DIRECT_MAPPING_BASE;
-    << cast(*u64)  (0x8200 + DIRECT_MAPPING_BASE) = stack; // Hardcoded offset from ap_startup_asm
+    << cast(*u64)   (0x8200 + DIRECT_MAPPING_BASE) = stack; // Hardcoded offset from ap_startup_bin
     << cast(**void) (0x8208 + DIRECT_MAPPING_BASE) = cast(*void) ap_startup;
-    << cast(*u32)  (0x8210 + DIRECT_MAPPING_BASE) = cast(u32) boot_data.page_tables.pml4.data;
+    << cast(*u32)   (0x8210 + DIRECT_MAPPING_BASE) = cast(u32) boot_data.page_tables.pml4.data;
 
-    if false for other_apic_ids {
-        write_apic_register(.DES__INTERRUPT_DEST, it << 24);
+    for 1..1 {
+        write_apic_register(.DES__INTERRUPT_DEST, xx it << 24);
 
         command: u32;
         command = (0b101 << 8) | (1 << 14); // INIT IPI
@@ -284,11 +283,9 @@ apic_stuff :: () {
         command = (0b110 << 8) | 8; // STARTUP IPI
         write_apic_register(.ICR__INTERRUPT_COMMAND, command);
     }
-
-    while true #asm { hlt; }
 }
 
-ap_startup_asm :: #run,host -> [] u8 {
+ap_startup_bin :: #run,host -> [] u8 {
     #import "Compiler";
     #import "File";
 
@@ -296,7 +293,6 @@ ap_startup_asm :: #run,host -> [] u8 {
     return add_global_data(cast([] u8) code, .WRITABLE);
 }
 
-#program_export
 ap_startup :: () #c_call {
     push_context .{} {
         serial_out("Started up a processor.\n");
@@ -354,11 +350,11 @@ HPET :: struct {
     counter_value_at_last_interrupt: u64;
 }
 
-hpet_init :: () {
-    hpet_acpi_header := find_acpi_table("HPET");
-    assert(hpet_acpi_header != null, "HPET is not available");
+init_hpet :: () {
+    acpi_header := find_acpi_table("HPET");
+    assert(acpi_header != null, "HPET is not available");
 
-    acpi_table := cast(*Hpet_Acpi_Table) hpet_acpi_header;
+    acpi_table := cast(*Hpet_Acpi_Table) acpi_header;
     assert(acpi_table.address_space == .MAIN_MEMORY);
 
     virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096); // Allocating an individual page using the block allocator because we don't have anything better for virtual memory yet
