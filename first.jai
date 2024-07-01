@@ -14,8 +14,8 @@
     #import,dir "modules/VirtualBox";
 }
 
-JAI_ROOT_DIR    :: "/home/dlandahl/jai";
-// JAI_ROOT_DIR    :: "/mnt/c/jai";
+// JAI_ROOT_DIR    :: "/home/dlandahl/jai";
+JAI_ROOT_DIR    :: "/mnt/c/jai";
 
 WSL_DISTRO_NAME :: "Ubuntu";
 
@@ -170,6 +170,7 @@ compile_kernel :: () -> success: bool {
         options.text_output_flags = 0;
         options.entry_point_name = "kernel_entry";
         options.cast_bounds_check = .OFF;
+        options.disable_redzone = true;
         options.additional_linker_arguments = .["-ekernel_entry", "-Tlink.ld"];
         options.os_target = .LINUX;
 

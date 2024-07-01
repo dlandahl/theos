@@ -159,7 +159,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         }
 
         {
-            // Reserve physical memory for page frame descriptors. We'll remap this to a kernel address in a moment
+            // Reserve physical memory for page frame descriptors. We'll remap this to a kernel address below
             count := highest_address / 4096;
             EFI_CHECK(boot_services.AllocatePool(UserReservedMemoryType, size_of(Page_Frame_Desc) * count, cast(**void) *boot_data.page_frames.data));
             boot_data.page_frames.count = cast(s64) count;
@@ -184,7 +184,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             boot_pd[2] = 0x40_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             boot_pd[3] = 0x60_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
 
-            // UEFI seems to put the stack at the top of physical memory. For now assume that the machine has 128Mb
+            // UEFI seems to put the stack at the top of physical memory. Don't know if that's standard. For now assume that the machine has 128Mb
             index: u64;
             for< 64..45 {
                 boot_pd[it] = (0x800_0000 - index*0x20_0000) | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
@@ -200,7 +200,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
                 pd[it] = address | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             }
 
-            // Direct-map all physical memory to the bottom of the kernel addresses
+            // Direct-map all physical memory to the bottom of kernel memory
             pml4[0x100] = cast(u64) direct_pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
 
             for pd: 0..direct_pd.count-1 {
