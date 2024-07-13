@@ -275,7 +275,7 @@ apic_stuff :: () {
     << cast(**void) (0x8208 + DIRECT_MAPPING_BASE) = cast(*void) ap_startup;
     << cast(*u32)   (0x8210 + DIRECT_MAPPING_BASE) = cast(u32) boot_data.page_tables.pml4.data;
 
-    for 1..1 {
+    for other_apic_ids {
         write_apic_register(.DES__INTERRUPT_DEST, xx it << 24);
 
         command: u32;
@@ -297,7 +297,7 @@ ap_startup_bin :: #run,host -> [] u8 {
 
 ap_startup :: () #c_call {
     push_context .{} {
-        serial_out("Started up a processor.\n");
+        write_string("AP Startup\n");
         while true #asm { cli; hlt; }
     }
 }

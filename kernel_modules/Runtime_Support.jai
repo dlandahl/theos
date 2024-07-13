@@ -1,9 +1,5 @@
 
 //
-// This kernel version of runtime support just has some unix calls commented out so that the linker doesn't complain
-//
-
-//
 // Runtime_Support is less volatile than Preload and contains imports and various biggish code;
 // it is considered reasonable that you can mess around with Runtime_Support and ship your own
 // version of it.
@@ -112,14 +108,32 @@ write_string_unsynchronized :: (s: string, to_standard_error := false) #no_conte
 }
 
 write_string :: (s: string, to_standard_error := false) #no_context #compiler {
-    serial_out(s);
+
+    mutex := *serial_mutex;
+    carry: u8 = 1;
+
+    while true {
+        #asm {
+            lock_bts.q [mutex], 0;
+            setc carry;
+        }
+
+        if !carry break;
+        #asm { pause; }
+    }
+
+    write_string_unsynchronized(s);
+
+    #asm { lock_dec.q [mutex]; }
 }
 
 write_strings :: (strings: ..string, to_standard_error := false) #no_context #compiler {
-    for strings serial_out(it);
+    for strings write_string(it);
 }
 
-#scope_module;
+#scope_module
+
+serial_mutex: u64;
 
 serial_out :: (data: string) #no_context {
     COM1 :: 0x3f8;

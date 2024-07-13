@@ -12,7 +12,7 @@
             -chardev stdio,id=char0,logfile=qemu_serial.txt,signal=off
             -serial chardev:char0
             -m 128M 
-            -smp 4 
+            -smp 8 
     QEMU_CMD);
     run_command(.. command);
 }
