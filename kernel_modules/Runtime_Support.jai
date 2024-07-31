@@ -110,7 +110,7 @@ write_string_unsynchronized :: (s: string, to_standard_error := false) #no_conte
 write_string :: (s: string, to_standard_error := false) #no_context #compiler {
 
     mutex := *serial_mutex;
-    carry: u8 = 1;
+    carry: u8;
 
     while true {
         #asm {
@@ -122,13 +122,13 @@ write_string :: (s: string, to_standard_error := false) #no_context #compiler {
         #asm { pause; }
     }
 
-    write_string_unsynchronized(s);
+    write_string_unsynchronized(s, to_standard_error);
 
     #asm { lock_dec.q [mutex]; }
 }
 
 write_strings :: (strings: ..string, to_standard_error := false) #no_context #compiler {
-    for strings write_string(it);
+    for strings write_string(it, to_standard_error);
 }
 
 #scope_module

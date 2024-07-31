@@ -67,7 +67,6 @@ main :: () {
         return;
     }
 
-
     if do_kernel && !compile_kernel() {
         log_error("Failed to compile the kernel.\n");
         return;
@@ -389,12 +388,12 @@ init_segment_registers:
     push rax
     retfq
   .reload_cs:
-    mov   ax, 0x10
-    mov   ds, ax
-    mov   ss, ax
-    mov   es, ax
-    mov   gs, ax
-    mov   fs, ax
+    mov ax, 0x10
+    mov ds, ax
+    mov ss, ax
+    mov es, ax
+    mov gs, ax
+    mov fs, ax
     ret
 END;
 

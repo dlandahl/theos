@@ -4,6 +4,7 @@
 #load "boot_data.jai";
 #load "acpi.jai";
 #load "x64.jai";
+#load "journal.jai";
 
 Framebuffer :: struct {
     buffer: *u32;
