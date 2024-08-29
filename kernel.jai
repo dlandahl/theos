@@ -402,10 +402,24 @@ Page_Flags :: enum_flags u64 {
 // A block allocator that just linearly scans to find a large enough free block. A block is an integer number of pages.
 // Can be used for both virtual and physical memory.
 
+Block_Desc :: struct {
+    start_page: s64; // Relative to the start of the allocator's region
+    size_pages: s64;
+    used: bool;
+}
+
+Block_Allocator :: struct {
+    blocks: [] Block_Desc;
+    max_block_descriptors: int;
+
+    start_page: int;
+    total_pages: int;
+}
+
 init_block_allocator :: (allocator: *Block_Allocator, start_page: int, total_pages: int) {
     // For bootstrapping, just use a single page to store block descriptors. Todo: fix
-
     page := get_page_frame();
+
     allocator.blocks.data = cast(*void) get_physical_address(page) + DIRECT_MAPPING_BASE;
     allocator.max_block_descriptors = 4096 / size_of(Block_Desc);
 
@@ -420,7 +434,7 @@ init_block_allocator :: (allocator: *Block_Allocator, start_page: int, total_pag
     };
 }
 
-alloc_block :: (using allocator: *Block_Allocator, size_bytes: int) -> u64, Block_Desc {
+alloc_block :: (using allocator: *Block_Allocator, size_bytes: int) -> address: u64, Block_Desc {
 
     pages_needed := size_bytes / 4096;
     if size_bytes % 4096 pages_needed += 1;
@@ -458,7 +472,7 @@ alloc_block :: (using allocator: *Block_Allocator, size_bytes: int) -> u64, Bloc
 }
 
 free_block :: (allocator: *Block_Allocator, address: u64) -> bool {
-    // Find the block corresponding to that address using binary search
+    // Find the block corresponding to that address using linear search
     // Todo hash table
 
     start_page := cast(int) (address / 4096) - allocator.start_page;
@@ -466,28 +480,21 @@ free_block :: (allocator: *Block_Allocator, address: u64) -> bool {
     blocks := allocator.blocks;
     defer allocator.blocks = blocks;
 
-    l := 0;
-    r := blocks.count - 1;
-    m: int;
-
-    while l <= r {
-        m = (l + r) / 2;
-        page := blocks[m].start_page;
-
-        if page < start_page {
-            l = m + 1;
-        } else if page > start_page {
-            r = m - 1;
-        } else break;
+    m := -1;
+    
+    for blocks {
+        if it.start_page == start_page {
+            m = it.start_page;
+            break;
+        }
     }
 
-    block := *blocks[m];
-
-    if block.start_page != start_page {
+    if m == -1 {
         bluescreen();
         return false;
     }
 
+    block := *blocks[m];
     block.used = false;
 
     // Coalesce following block
@@ -511,20 +518,6 @@ free_block :: (allocator: *Block_Allocator, address: u64) -> bool {
     }
 
     return true;
-}
-
-Block_Desc :: struct {
-    start_page: s64; // Relative to the start of the allocator's region
-    size_pages: s64;
-    used: bool;
-}
-
-Block_Allocator :: struct {
-    blocks: [] Block_Desc;
-    max_block_descriptors: int;
-
-    start_page: int;
-    total_pages: int;
 }
 
 
