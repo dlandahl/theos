@@ -258,7 +258,10 @@ static_to_physical :: (object: *void) -> u64 {
     return cast(u64) object - 0xffff_ffff_8000_0000 + Boot_Data.KERNEL_PHYS_BASE;
 }
 
-// A physical memory allocator that finds discontiguous physical pages. Discontiguous pages are more likely to be available and it doesn't usually matter that they're discontiguous. However it's slower for large allocations, not only because the pages need to be found individually, but they also need to be manually mapped so that the virtual memory is contiguous. For physically contiguous memory, there's already corresponding contiguous virtual memory in the direct mapping.
+// A physical memory allocator that finds discontiguous physical pages. Discontiguous pages are more likely to be available and it doesn't usually
+// matter that they're discontiguous. However it's slower for large allocations, not only because the pages need to be found individually, but they
+// also need to be manually mapped so that the virtual memory is contiguous. For physically contiguous memory, there's already corresponding
+// contiguous virtual memory in the direct mapping.
 
 Physical_Page_Pool :: struct {
     start: int; // Page frame index

@@ -52,9 +52,9 @@ Interrupt_Gate_Desc :: struct {
     reserved: u32;
 }
 
-register_interrupt_gate :: (handler: *void, vector_number: int) {
+register_interrupt_gate :: (handler: () #c_call, vector_number: int) {
     desc := *interrupt_descriptor_table[vector_number];
-    address := cast(u64) handler;
+    address := cast(u64) cast(*void) handler;
 
     desc.offset_1 = xx  address        & 0xffff;
     desc.offset_2 = xx (address >> 16) & 0xffff;
@@ -91,11 +91,11 @@ Gdt_Entry_Flags :: enum u64 {
 
 Ia32_Model_Specific_Register :: enum {
     APIC_BASE__Apic_Base      :: 0x0000_001b;
-    PAT__Page_Attribute_Table :: 0x0000_0277;
-    EFER__Extended_Features   :: 0xc000_0080;
-    STAR__Syscall_Segment     :: 0xc000_0081;
-    LSTAR__Syscall_Address    :: 0xc000_0082;
-    FMASK__Syscall_Flags      :: 0xc000_0084;
+    PAT__page_attribute_table :: 0x0000_0277;
+    EFER__extended_features   :: 0xc000_0080;
+    STAR__syscall_segment     :: 0xc000_0081;
+    LSTAR__syscall_address    :: 0xc000_0082;
+    FMASK__syscall_flags      :: 0xc000_0084;
 }
 
 write_msr :: (msr: Ia32_Model_Specific_Register, value: u64) {

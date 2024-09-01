@@ -176,25 +176,25 @@ timer_interrupt :: (stack: *void) #c_call {
 
         write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
     }
-} @InterruptHandler
+} @InterruptRoutine
 
 apic_stuff :: () {
-    register_interrupt_gate(xx int__fault_0, 0);
-    register_interrupt_gate(xx int__fault_1, 1);
-    register_interrupt_gate(xx int__fault_2, 2);
-    register_interrupt_gate(xx int__fault_3, 3);
-    register_interrupt_gate(xx int__fault_4, 4);
-    register_interrupt_gate(xx int__fault_5, 5);
-    register_interrupt_gate(xx int__fault_6, 6);
-    register_interrupt_gate(xx int__fault_7, 7);
-    register_interrupt_gate(xx int__fault_8, 8);
-    register_interrupt_gate(xx int__fault_9, 9);
-    register_interrupt_gate(xx int__fault_10, 10);
-    register_interrupt_gate(xx int__fault_11, 11);
-    register_interrupt_gate(xx int__fault_12, 12);
-    register_interrupt_gate(xx int__general_protection_fault, 13);
-    register_interrupt_gate(xx int__fault_14, 14);
-    register_interrupt_gate(xx int__fault_15, 15);
+    register_interrupt_gate(int__fault_0, 0);
+    register_interrupt_gate(int__fault_1, 1);
+    register_interrupt_gate(int__fault_2, 2);
+    register_interrupt_gate(int__fault_3, 3);
+    register_interrupt_gate(int__fault_4, 4);
+    register_interrupt_gate(int__fault_5, 5);
+    register_interrupt_gate(int__fault_6, 6);
+    register_interrupt_gate(int__fault_7, 7);
+    register_interrupt_gate(int__fault_8, 8);
+    register_interrupt_gate(int__fault_9, 9);
+    register_interrupt_gate(int__fault_10, 10);
+    register_interrupt_gate(int__fault_11, 11);
+    register_interrupt_gate(int__fault_12, 12);
+    register_interrupt_gate(int__general_protection_fault, 13);
+    register_interrupt_gate(int__fault_14, 14);
+    register_interrupt_gate(int__fault_15, 15);
 
     acpi_header := cast(*Acpi_MADT) find_acpi_table("APIC");
 
@@ -251,8 +251,7 @@ apic_stuff :: () {
         cursor += ics.length;
     }
 
-
-    register_interrupt_gate(xx int__timer_interrupt, 49);
+    register_interrupt_gate(int__timer_interrupt, 49);
 
     write_apic_register(.TIC__TIMER_INITIAL, 0x0800_0000);
 
@@ -409,7 +408,7 @@ hpet_enable_interrupts :: (freq: u64) {
 
     write(.TIMER0_COMP, high_precision_timer.ticks_per_interrupt);
 
-    register_interrupt_gate(xx int__hpet_interrupt, 55);
+    register_interrupt_gate(int__hpet_interrupt, 55);
     // Allocate INTI2 (interrupt input 2) for the HPET.
 
     // Get INTI2 redirection entry.
@@ -437,7 +436,7 @@ hpet_interrupt :: (data: *Interrupt_Data(false)) #c_call {
         serial_out("HPET Tick\n");
         while true #asm { cli; hlt; }
     }
-} @InterruptHandler
+} @InterruptRoutine
 
 
 
@@ -448,7 +447,7 @@ fault_0 :: (stack: *void) #c_call {
         serial_out("Something bad happened (0)\n");
         while true #asm { cli; hlt; }
     }
-} @InterruptHandler
+} @InterruptRoutine
 
 #program_export
 fault_1 :: (stack: *void) #c_call {
@@ -456,7 +455,7 @@ fault_1 :: (stack: *void) #c_call {
         serial_out("Something bad happened (1)\n");
         while true #asm { cli; hlt; }
     }
-} @InterruptHandler
+} @InterruptRoutine
 
 #program_export
 fault_2 :: (stack: *void) #c_call {
@@ -464,7 +463,7 @@ fault_2 :: (stack: *void) #c_call {
         serial_out("Something bad happened (2)\n");
         while true #asm { cli; hlt; }
     }
-} @InterruptHandler
+} @InterruptRoutine
 
 #program_export
 fault_3 :: (stack: *void) #c_call {
@@ -472,7 +471,7 @@ fault_3 :: (stack: *void) #c_call {
         serial_out("Something bad happened (3)\n");
         while true #asm { cli; hlt; }
     }
-} @InterruptHandler
+} @InterruptRoutine
 
 #program_export
 fault_4 :: (stack: *void) #c_call {
@@ -480,7 +479,7 @@ fault_4 :: (stack: *void) #c_call {
         serial_out("Something bad happened (4)\n");
         while true #asm { cli; hlt; }
     }
-} @InterruptHandler
+} @InterruptRoutine
 
 #program_export
 fault_5 :: (stack: *void) #c_call {
@@ -488,7 +487,7 @@ fault_5 :: (stack: *void) #c_call {
         serial_out("Something bad happened (5)\n");
         while true #asm { cli; hlt; }
     }
-} @InterruptHandler
+} @InterruptRoutine
 
 #program_export
 fault_6 :: (stack: *void) #c_call {
@@ -496,7 +495,7 @@ fault_6 :: (stack: *void) #c_call {
         serial_out("Something bad happened (6)\n");
         while true #asm { cli; hlt; }
     }
-} @InterruptHandler
+} @InterruptRoutine
 
 #program_export
 fault_7 :: (stack: *void) #c_call {
@@ -504,7 +503,7 @@ fault_7 :: (stack: *void) #c_call {
         serial_out("Something bad happened (7)\n");
         while true #asm { cli; hlt; }
     }
-} @InterruptHandler
+} @InterruptRoutine
 
 #program_export
 fault_8 :: (stack: *void) #c_call {
@@ -512,7 +511,7 @@ fault_8 :: (stack: *void) #c_call {
         serial_out("Something bad happened (8)\n");
         while true #asm { cli; hlt; }
     }
-} @InterruptHandler
+} @InterruptRoutine
 
 #program_export
 fault_9 :: (stack: *void) #c_call {
@@ -520,7 +519,7 @@ fault_9 :: (stack: *void) #c_call {
         serial_out("Something bad happened (9)\n");
         while true #asm { cli; hlt; }
     }
-} @InterruptHandler
+} @InterruptRoutine
 
 #program_export
 fault_10 :: (stack: *void) #c_call {
@@ -528,7 +527,7 @@ fault_10 :: (stack: *void) #c_call {
         serial_out("Something bad happened (10)\n");
         while true #asm { cli; hlt; }
     }
-} @InterruptHandler
+} @InterruptRoutine
 
 #program_export
 fault_11 :: (stack: *void) #c_call {
@@ -536,7 +535,7 @@ fault_11 :: (stack: *void) #c_call {
         serial_out("Something bad happened (11)\n");
         while true #asm { cli; hlt; }
     }
-} @InterruptHandler
+} @InterruptRoutine
 
 #program_export
 fault_12 :: (stack: *void) #c_call {
@@ -544,7 +543,7 @@ fault_12 :: (stack: *void) #c_call {
         serial_out("Something bad happened (12)\n");
         while true #asm { cli; hlt; }
     }
-} @InterruptHandler
+} @InterruptRoutine
 
 #program_export
 general_protection_fault :: (stack: *Interrupt_Data(true)) #c_call {
@@ -559,7 +558,7 @@ general_protection_fault :: (stack: *Interrupt_Data(true)) #c_call {
 
         while true #asm { cli; hlt; }
     }
-} @InterruptHandler
+} @InterruptRoutine
 
 #program_export
 fault_14 :: (stack: *void) #c_call {
@@ -567,7 +566,7 @@ fault_14 :: (stack: *void) #c_call {
         serial_out("Something bad happened (14)\n");
         while true #asm { cli; hlt; }
     }
-} @InterruptHandler
+} @InterruptRoutine
 
 #program_export
 fault_15 :: (stack: *void) #c_call {
@@ -575,4 +574,4 @@ fault_15 :: (stack: *void) #c_call {
         serial_out("Something bad happened (15)\n");
         while true #asm { cli; hlt; }
     }
-} @InterruptHandler
+} @InterruptRoutine

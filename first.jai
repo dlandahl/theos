@@ -237,7 +237,7 @@ compile_kernel :: () -> success: bool {
                 proc := header.expression;
 
                 for proc.notes {
-                    if it.text != "InterruptHandler" continue;
+                    if it.text != "InterruptRoutine" continue;
                     print_to_builder(*interrupt_assembly, INTERRUPT_STUB_FORMAT, proc.name);
                     array_add(*found_interrupts, proc.name);
                 }
