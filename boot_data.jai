@@ -12,7 +12,7 @@ Page_Tables :: struct {
     direct_pdpt:   [0x200] u64;
     direct_pd: [64][0x200] u64;
 
-    // Page tables for low memory so the bootloader can keep running
+    // Page tables for low memory so the bootloader can continue executing after switching to this page table layout
     boot_pdpt: [0x200] u64;
     boot_pd:   [0x200] u64;
 }
