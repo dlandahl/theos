@@ -182,7 +182,6 @@ compile_kernel :: () -> success: bool {
     }
 
     compiler_begin_intercept(workspace);
-    defer compiler_end_intercept(workspace); // Is this a reasonable thing to do?
 
     add_build_file("kernel.jai", workspace);
 
@@ -245,6 +244,8 @@ compile_kernel :: () -> success: bool {
         }
     }
 
+    compiler_end_intercept(workspace);
+
     if success {
         command := break_command_into_strings("objdump -x .build/kernel -d -M intel --source");
         result, stdout := run_command(.. command, capture_and_return_output=true);
@@ -267,7 +268,7 @@ format_disk :: () -> success: bool {
 
         "cp fat.img disk_image.img",
         "mv fat.img .build/iso",
-        "xorriso -as mkisofs -R -f -e fat.img -no-emul-boot -o disk_image.iso .build/iso",
+        // "xorriso -as mkisofs -R -f -e fat.img -no-emul-boot -o disk_image.iso .build/iso",
     ];
 
     make_directory_if_it_does_not_exist(".build/iso");

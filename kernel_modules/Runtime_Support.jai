@@ -131,8 +131,6 @@ write_strings :: (strings: ..string, to_standard_error := false) #no_context #co
     for strings write_string(it, to_standard_error);
 }
 
-#scope_module
-
 serial_mutex: u64;
 
 serial_out :: (data: string) #no_context {
@@ -165,6 +163,8 @@ serial_out :: (data: string) #no_context {
     }
 }
 
+#scope_module
+
 write_loc :: (loc: Source_Code_Location, to_standard_error := false) #no_context {
     write_strings(loc.fully_pathed_filename, ":", to_standard_error = to_standard_error);
     write_number(loc.line_number, to_standard_error = to_standard_error);
@@ -183,37 +183,14 @@ __panic_due_to_runtime_call_of_compile_time_procedure :: (line_number: s64, file
 #if DEFINE_INITIALIZATION {
     // TEMPORARY_STORAGE_SIZE is defined by the compiler based on Build_Options.
 
-    first_thread_context: Context;
-    first_thread_temporary_storage: Temporary_Storage;
-    first_thread_temporary_storage_data: [TEMPORARY_STORAGE_SIZE] u8 #align 64;
-
     #scope_export
     #program_export
     __jai_runtime_init :: (argc: s32, argv: **u8) -> *Context #c_call {
-        __command_line_arguments.count = argc;
-        __command_line_arguments.data  = argv;
-
-        ts := *first_thread_temporary_storage;
-        set_initial_data(ts, TEMPORARY_STORAGE_SIZE, first_thread_temporary_storage_data.data);
-
-        first_thread_context.temporary_storage = ts;
-
-        first_thread_context.base.context_info = type_info(Context);
-
-        dummy_context: Context;
-        dummy_context.base.context_info = type_info(Context);
-        push_context dummy_context {
-            // Allocator should not rely on a good context for STARTUP. For other modes, it's fine.
-            first_thread_context.allocator.data = runtime_support_default_allocator_proc(.STARTUP, 0, 0, null, null);
-        }
-
-        return *first_thread_context;
+        return null;
     }
 
     #program_export
     __jai_runtime_fini :: (_context: *void) #c_call {
-        // Nothing here for now!
-        // We don't bother shutting down the default allocator. The OS frees the memory.
     }
 }
 
@@ -230,25 +207,6 @@ __instrumentation_second :: () {
 #if DEFINE_SYSTEM_ENTRY_POINT {
     #program_export "main"
     __system_entry_point :: (argc: s32, argv: **u8) -> s32 #c_call {
-        __jai_runtime_init(argc, argv);
-
-        push_context first_thread_context {
-            #if ENABLE_BACKTRACE_ON_CRASH {
-                // It's possible we should move the init of the crash handler to after __instrumentation_*, so that
-                // plugins can set it? But, plugin inits can crash. So maybe we need some other way for a plugin
-                // to say it's taking over the crash handler.
-
-//                Handler :: #import "Runtime_Support_Crash_Handler";
-//                Handler.init();
-            }
-
-            __instrumentation_first ();
-            __instrumentation_second();
-
-            __program_main :: () #entry_point;
-            no_inline __program_main();
-        }
-
         return 0;
     }
 }

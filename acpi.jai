@@ -34,17 +34,17 @@ Acpi_FADT__Fixed_Description_Table :: struct {
 }
 
 find_acpi_table :: (signature: string) -> *Acpi_Table_Header {
-    table_size := root_acpi_table.length - size_of(Acpi_Table_Header);
+    table_size := kernel_globals.root_acpi_table.length - size_of(Acpi_Table_Header);
 
-    pointer_size := cast(u64) (ifx acpi_version then 8 else 4);
+    pointer_size := cast(u64) (ifx kernel_globals.acpi_version then 8 else 4);
     pointer_count := table_size / pointer_size;
 
-    table_base := cast(u64) (root_acpi_table + 1);
+    table_base := cast(u64) (kernel_globals.root_acpi_table + 1);
 
     for table_index: 0..pointer_count - 1 {
         offset := table_index * pointer_size + table_base;
 
-        phys := ifx acpi_version {
+        phys := ifx kernel_globals.acpi_version {
             << cast(*u64) offset;
         } else {
             cast(u64) << cast(*u32) offset;
@@ -140,12 +140,12 @@ APIC_Register :: enum {
 
 read_apic_register :: (register: APIC_Register) -> u32 {
     assert(kernel_globals.apic != null);
-    return << cast(*u32) (apic + cast(u64) register);
+    return << cast(*u32) (kernel_globals.apic + cast(u64) register);
 }
 
 write_apic_register :: (register: APIC_Register, value: u32) {
     assert(kernel_globals.apic != null);
-    << cast(*u32) (apic + cast(u64) register) = value;
+    << cast(*u32) (kernel_globals.apic + cast(u64) register) = value;
 }
 
 Acpi_Lvt :: struct {
@@ -171,7 +171,7 @@ tock: bool;
 #program_export
 timer_interrupt :: (stack: *void) #c_call {
     push_context .{} {
-        serial_out(ifx tock then "tock\n" else "tick\n");
+        write_string(ifx tock then "tock\n" else "tick\n");
         tock = !tock;
 
         write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
@@ -269,10 +269,10 @@ apic_stuff :: () {
     // Load the 16 bit AP initialization routine that was placed into static memory using metaprogramming
     memcpy(cast(*void) 0x8000 + DIRECT_MAPPING_BASE, ap_startup_bin.data, 4096);
 
-    stack := alloc_block(*physical_block_allocator, 0x20_0000) + DIRECT_MAPPING_BASE;
+    stack := alloc_block(*kernel_globals.physical_block_allocator, 0x20_0000) + DIRECT_MAPPING_BASE;
     << cast(*u64)   (0x8200 + DIRECT_MAPPING_BASE) = stack; // Hardcoded offset from ap_startup_bin
     << cast(**void) (0x8208 + DIRECT_MAPPING_BASE) = cast(*void) ap_startup;
-    << cast(*u32)   (0x8210 + DIRECT_MAPPING_BASE) = cast(u32) boot_data.page_tables.pml4.data;
+    << cast(*u32)   (0x8210 + DIRECT_MAPPING_BASE) = cast(u32) kernel_globals.boot_data.page_tables.pml4.data;
 
     for other_apic_ids {
         write_apic_register(.DES__INTERRUPT_DEST, xx it << 24);
@@ -331,11 +331,11 @@ Hpet_Register :: enum u64 {
 }
 
 write :: (reg: Hpet_Register, value: u64) #no_context {
-    << cast(*u64) (high_precision_timer.base_address + cast(u64) reg) = value;
+    << cast(*u64) (kernel_globals.high_precision_timer.base_address + cast(u64) reg) = value;
 }
 
 read :: (reg: Hpet_Register) -> u64 #no_context {
-    return << cast(*u64) (high_precision_timer.base_address + cast(u64) reg);
+    return << cast(*u64) (kernel_globals.high_precision_timer.base_address + cast(u64) reg);
 }
 
 HPET :: struct {
@@ -352,6 +352,8 @@ HPET :: struct {
 }
 
 init_hpet :: () {
+    hpet := *kernel_globals.high_precision_timer;
+
     acpi_header := find_acpi_table("HPET");
     assert(acpi_header != null, "HPET is not available");
 
@@ -363,7 +365,7 @@ init_hpet :: () {
     map_page(virtual, acpi_table.base_address, Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE);
 
     offset_in_page := acpi_table.base_address % 0x1000;
-    high_precision_timer.base_address = xx (virtual + offset_in_page);
+    hpet.base_address = xx (virtual + offset_in_page);
 
     capabilities := read(Hpet_Register.CAPABILITIES);
 
@@ -371,17 +373,19 @@ init_hpet :: () {
     assert(capabilities & LEG_RT_CAP > 0, "HPET does not support legacy replacement route");
 
     COUNT_SIZE_CAP :: 0x2000;
-    high_precision_timer._64bit_counter = capabilities & COUNT_SIZE_CAP > 0;
+    hpet._64bit_counter = capabilities & COUNT_SIZE_CAP > 0;
 
-    high_precision_timer.base_period_femtoseconds = capabilities >> 32;
-    assert(high_precision_timer.base_period_femtoseconds > 0 && high_precision_timer.base_period_femtoseconds < 100_000_000);
+    hpet.base_period_femtoseconds = capabilities >> 32;
+    assert(hpet.base_period_femtoseconds > 0 && hpet.base_period_femtoseconds < 100_000_000);
 
     hpet_restart();
 
-    high_precision_timer.initialized = true;
+    hpet.initialized = true;
 }
 
 hpet_enable_interrupts :: (freq: u64) {
+    hpet := *kernel_globals.high_precision_timer;
+
     LEG_RT_CNF :: 0x2; // Enable legacy mode until we support allocating interrupts
     write(.CONFIG, read(.CONFIG) | LEG_RT_CNF);
 
@@ -403,20 +407,20 @@ hpet_enable_interrupts :: (freq: u64) {
 
     write(.TIMER0, timer);
 
-    ticks_per_second := cast(u64) 1_000_000_000_000_000 / high_precision_timer.base_period_femtoseconds;
-    high_precision_timer.ticks_per_interrupt = ticks_per_second / freq;
+    ticks_per_second := cast(u64) 1_000_000_000_000_000 / hpet.base_period_femtoseconds;
+    hpet.ticks_per_interrupt = ticks_per_second / freq;
 
-    write(.TIMER0_COMP, high_precision_timer.ticks_per_interrupt);
+    write(.TIMER0_COMP, hpet.ticks_per_interrupt);
 
     register_interrupt_gate(int__hpet_interrupt, 55);
     // Allocate INTI2 (interrupt input 2) for the HPET.
 
     // Get INTI2 redirection entry.
-    io_apic.* = 0x14;
-    (io_apic + 4).* = 55;
+    kernel_globals.io_apic.* = 0x14;
+    (kernel_globals.io_apic + 4).* = 55;
 
-    io_apic.* = 0x15;
-    (io_apic + 4).* = 0;
+    kernel_globals.io_apic.* = 0x15;
+    (kernel_globals.io_apic + 4).* = 0;
 
     hpet_restart();
 }
@@ -433,115 +437,114 @@ hpet_restart :: () {
 #program_export
 hpet_interrupt :: (data: *Interrupt_Data(false)) #c_call {
     push_context .{} {
-        serial_out("HPET Tick\n");
+        write_string("HPET Tick\n");
         while true #asm { cli; hlt; }
     }
 } @InterruptRoutine
-
 
 
 
 #program_export
 fault_0 :: (stack: *void) #c_call {
     push_context .{} {
-        serial_out("Something bad happened (0)\n");
-        while true #asm { cli; hlt; }
+        write_string("Something bad happened (0)\n");
+        bluescreen();
     }
 } @InterruptRoutine
 
 #program_export
 fault_1 :: (stack: *void) #c_call {
     push_context .{} {
-        serial_out("Something bad happened (1)\n");
-        while true #asm { cli; hlt; }
+        write_string("Something bad happened (1)\n");
+        bluescreen();
     }
 } @InterruptRoutine
 
 #program_export
 fault_2 :: (stack: *void) #c_call {
     push_context .{} {
-        serial_out("Something bad happened (2)\n");
-        while true #asm { cli; hlt; }
+        write_string("Something bad happened (2)\n");
+        bluescreen();
     }
 } @InterruptRoutine
 
 #program_export
 fault_3 :: (stack: *void) #c_call {
     push_context .{} {
-        serial_out("Something bad happened (3)\n");
-        while true #asm { cli; hlt; }
+        write_string("Something bad happened (3)\n");
+        bluescreen();
     }
 } @InterruptRoutine
 
 #program_export
 fault_4 :: (stack: *void) #c_call {
     push_context .{} {
-        serial_out("Something bad happened (4)\n");
-        while true #asm { cli; hlt; }
+        write_string("Something bad happened (4)\n");
+        bluescreen();
     }
 } @InterruptRoutine
 
 #program_export
 fault_5 :: (stack: *void) #c_call {
     push_context .{} {
-        serial_out("Something bad happened (5)\n");
-        while true #asm { cli; hlt; }
+        write_string("Something bad happened (5)\n");
+        bluescreen();
     }
 } @InterruptRoutine
 
 #program_export
 fault_6 :: (stack: *void) #c_call {
     push_context .{} {
-        serial_out("Something bad happened (6)\n");
-        while true #asm { cli; hlt; }
+        write_string("Something bad happened (6)\n");
+        bluescreen();
     }
 } @InterruptRoutine
 
 #program_export
 fault_7 :: (stack: *void) #c_call {
     push_context .{} {
-        serial_out("Something bad happened (7)\n");
-        while true #asm { cli; hlt; }
+        write_string("Something bad happened (7)\n");
+        bluescreen();
     }
 } @InterruptRoutine
 
 #program_export
 fault_8 :: (stack: *void) #c_call {
     push_context .{} {
-        serial_out("Something bad happened (8)\n");
-        while true #asm { cli; hlt; }
+        write_string("Something bad happened (8)\n");
+        bluescreen();
     }
 } @InterruptRoutine
 
 #program_export
 fault_9 :: (stack: *void) #c_call {
     push_context .{} {
-        serial_out("Something bad happened (9)\n");
-        while true #asm { cli; hlt; }
+        write_string("Something bad happened (9)\n");
+        bluescreen();
     }
 } @InterruptRoutine
 
 #program_export
 fault_10 :: (stack: *void) #c_call {
     push_context .{} {
-        serial_out("Something bad happened (10)\n");
-        while true #asm { cli; hlt; }
+        write_string("Something bad happened (10)\n");
+        bluescreen();
     }
 } @InterruptRoutine
 
 #program_export
 fault_11 :: (stack: *void) #c_call {
     push_context .{} {
-        serial_out("Something bad happened (11)\n");
-        while true #asm { cli; hlt; }
+        write_string("Something bad happened (11)\n");
+        bluescreen();
     }
 } @InterruptRoutine
 
 #program_export
 fault_12 :: (stack: *void) #c_call {
     push_context .{} {
-        serial_out("Something bad happened (12)\n");
-        while true #asm { cli; hlt; }
+        write_string("Something bad happened (12)\n");
+        bluescreen();
     }
 } @InterruptRoutine
 
@@ -554,24 +557,25 @@ general_protection_fault :: (stack: *Interrupt_Data(true)) #c_call {
         print("SS: 0x%\n", formatInt(stack.ss, base=16));
         print("CS: 0x%\n", formatInt(stack.cs, base=16));
         print("Error Code: 0x%\n", formatInt(stack.error_code, base=16));
-        print_stack_trace(main_thread_context.stack_trace);
+        print("Stack trace of the main thread:\n");
+        print_stack_trace(kernel_globals.main_thread_context.stack_trace);
 
-        while true #asm { cli; hlt; }
+        bluescreen();
     }
 } @InterruptRoutine
 
 #program_export
 fault_14 :: (stack: *void) #c_call {
     push_context .{} {
-        serial_out("Something bad happened (14)\n");
-        while true #asm { cli; hlt; }
+        write_string("Something bad happened (14)\n");
+        bluescreen();
     }
 } @InterruptRoutine
 
 #program_export
 fault_15 :: (stack: *void) #c_call {
     push_context .{} {
-        serial_out("Something bad happened (15)\n");
-        while true #asm { cli; hlt; }
+        write_string("Something bad happened (15)\n");
+        bluescreen();
     }
 } @InterruptRoutine

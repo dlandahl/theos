@@ -53,7 +53,7 @@ Interrupt_Gate_Desc :: struct {
 }
 
 register_interrupt_gate :: (handler: () #c_call, vector_number: int) {
-    desc := *interrupt_descriptor_table[vector_number];
+    desc := *kernel_globals.interrupt_descriptor_table[vector_number];
     address := cast(u64) cast(*void) handler;
 
     desc.offset_1 = xx  address        & 0xffff;

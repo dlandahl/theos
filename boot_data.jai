@@ -1,6 +1,13 @@
 
 // Stuff that's shared between bootloader and kernel
 
+Framebuffer :: struct {
+    buffer: *u32;
+    x_resolution: int;
+    y_resolution: int;
+    stride: int;
+}
+
 Page_Tables :: struct {
     pml4: [0x200] u64;
 
@@ -8,11 +15,11 @@ Page_Tables :: struct {
     pdpt: [0x200] u64;
     pd:   [0x200] u64;
 
-    // Page tables for the direct mapping
+    // Page tables for the direct mapping, above the middle of virtual memory
     direct_pdpt:   [0x200] u64;
     direct_pd: [64][0x200] u64;
 
-    // Page tables for low memory so the bootloader can continue executing after switching to this page table layout
+    // Page tables for the bootloader executable, at the bottom of virtual memory
     boot_pdpt: [0x200] u64;
     boot_pd:   [0x200] u64;
 }
@@ -25,10 +32,10 @@ Boot_Data :: struct {
     page_directories_used: int;
     KERNEL_PHYS_BASE :: 0x600_0000; // Random choice, really this needs to be dynamically chosen to avoid writing over firmware stuff
 
-    framebuffer: *u32;
-    x_resolution: u32;
-    y_resolution: u32;
-    stride: u32;
+    // Assume physical memory at 1Mb is free to use on any firmware. Linux does this.
+    BASE_ADDRESS :: 0x10_0000;
+
+    framebuffer: Framebuffer;
 
     acpi_rsdp: *void;
 
@@ -47,7 +54,7 @@ Boot_Data :: struct {
 }
 
 Page_Frame_Desc :: struct {
-    // We want to keep this struct as small as possible because there's one for each physical memory page in the device
+    // This struct should be kept as small as possible because there's one for each physical memory page in the device
     freelist: s32;
     FREELIST_TAIL :: -1;
 
@@ -88,7 +95,7 @@ memcpy :: (dst: *void, src: *void, count: s64) -> *void #c_call {
     return dst;
 }
 
-_memcmp :: (a: *u8, b: *u8, count: u64) -> s16 #c_call {
+_memcmp :: (a: *void, b: *void, count: u64) -> s16 #c_call {
     start := a;
 
     #asm {
@@ -105,4 +112,18 @@ _memcmp :: (a: *u8, b: *u8, count: u64) -> s16 #c_call {
     }
 
     return cast(s16) (*(a-1) - *(b-1));
+}
+
+shutdown_emulator :: () #no_context {
+    out :: (port: u16, value: u16) #no_context {
+        #asm {
+            port  === d;
+            value === a;
+            out.w port, value;
+        }
+    }
+
+    out(0xb004, 0x2000);
+    out(0x0604, 0x2000);
+    out(0x4004, 0x3400);
 }

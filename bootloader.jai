@@ -16,23 +16,20 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
     push_context c {
         boot_services := system_table.BootServices;
 
-        // Pretty sure physical memory at 1Mb is free to use on any firmware. Linux does this.
-        boot_data_address: u64 = 0x10_0000;
-        boot_data := cast(*Boot_Data) boot_data_address;
-
-        // Use this memory type when making allocations that should keep the memory reserved in the kernel's physical memory management.
-        // This is supposed to be a custom memory type, so that EfiLoaderData memory can be reused by the kernel, but there's a bug in VirtualBox that makes custom EFI memory types hang the firmware.
+        // Memory type for allocations that should keep the memory reserved in the kernel's physical memory management.
+        // This is supposed to be a custom memory type, so that EfiLoaderData memory can be reused by the kernel, but there seems to be a bug in the UEFI implementation VBox uses that makes custom memory types hang the firmware.
         UserReservedMemoryType : EFI_MEMORY_TYPE : .EfiLoaderData; // 0x8000_0000;
 
-        {
-            // Even though this mapping is not needed while boot-services are still active, we create it in the boot-services memory map anyway, so that it gets reported by GetMemoryMap, and the kernel will know the memory is not available.
-            // Todo: this call fails on VirtualBox
-            kernel_base: u64 = Boot_Data.KERNEL_PHYS_BASE;
-            EFI_CHECK(boot_services.AllocatePages(.AllocateAddress, UserReservedMemoryType, 0x10_0000 / 4096, *kernel_base));
+        boot_data_address: u64 = Boot_Data.BASE_ADDRESS;
+        EFI_CHECK(boot_services.AllocatePages(.AllocateAddress, UserReservedMemoryType, size_of(Boot_Data) / 4096 + 1, *boot_data_address));
 
-            EFI_CHECK(boot_services.AllocatePages(.AllocateAddress, UserReservedMemoryType, size_of(Boot_Data) / 4096 + 1, *boot_data_address));
-            memset(boot_data, 0, size_of(Boot_Data));
-        }
+        boot_data := cast(*Boot_Data) boot_data_address;
+        memset(boot_data, 0, size_of(Boot_Data));
+
+        // Even though this mapping is not needed while boot-services are still active, we create it in the boot-services memory map anyway, so that it gets reported by GetMemoryMap, and the kernel will know the memory is not available.
+        // Todo: this call fails on VirtualBox
+        kernel_base: u64 = Boot_Data.KERNEL_PHYS_BASE;
+        EFI_CHECK(boot_services.AllocatePages(.AllocateAddress, UserReservedMemoryType, 0x10_0000 / 4096, *kernel_base));
 
         {
             // Get framebuffer and clear the screen
@@ -53,10 +50,10 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             console := system_table.ConOut;
             EFI_CHECK(console.Reset(console, 0));
 
-            boot_data.framebuffer = cast(*u32) gop.Mode.frame_buffer_base;
-            boot_data.x_resolution = gop.Mode.info.HorizontalResolution;
-            boot_data.y_resolution = gop.Mode.info.VerticalResolution;
-            boot_data.stride = gop.Mode.info.PixelsPerScanLine;
+            boot_data.framebuffer.buffer = cast(*u32) gop.Mode.frame_buffer_base;
+            boot_data.framebuffer.x_resolution = gop.Mode.info.HorizontalResolution;
+            boot_data.framebuffer.y_resolution = gop.Mode.info.VerticalResolution;
+            boot_data.framebuffer.stride = gop.Mode.info.PixelsPerScanLine;
         }
 
         for 0..system_table.NumberOfTableEntries-1 {
@@ -79,6 +76,8 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         }
 
         display("Boot data size: ", size_of(Boot_Data), "\n\r");
+
+
 
         // All this stuff is to load the kernel ELF file from the EFI filesystem
 
@@ -112,6 +111,8 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         EFI_CHECK(boot_services.AllocatePool(.EfiLoaderData, size, *load_buffer));
         EFI_CHECK(kernel_file.Read(kernel_file, *size, load_buffer));
+
+
 
         // Firmware physical memory map
         limit :: (region: Boot_Data.Memory_Region) -> u64 {
@@ -179,12 +180,12 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             boot_pdpt[0] = cast(u64) boot_pd.data   | PAGE_PRESENT | PAGE_READ_WRITE;
 
             // Low memory where the bootloader is loaded
-            boot_pd[0] = 0x00_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-            boot_pd[1] = 0x20_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-            boot_pd[2] = 0x40_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-            boot_pd[3] = 0x60_0000 | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            boot_pd[0] = 0x00_0000 | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            boot_pd[1] = 0x20_0000 | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            boot_pd[2] = 0x40_0000 | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            boot_pd[3] = 0x60_0000 | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
 
-            // UEFI seems to put the stack at the top of physical memory. Don't know if that's standard. For now assume that the machine has 128Mb
+            // UEFI seems to put the stack at the top of physical memory. Don't know if that's standardised. For now assume that the machine has 128Mb
             index: u64;
             for< 64..45 {
                 boot_pd[it] = (0x800_0000 - index*0x20_0000) | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
@@ -213,14 +214,14 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             }
 
             virtual_base : u64 : 0xffff_ffff_8000_0000;
-            offset := cast(u64) boot_data.framebuffer & 0x1fffff;
+            offset := cast(u64) boot_data.framebuffer.buffer & 0x1fffff;
 
             // Map the framebuffer
-            pd[4] = (cast(u64) boot_data.framebuffer - offset            ) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-            pd[5] = (cast(u64) boot_data.framebuffer - offset + 0x20_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            pd[4] = (cast(u64) boot_data.framebuffer.buffer - offset            ) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            pd[5] = (cast(u64) boot_data.framebuffer.buffer - offset + 0x20_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
 
             // Translate framebuffer address to virtual
-            boot_data.framebuffer = cast(*u32) (virtual_base + 4*0x20_0000 + offset);
+            boot_data.framebuffer.buffer = cast(*u32) (virtual_base + 4*0x20_0000 + offset);
 
             // Map the page frame descriptors
             page_directories_needed := (boot_data.page_frames.count * size_of(Page_Frame_Desc)) / (0x20_0000) + 2;
@@ -252,9 +253,11 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             region.address = desc.PhysicalStart;
             region.pages   = desc.NumberOfPages;
 
-            if cast(EFI_MEMORY_TYPE) desc.Type == {
+            memory_type := cast(EFI_MEMORY_TYPE) desc.Type;
+
+            if memory_type == {
               case .EfiLoaderCode; #through;
-              // case .EfiLoaderData; #through;
+              // case .EfiLoaderData; #through; // Cannot distinguish EfiLoaderData from memory that the kernel needs, due to EDK II bug about custom memory types.
               case .EfiBootServicesCode; #through;
               case .EfiBootServicesData; #through;
               case .EfiConventionalMemory;
@@ -282,7 +285,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         }
 
         while boot_services.ExitBootServices(loaded_image, mmap_key) == .InvalidParameter {
-            // ExitBootServices itself can sometimes change the memory map, in which case you just need to call it again.
+            // ExitBootServices itself can sometimes change the memory map, in which case you need to call it again.
             // Todo: does this mean we need to update the one we give the kernel?
             mmap_key = 0;
             mmap_size = max_mmap_size;

@@ -6,17 +6,8 @@
 #load "x64.jai";
 #load "journal.jai";
 
-Framebuffer :: struct {
-    buffer: *u32;
-    x_resolution: int;
-    y_resolution: int;
-    stride: int;
-}
-
 Kernel_Globals :: struct {
-    framebuffer: Framebuffer;
-    boot_data: *Boot_Data;
-    page_frames: *Page_Frame_Desc;
+    using boot_data: *Boot_Data;
 
     physical_page_pool: Physical_Page_Pool;
     physical_block_allocator: Block_Allocator;
@@ -32,52 +23,50 @@ Kernel_Globals :: struct {
     io_apic: *u32;
 
     high_precision_timer: HPET;
+
+    temporary_storage: Temporary_Storage;
+    temporary_storage_buffer: [TEMPORARY_STORAGE_SIZE] u8 #align 64;
+
+    main_thread_context: Context;
 }
 
-using kernel_globals: Kernel_Globals;
+kernel_globals: Kernel_Globals;
 
 Interrupts :: #library,no_dll ".build/interrupts";
 
 init_segment_registers :: () #foreign Interrupts;
 
-// To get the stack trace after a fault
-main_thread_context: *Context;
-
 #program_export
 kernel_entry :: () #no_context {
+    using kernel_globals;
 
-    boot_data = cast(*Boot_Data) 0x10_0000;
-    page_frames = boot_data.page_frames.data;
+    boot_data = cast(*Boot_Data) Boot_Data.BASE_ADDRESS;
 
-    framebuffer.buffer = cast(*u32) boot_data.framebuffer;
-    framebuffer.x_resolution = boot_data.x_resolution;
-    framebuffer.y_resolution = boot_data.y_resolution;
-    framebuffer.stride = boot_data.stride;
-
-    c: Context;
-    c.assertion_failed = (location: Source_Code_Location, message: string) -> bool {
+    main_thread_context.assertion_failed = (location: Source_Code_Location, message: string) -> bool {
         if message.count {
-            serial_out("Assertion failure: ");
-            serial_out(message);
-            serial_out("\n");
+            write_string("Assertion failure: ");
+            write_string(message);
+            write_string("\n");
         }
 
         bluescreen();
         return true;
     };
 
-    c.logger = (message: string, data: *void, info: Log_Info) {
-        serial_out(message);
+    main_thread_context.logger = (message: string, data: *void, info: Log_Info) {
+        write_string(message);
         if message[message.count-1] != #char "\n" {
-            serial_out("\n");
+            write_string("\n");
         }
     };
 
-    c.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = 2;
-    c.print_style.default_format_struct.use_newlines_if_long_form = true;
+    set_initial_data(*temporary_storage, TEMPORARY_STORAGE_SIZE, temporary_storage_buffer.data);
+    main_thread_context.temporary_storage = *temporary_storage;
 
-    push_context c {
-        main_thread_context = *context;
+    main_thread_context.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = 2;
+    main_thread_context.print_style.default_format_struct.use_newlines_if_long_form = true;
+
+    push_context main_thread_context {
 
         fb := framebuffer;
 
@@ -117,22 +106,21 @@ kernel_entry :: () #no_context {
             if mode == .ALLOCATE || mode == .RESIZE {
                 physical: u64;
 
-                // Minimum allocation size is a page, avoid small allocations
                 if size <= 4096 {
                     page := get_page_frame();
                     physical = get_physical_address(page);
                 } else {
                     physical = alloc_block(*kernel_globals.physical_block_allocator, size);
-                    // Todo: fallback path if a contiguous physical block can't be found
                 }
 
                 new := cast(*void) physical + DIRECT_MAPPING_BASE;
 
                 if old_size {
                     memcpy(new, old_memory, old_size);
+                    context.allocator.proc(.FREE, old_size, 0, old_memory, null);
                 }
 
-                page := *page_frames[physical / 4096];
+                page := *kernel_globals.page_frames[physical / 4096];
                 page.flags |= ifx size <= 4096 then .ALLOCATOR_TAG_SINGLE_PAGE else .ALLOCATOR_TAG_BLOCK;
 
                 return new;
@@ -142,7 +130,7 @@ kernel_entry :: () #no_context {
                 phys := cast(u64) old_memory - DIRECT_MAPPING_BASE;
                 index := phys / 4096;
 
-                page := *page_frames[index];
+                page := *kernel_globals.page_frames[index];
 
                 if page.flags & .ALLOCATOR_TAG_BLOCK {
                     free_block(*kernel_globals.physical_block_allocator, phys);
@@ -172,12 +160,6 @@ kernel_entry :: () #no_context {
 
             init_block_allocator(*virtual_block_allocator, heap_base / 4096, heap_size / 4096);
         }
-
-        ts_buffer := alloc(0x1_0000);
-        ts: Temporary_Storage;
-
-        set_initial_data(*ts, 0x1_0000, ts_buffer);
-        context.temporary_storage = *ts;
 
         {
             // Global descriptor table boilerplate
@@ -239,23 +221,19 @@ kernel_entry :: () #no_context {
 }
 
 bluescreen :: () {
-    using framebuffer;
+    using kernel_globals.framebuffer;
 
     for y: 0..y_resolution-1 for x: 0..x_resolution-1 {
         buffer[x + y * stride] = cast(u32) (0xff0000ff);
     }
 
-    serial_out("\nStack trace:\n");
+    write_string("\nStack trace:\n");
     print_stack_trace(context.stack_trace);
 
     while true #asm {
         cli;
         hlt;
     }
-}
-
-static_to_physical :: (object: *void) -> u64 {
-    return cast(u64) object - 0xffff_ffff_8000_0000 + Boot_Data.KERNEL_PHYS_BASE;
 }
 
 // A physical memory allocator that finds discontiguous physical pages. Discontiguous pages are more likely to be available and it doesn't usually
@@ -273,7 +251,7 @@ Physical_Page_Pool :: struct {
 }
 
 init_physical_page_pool :: (memory: Boot_Data.Memory_Region) {
-    using physical_page_pool;
+    using kernel_globals.physical_page_pool;
 
     start = cast(int) (memory.address / 4096);
     page_count = cast(int) memory.pages;
@@ -282,10 +260,10 @@ init_physical_page_pool :: (memory: Boot_Data.Memory_Region) {
 }
 
 get_page_frame :: () -> *Page_Frame_Desc, int {
-    using physical_page_pool;
+    using kernel_globals.physical_page_pool;
 
     if freelist != FREELIST_TAIL {
-        page := *page_frames[freelist];
+        page := *kernel_globals.page_frames[freelist];
         index := freelist;
 
         freelist = page.freelist;
@@ -298,7 +276,7 @@ get_page_frame :: () -> *Page_Frame_Desc, int {
     }
 
     index := start + high_watermark;
-    page := *page_frames[index];
+    page := *kernel_globals.page_frames[index];
 
     high_watermark += 1;
 
@@ -310,15 +288,15 @@ release_page_frame :: (address: u64) {
 }
 
 release_page_frame :: (index: int) {
-    using physical_page_pool;
+    using kernel_globals.physical_page_pool;
 
-    page_frame := *page_frames[index];
+    page_frame := *kernel_globals.page_frames[index];
     page_frame.freelist = freelist;
     freelist = xx index;
 }
 
 release_page_frame :: (page_frame: *Page_Frame_Desc) {
-    using physical_page_pool;
+    using kernel_globals.physical_page_pool;
 
     page_frame.freelist = freelist;
     freelist = index(page_frame);
@@ -334,7 +312,7 @@ get_virtual_address :: (page_frame: *Page_Frame_Desc) -> *void {
 }
 
 index :: (page_frame: *Page_Frame_Desc) -> s32 {
-    index := (cast(u64) page_frame - cast(u64) page_frames) / size_of(Page_Frame_Desc);
+    index := (cast(u64) page_frame - cast(u64) kernel_globals.page_frames.data) / size_of(Page_Frame_Desc);
     return xx index;
 }
 
@@ -370,7 +348,7 @@ map_page :: (virtual_address: u64, physical_address: u64, flags := Page_Flags.PR
     pd\ _offset := (virtual_address >> 21) & mask;
     pt\ _offset := (virtual_address >> 12) & mask;
 
-    pml4 := boot_data.page_tables.pml4.data;
+    pml4 := kernel_globals.boot_data.page_tables.pml4.data;
 
     pdpt := get_or_create_page_table(pml4, pml4_offset);
     pd   := get_or_create_page_table(pdpt, pdpt_offset);
@@ -403,7 +381,7 @@ Page_Flags :: enum_flags u64 {
 
 
 // A block allocator that just linearly scans to find a large enough free block. A block is an integer number of pages.
-// Can be used for both virtual and physical memory.
+// Is being used for both virtual and physical memory.
 
 Block_Desc :: struct {
     start_page: s64; // Relative to the start of the allocator's region
@@ -525,49 +503,9 @@ free_block :: (allocator: *Block_Allocator, address: u64) -> bool {
 
 
 
-serial_out :: (data: string) {
-    COM1 :: 0x3f8;
+// This is implemented in Runtime_Support, so that write_string can go to serial
+// write_string :: (data: string)
 
-    for cast([] u8) data {
-        for 1..1_0000 {
-            status: u8;
-            port := COM1 + 5;
-
-            #asm {
-                status === a;
-                port   === d;
-                in.b status, port;
-            }
-
-            if status & 0x20 break;
-
-            #asm { pause; }
-        }
-
-        byte := it;
-        port := COM1;
-
-        #asm {
-            byte === a;
-            port === d;
-            out.b port, byte;
-        }
-    }
-}
-
-serial_write_hex :: (value: $T) {
-    v := cast,no_check(u64) value;
-
-    hex_chars := "0123456789abcdef";
-    result: [16] u8;
-
-    for 0..15 {
-        result[it] = hex_chars[(v >> (60 - it * 4)) & 0xF];
-    }
-
-    serial_out(cast(string) result);
-    serial_out("\n");
-}
 
 #program_export __libc_start_main :: () {}
 
@@ -575,109 +513,3 @@ serial_write_hex :: (value: $T) {
 
 #import "Bit_Array";
 #import "Bit_Operations";
-
-Buddy_Allocator :: struct {
-    freelists: [] int;
-    FREELIST_TERMINATOR :: -1;
-
-    bitmap: Bit_Array;
-
-    base_address: u64;
-}
-
-serial_write_buddy_bits :: (buddy: *Buddy_Allocator) {
-    data: u8;
-    bit: string;
-    bit.count = 1;
-    bit.data = *data;
-
-    for buddy.bitmap {
-
-        if it_index == 1 || it_index == 3 || it_index == 7 || it_index == 15 {
-            serial_out("\n");
-        }
-
-        data = cast(u8) ifx it then #char "1" else #char "0";
-        serial_out(bit);
-    }
-    serial_out("\n\n");
-}
-
-make_buddy :: (base: u64, size: s64, buffer: *void) -> Buddy_Allocator {
-    using buddy: Buddy_Allocator;
-    // For now assumes the smallest block size is a page
-
-    // Todo: assert base address is page aligned, size is 2^x, buffer is big enough
-    cursor := buffer;
-    levels := bit_scan_reverse(size) - 13 + 1;
-
-    serial_out("Creating buddy.\n");
-    serial_out("Num levels: "); serial_write_hex(xx levels);
-
-    freelists.data = cursor;
-    freelists.count = levels;
-    cursor += freelists.count * size_of(int);
-
-    bitmap.count = 2 * (size / 4096) - 1;
-    serial_out("Bitmap bits: "); serial_write_hex(xx bitmap.count);
-    serial_out("\n\n");
-
-    bitmap_slots := (bitmap.count + 63) >> 6;
-    bitmap.slots.count = bitmap_slots;
-    bitmap.slots.data = cursor;
-    cursor += bitmap.slots.count * size_of(int);
-
-    memset(buffer, 0, xx (cursor - buffer));
-    for *freelists {
-        it.* = Buddy_Allocator.FREELIST_TERMINATOR;
-    }
-
-    base_address = base;
-    return buddy;
-}
-
-buddy_alloc :: (buddy: *Buddy_Allocator, bytes: int) -> u64 {
-
-    level := buddy.freelists.count - (bit_scan_reverse(bytes) - 13 + 1);
-
-    b0 := (1 << level) - 1;
-    b1 := b0 + b0;
-
-    serial_out("Level: "); serial_write_hex(xx level);
-    serial_out("b0: ");    serial_write_hex(xx b0);
-    serial_out("b1: ");    serial_write_hex(xx b1);
-
-    address: u64;
-
-    for bit: b0..b1 {
-        if buddy.bitmap[bit] continue; // Find a block that's not already allocated
-
-        serial_out("Checking bit\n");
-
-        parent := bit;
-        for< level-1..0 {
-            // Set all parent bits
-            if buddy.bitmap[parent] break;
-
-            set_bit(*buddy.bitmap, parent);
-            parent = (parent - 1) / 2;
-        }
-
-        recursively_set_children :: (buddy: *Buddy_Allocator, bit: int) {
-            left_child := bit * 2 + 1;
-
-            if left_child < buddy.freelists.count {
-                recursively_set_children(buddy, left_child);
-                recursively_set_children(buddy, left_child + 1);
-
-                set_bit(*buddy.bitmap, bit);
-            }
-        }
-
-        recursively_set_children(buddy, bit);
-
-        break;
-    }
-
-    return cast(u64) (b0 * 4096);
-}
