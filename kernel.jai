@@ -33,7 +33,6 @@ Kernel_Globals :: struct {
 kernel_globals: Kernel_Globals;
 
 Interrupts :: #library,no_dll ".build/interrupts";
-
 init_segment_registers :: () #foreign Interrupts;
 
 #program_export
@@ -213,22 +212,29 @@ kernel_entry :: () #no_context {
         }
 
         apic_stuff();
-
         init_hpet();
+
+        uacpi_context_set_log_level(.DEBUG);
+
+        acpi_init_result := uacpi_initialize(0);
+        if acpi_init_result != .OK {
+            log_error("uACPI initalize failed with status \"%\"", acpi_init_result);
+        }
     }
 
     while true #asm { hlt; }
 }
 
-bluescreen :: () {
+bluescreen :: (loc := #caller_location) #no_context {
     using kernel_globals.framebuffer;
 
     for y: 0..y_resolution-1 for x: 0..x_resolution-1 {
         buffer[x + y * stride] = cast(u32) (0xff0000ff);
     }
 
-    write_string("\nStack trace:\n");
-    print_stack_trace(context.stack_trace);
+    write_string("\nSource code location:\n");
+    write_loc(loc);
+    // print_stack_trace(context.stack_trace);
 
     while true #asm {
         cli;
@@ -415,7 +421,7 @@ init_block_allocator :: (allocator: *Block_Allocator, start_page: int, total_pag
     };
 }
 
-alloc_block :: (using allocator: *Block_Allocator, size_bytes: int) -> address: u64, Block_Desc {
+alloc_block :: (using allocator: *Block_Allocator, size_bytes: int) -> address: u64, Block_Desc #no_context {
 
     pages_needed := size_bytes / 4096;
     if size_bytes % 4096 pages_needed += 1;
@@ -429,7 +435,7 @@ alloc_block :: (using allocator: *Block_Allocator, size_bytes: int) -> address: 
 
             if remaining_pages != 0 {
                 // We didn't use the whole block, make a new one and move the others over
-                if blocks.count >= max_block_descriptors {
+                if blocks.count >= max_block_descriptors-1 {
                     bluescreen();
                 }
 
@@ -452,7 +458,7 @@ alloc_block :: (using allocator: *Block_Allocator, size_bytes: int) -> address: 
     return 0, .{};
 }
 
-free_block :: (allocator: *Block_Allocator, address: u64) -> bool {
+free_block :: (allocator: *Block_Allocator, address: u64) -> bool #no_context {
     // Find the block corresponding to that address using linear search
     // Todo hash table
 
@@ -465,7 +471,7 @@ free_block :: (allocator: *Block_Allocator, address: u64) -> bool {
     
     for blocks {
         if it.start_page == start_page {
-            m = it.start_page;
+            m = it_index;
             break;
         }
     }
@@ -504,7 +510,7 @@ free_block :: (allocator: *Block_Allocator, address: u64) -> bool {
 
 
 // This is implemented in Runtime_Support, so that write_string can go to serial
-// write_string :: (data: string)
+// serial_out :: (data: string)
 
 
 #program_export __libc_start_main :: () {}

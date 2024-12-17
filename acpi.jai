@@ -579,3 +579,255 @@ fault_15 :: (stack: *void) #c_call {
         bluescreen();
     }
 } @InterruptRoutine
+
+#import "Uacpi";
+
+#program_export uacpi_do_atomic_cmpxchg64 :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_do_atomic_cmpxchg64\"\n");
+    bluescreen();
+}
+
+#program_export uacpi_do_atomic_cmpxchg32 :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_do_atomic_cmpxchg32\"\n");
+    bluescreen();
+}
+
+#program_export uacpi_do_atomic_cmpxchg16 :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_do_atomic_cmpxchg16\"\n");
+    bluescreen();
+}
+
+#program_export uacpi_kernel_get_rsdp :: (rsdp_address: *uacpi_phys_addr) -> uacpi_status #c_call {
+    // We can cast this to a physical address, because the RSDP is stored in identity-mapped UEFI memory.
+    rsdp_address.* = cast(uacpi_phys_addr) kernel_globals.acpi_rsdp;
+    return .OK;
+}
+
+#program_export uacpi_kernel_raw_memory_read :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_raw_memory_read\"\n");
+    bluescreen();
+}
+
+#program_export uacpi_kernel_raw_memory_write :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_raw_memory_write\"\n");
+    bluescreen();
+}
+
+#program_export uacpi_kernel_raw_io_read :: (address: uacpi_io_addr, byte_width: uacpi_u8, out_value: *uacpi_u64) -> uacpi_status #c_call {
+    value: u64;
+
+    #asm {
+        address === d;
+        value   === a;
+    }
+
+    if byte_width == {
+        case 1; #asm { in.b value, address; }
+        case 2; #asm { in.w value, address; }
+        case 4; #asm { in.d value, address; }
+        case; bluescreen();
+    }
+
+    out_value.* = value;
+    return .OK;
+}
+
+#program_export uacpi_kernel_raw_io_write :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_raw_io_write\"\n");
+    bluescreen();
+}
+
+#program_export uacpi_kernel_pci_read :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_pci_read\"\n");
+    bluescreen();
+}
+
+#program_export uacpi_kernel_pci_write :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_pci_write\"\n");
+    bluescreen();
+}
+
+#program_export uacpi_kernel_io_map :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_io_map\"\n");
+    bluescreen();
+}
+
+#program_export uacpi_kernel_io_unmap :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_io_unmap\"\n");
+    bluescreen();
+}
+
+#program_export uacpi_kernel_io_read :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_io_read\"\n");
+    bluescreen();
+}
+
+#program_export uacpi_kernel_io_write :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_io_write\"\n");
+    bluescreen();
+}
+
+#program_export uacpi_kernel_map :: (addr: uacpi_phys_addr, len: uacpi_size) -> *void #c_call {
+    return cast(*void) addr + DIRECT_MAPPING_BASE;
+}
+
+#program_export uacpi_kernel_unmap :: (addr: *void, len: uacpi_size) #c_call {
+    return;
+}
+
+#program_export uacpi_kernel_alloc :: (size: uacpi_size) -> *void #c_call {
+    // Not currently thread synced, and alloc_block is not efficient for small allocations.
+
+    // The block allocator functions are #no_context now so that they can be used in these callbacks,
+    // but in the future it might be better to detect what thread we're on and push the corresponding context.
+
+    phys := alloc_block(*kernel_globals.physical_block_allocator, cast(s64) size);
+    virt := cast(*void) phys + DIRECT_MAPPING_BASE;
+
+    return virt;
+}
+
+#program_export uacpi_kernel_calloc :: (count: uacpi_size, size: uacpi_size) -> *void #c_call {
+    // Comment in uacpi_kernel_alloc applies
+    size_bytes := cast(s64) (size*count);
+
+    phys := alloc_block(*kernel_globals.physical_block_allocator, size_bytes);
+    virt := cast(*void) phys + DIRECT_MAPPING_BASE;
+
+    memset(virt, 0, size_bytes);
+    return virt;
+}
+
+#program_export uacpi_kernel_free :: (mem: *void) #c_call {
+    // Comment in uacpi_kernel_alloc applies
+    if mem == null return;
+
+    phys := cast(u64) mem - DIRECT_MAPPING_BASE;
+    free_block(*kernel_globals.physical_block_allocator, phys);
+}
+
+#program_export uacpi_kernel_log :: (log_level: uacpi_log_level, c_string: *uacpi_char) #c_call {
+    message: string;
+    message.data = c_string;
+    message.count = c_style_strlen(c_string);
+
+    write_string(message);
+}
+
+#program_export uacpi_kernel_get_nanoseconds_since_boot :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_get_nanoseconds_since_boot\"\n");
+    bluescreen();
+}
+
+#program_export uacpi_kernel_stall :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_stall\"\n");
+    bluescreen();
+}
+
+#program_export uacpi_kernel_sleep :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_sleep\"\n");
+    bluescreen();
+}
+
+
+
+// These uACPI multithreading callbacks should be implemented once we have multithreading primitives in the kernel.
+
+next_mutex_handle: uacpi_handle = xx 1;
+next_event_handle: uacpi_handle = xx 1;
+
+#program_export uacpi_kernel_create_mutex :: () -> uacpi_handle #c_call {
+    result := next_mutex_handle;
+    next_mutex_handle += 1;
+    return result;
+}
+
+#program_export uacpi_kernel_free_mutex :: (handle: uacpi_handle) #c_call {
+    // Do nothing
+}
+
+#program_export uacpi_kernel_create_event :: () -> uacpi_handle #c_call {
+    result := next_event_handle;
+    next_event_handle += 1;
+    return result;
+}
+
+#program_export uacpi_kernel_free_event :: () #c_call {
+    // Do nothing
+}
+
+#program_export uacpi_kernel_get_thread_id :: () -> uacpi_thread_id #c_call {
+    return cast(*void) 1;
+}
+
+#program_export uacpi_kernel_acquire_mutex :: (handle: uacpi_handle, timeout: uacpi_u16) -> uacpi_status #c_call {
+    return .OK;
+}
+
+#program_export uacpi_kernel_release_mutex :: (handle: uacpi_handle) #c_call {
+    // Do nothing
+}
+
+#program_export uacpi_kernel_wait_for_event :: (handle: uacpi_handle, timeout: uacpi_u16) -> uacpi_bool #c_call {
+    return true;
+}
+
+#program_export uacpi_kernel_signal_event :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_signal_event\"\n");
+    bluescreen();
+}
+
+#program_export uacpi_kernel_reset_event :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_reset_event\"\n");
+    bluescreen();
+}
+
+#program_export uacpi_kernel_handle_firmware_request :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_handle_firmware_request\"\n");
+    bluescreen();
+}
+
+#program_export uacpi_kernel_install_interrupt_handler :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_install_interrupt_handler\"\n");
+    bluescreen();
+}
+
+#program_export uacpi_kernel_uninstall_interrupt_handler :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_uninstall_interrupt_handler\"\n");
+    bluescreen();
+}
+
+#program_export uacpi_kernel_create_spinlock :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_create_spinlock\"\n");
+    bluescreen();
+}
+
+#program_export uacpi_kernel_free_spinlock :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_free_spinlock\"\n");
+    bluescreen();
+}
+
+#program_export uacpi_kernel_lock_spinlock :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_lock_spinlock\"\n");
+    bluescreen();
+}
+
+#program_export uacpi_kernel_unlock_spinlock :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_unlock_spinlock\"\n");
+    bluescreen();
+}
+
+#program_export uacpi_kernel_schedule_work :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_schedule_work\"\n");
+    bluescreen();
+}
+
+#program_export uacpi_kernel_wait_for_work_completion :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_wait_for_work_completion\"\n");
+    bluescreen();
+}
+ 
+#program_export __popcountdi2 :: () {
+    write_string("uACPI kernel call: \"__popcountdi2\"\n");
+    bluescreen();
+}

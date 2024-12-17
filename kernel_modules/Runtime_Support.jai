@@ -7,9 +7,13 @@
 
 #module_parameters(DEFINE_SYSTEM_ENTRY_POINT: bool, DEFINE_INITIALIZATION: bool, ENABLE_BACKTRACE_ON_CRASH: bool);
 
-#scope_export
+// Not actually a Unix OS, but the File module is being imported inside a #run,host,
+// which for some reason means that that module needs to be able to compile with this
+// runtime support module, even though the parent workspace uses the default Runtime_Support
+// in jai/modules. I thought that the point of ,host is to prevent this exact issue?
+OS_IS_UNIX :: true;
 
-OS_IS_UNIX :: OS == .MACOS || OS == .LINUX || OS == .PS5 || OS == .IOS || OS == .ANDROID;
+#scope_export
 
 // @Cleanup: __element_duplicate should lose its c_call status, and also be faster...!
 __element_duplicate :: (start: *u8, num_elements: s64, size: s64) #c_call #no_aoc {
@@ -163,14 +167,14 @@ serial_out :: (data: string) #no_context {
     }
 }
 
-#scope_module
-
 write_loc :: (loc: Source_Code_Location, to_standard_error := false) #no_context {
     write_strings(loc.fully_pathed_filename, ":", to_standard_error = to_standard_error);
     write_number(loc.line_number, to_standard_error = to_standard_error);
     write_string(",", to_standard_error);
     write_number(loc.character_number, to_standard_error = to_standard_error);
 }
+
+#scope_module
 
 my_panic :: () #no_context {
     write_string("Panic.\n", to_standard_error = true);
@@ -224,17 +228,7 @@ debug_break :: () #no_context {
         compile_time_debug_break();
     } else {
         // Break into the debugger, or stop the running process.
-        #if OS == .PS5 {
-            #asm { int 0x41; }
-        } else #if CPU == .X64 {
-            #asm { int3; }
-        } else #if OS == .WASM {
-            wasm_debug_break :: () #foreign; // You will need to provide this function as JS code in your WASM environment. :JaiWasm:
-            wasm_debug_break();
-        } else {
-            llvm_trap :: () #intrinsic "llvm.debugtrap"; // @ToDo: This used to be llvm.trap which supposedly doesn’t work on Android. We need to test if "debugtrap" works there or if we need a different implemenation.
-            llvm_trap();
-        }
+        #asm { int3; }
     }
 }
 

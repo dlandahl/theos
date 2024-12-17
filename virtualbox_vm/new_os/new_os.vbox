@@ -6,17 +6,19 @@
 ** Use VBoxManage or the VirtualBox Manager GUI to make changes.
 -->
 <VirtualBox xmlns="http://www.virtualbox.org/" version="1.19-windows">
-  <Machine uuid="{c4dd40ef-ac36-422c-8328-bb8341549a8b}" name="new_os" OSType="Other_64" snapshotFolder="Snapshots" lastStateChange="2024-12-15T22:36:46Z">
+  <Machine uuid="{c4dd40ef-ac36-422c-8328-bb8341549a8b}" name="new_os" OSType="Other_64" snapshotFolder="Snapshots" lastStateChange="2024-12-17T19:04:14Z">
     <MediaRegistry>
       <HardDisks>
         <HardDisk uuid="{b9d5012b-1c44-4eea-8954-2c8e63be35bf}" location="disk_image.vdi" format="VDI" type="Normal"/>
-        <HardDisk uuid="{b89d4771-4b1e-4e72-9fe2-4b6515889227}" location="C:/new os/disk_image.vdi" format="VDI" type="Normal"/>
+        <HardDisk uuid="{2e075560-26df-4cff-a63e-23b05b4bae6d}" location="C:/new os/disk_image.vdi" format="VDI" type="Normal"/>
       </HardDisks>
     </MediaRegistry>
     <ExtraData>
+      <ExtraDataItem name="GUI/AutoresizeGuest" value="false"/>
       <ExtraDataItem name="GUI/DefaultCloseAction" value="PowerOff"/>
       <ExtraDataItem name="GUI/LastCloseAction" value="PowerOff"/>
-      <ExtraDataItem name="GUI/LastNormalWindowPosition" value="618,208,1024,808"/>
+      <ExtraDataItem name="GUI/LastNormalWindowPosition" value="304,190,1083,830"/>
+      <ExtraDataItem name="GUI/LastScaleWindowPosition" value="1009,331,1407,830"/>
     </ExtraData>
     <Hardware uuid="{7f62689b-0112-4b7a-85e7-872786e440de}">
       <CPU count="4">
@@ -24,15 +26,16 @@
         <LongMode enabled="true"/>
         <HardwareVirtExLargePages enabled="true"/>
       </CPU>
-      <Memory RAMSize="128"/>
+      <Memory RAMSize="256"/>
       <Firmware type="EFI"/>
+      <Chipset type="ICH9"/>
       <Boot>
-        <Order position="1" device="DVD"/>
-        <Order position="2" device="Floppy"/>
-        <Order position="3" device="HardDisk"/>
+        <Order position="1" device="HardDisk"/>
+        <Order position="2" device="None"/>
+        <Order position="3" device="None"/>
         <Order position="4" device="None"/>
       </Boot>
-      <Display VRAMSize="256"/>
+      <Display VRAMSize="128"/>
       <BIOS>
         <IOAPIC enabled="true"/>
         <SmbiosUuidLittleEndian enabled="true"/>
@@ -78,19 +81,159 @@
             <NAT localhost-reachable="true"/>
           </DisabledModes>
         </Adapter>
+        <Adapter slot="8" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="9" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="10" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="11" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="12" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="13" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="14" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="15" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="16" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="17" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="18" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="19" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="20" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="21" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="22" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="23" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="24" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="25" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="26" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="27" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="28" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="29" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="30" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="31" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="32" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="33" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="34" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
+        <Adapter slot="35" cable="false">
+          <DisabledModes>
+            <NAT localhost-reachable="true"/>
+          </DisabledModes>
+        </Adapter>
       </Network>
       <UART>
-        <Port slot="0" enabled="true" IOBase="0x3f8" IRQ="4" path="C:\new os\vbox_serial_log.txt" hostMode="RawFile"/>
+        <Port slot="0" enabled="true" IOBase="0x3f8" IRQ="4" path="C:\new os\logs\vbox_serial_log.txt" hostMode="RawFile"/>
       </UART>
       <AudioAdapter driver="DirectSound" enabled="true"/>
       <Clipboard/>
       <GuestProperties>
-        <GuestProperty name="/VirtualBox/HostInfo/GUI/LanguageID" value="en_US" timestamp="1734302201700213100" flags="RDONLYGUEST"/>
+        <GuestProperty name="/VirtualBox/HostInfo/GUI/LanguageID" value="en_US" timestamp="1734462252490147000" flags="RDONLYGUEST"/>
       </GuestProperties>
       <StorageControllers>
         <StorageController name="AHCI" type="AHCI" PortCount="30" useHostIOCache="false" Bootable="true" IDE0MasterEmulationPort="0" IDE0SlaveEmulationPort="1" IDE1MasterEmulationPort="2" IDE1SlaveEmulationPort="3">
           <AttachedDevice type="HardDisk" hotpluggable="false" port="0" device="0">
-            <Image uuid="{b89d4771-4b1e-4e72-9fe2-4b6515889227}"/>
+            <Image uuid="{2e075560-26df-4cff-a63e-23b05b4bae6d}"/>
           </AttachedDevice>
         </StorageController>
       </StorageControllers>

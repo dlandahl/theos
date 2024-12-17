@@ -185,11 +185,11 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             boot_pd[2] = 0x40_0000 | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             boot_pd[3] = 0x60_0000 | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
 
-            // UEFI seems to put the stack at the top of physical memory. Don't know if that's standardised. For now assume that the machine has 128Mb
-            index: u64;
-            for< 64..45 {
-                boot_pd[it] = (0x800_0000 - index*0x20_0000) | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-                index += 1;
+            // UEFI seems to put the stack at the top of physical memory. Don't know if that's standardised. For now assume that the machine has 256Mb
+            index: int = 128;
+            for 0..20 {
+                boot_pd[index] = (0x1000_0000 - cast(u64) it*0x20_0000) | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+                index -= 1;
             }
 
             // 8Mb higher-half memory for the kernel.
@@ -341,33 +341,28 @@ check_efi_status :: (status: EFI_STATUS, loc := #caller_location) {
     }
 
     ti := type_info(EFI_STATUS);
-    index: int = 1;
 
     for ti.values if it == cast(int) status {
-        index = it_index;
-        break;
+        enum_name := ti.names[it_index];
+        display("UEFI call failed on line ", loc.line_number, " with status ", enum_name, "\n\r");
+
+        return;
     }
 
-    enum_name := ti.names[index];
-
-    display("UEFI call failed on line ", loc.line_number, " with status ", enum_name, "\n\r");
+    display("UEFI call failed on line ", loc.line_number, " with unknown status code 0x", cast(u64) status, "\n\r");
 }
 
 display :: (args: .. Any) {
     for args {
-        if it.type == xx string {
+        if it.type.type == .STRING {
             display_string(<< cast(*string) it.value_pointer);
         }
 
-        // Can you metaprogram this without string formatting?
-        if it.type == xx u8   display_int(xx,no_check << cast(*u8)  it.value_pointer);
-        if it.type == xx s8   display_int(xx,no_check << cast(*s8)  it.value_pointer);
-        if it.type == xx u16  display_int(xx,no_check << cast(*u16) it.value_pointer);
-        if it.type == xx s16  display_int(xx,no_check << cast(*s16) it.value_pointer);
-        if it.type == xx u32  display_int(xx,no_check << cast(*u32) it.value_pointer);
-        if it.type == xx s32  display_int(xx,no_check << cast(*s32) it.value_pointer);
-        if it.type == xx u64  display_int(xx,no_check << cast(*u64) it.value_pointer);
-        if it.type == xx s64  display_int(xx,no_check << cast(*s64) it.value_pointer);
+        if it.type.type == .INTEGER {
+            integer: u64;
+            memcpy(*integer, it.value_pointer, it.type.runtime_size);
+            display_int(integer);
+        }
     }
 }
 

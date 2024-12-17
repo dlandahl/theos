@@ -1,17 +1,20 @@
 
 #import "Process";
 #import "Compiler";
+#import "File";
 
 #run {
     set_build_options_dc(.{ do_output = false });
+
+    make_directory_if_it_does_not_exist("logs");
 
     command := break_command_into_strings(#string QEMU_CMD
         qemu-system-x86_64
             -bios OVMF.fd
             -drive format=raw,file=disk_image.img
-            -chardev stdio,id=char0,logfile=qemu_serial.txt,signal=off
+            -chardev stdio,id=char0,logfile=logs/qemu_serial.txt,signal=off
             -serial chardev:char0
-            -m 128M 
+            -m 256M 
             -smp 8 
     QEMU_CMD);
     run_command(.. command);
@@ -19,7 +22,7 @@
 
 #run {
     // Handy page table calculator
-    x := cast(u64) 0x6e0_0000;
+    x := cast(u64) 256 * 1024 * 1024;
 
     mask: u64 = 0b111111111;
 

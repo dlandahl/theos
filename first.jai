@@ -14,11 +14,6 @@
     #import,dir "modules/VirtualBox";
 }
 
-// JAI_ROOT_DIR    :: "/home/dlandahl/jai";
-JAI_ROOT_DIR    :: "/mnt/c/jai";
-
-WSL_DISTRO_NAME :: "Ubuntu";
-
 #run main();
 
 main :: () {
@@ -27,6 +22,9 @@ main :: () {
     #if OS == .WINDOWS {
 
         log("You are on Windows, but this build program works only on Linux. Attempting to automatically relaunch in WSL");
+
+        JAI_ROOT_DIR :: "/mnt/c/jai";
+        WSL_DISTRO_NAME :: "Ubuntu";
 
         stdin  := GetStdHandle(STD_INPUT_HANDLE);
         stdout := GetStdHandle(STD_OUTPUT_HANDLE);
@@ -123,13 +121,13 @@ compile_bootloader :: () -> success: bool {
           case .PHASE;
             phase := cast(*Message_Phase) message;
             if phase.phase == .READY_FOR_CUSTOM_LINK_COMMAND {
-                link_command := tprint("%/bin/lld-linux -flavor link -subsystem:efi_application -driver -align:16 -base:0x200000 -entry:EfiMain .build/bootloader.o -out:.build/bootx64.efi", JAI_ROOT_DIR);
+                link_command := tprint("%/bin/lld-linux -flavor link -subsystem:efi_application -driver -align:16 -base:0x200000 -entry:EfiMain .build/bootloader.o -out:.build/bootx64.efi", compiler_get_base_path());
                 link_command_array := break_command_into_strings(link_command);
 
                 result := run_command(.. link_command_array);
                 if result.exit_code {
                     compiler_set_workspace_status(.FAILED, workspace);
-                    log_error("Linking failed. It's possible you need to set JAI_ROOT_DIR in first.jai.");
+                    log_error("Linking failed.");
                 }
 
                 compiler_custom_link_command_is_complete(workspace);
@@ -190,21 +188,35 @@ compile_kernel :: () -> success: bool {
     found_interrupts: [..] string;
 
     success: bool;
-    added: bool;
 
     while true {
         message := compiler_wait_for_message();
 
-        if message.kind == .COMPLETE {
-            complete := cast(*Message_Complete) message;
+        if message.kind == .TYPECHECKED {
+            typed := cast(*Message_Typechecked) message;
+            for header: typed.procedure_headers {
+                proc := header.expression;
 
-            success = complete.error_code == .NONE;
+                for proc.notes {
+                    if it.text != "InterruptRoutine" continue;
 
-            break;
+                    print_to_builder(*interrupt_assembly, INTERRUPT_STUB_FORMAT, proc.name);
+                    array_add(*found_interrupts, proc.name);
+                }
+            }
         }
 
         if message.kind == .PHASE {
             phase := cast(*Message_Phase) message;
+
+            if phase.phase == .TYPECHECKED_ALL_WE_CAN {
+                for found_interrupts {
+                    add_build_string(tprint("int__% :: () #foreign Interrupts;", it), workspace);
+                }
+
+                array_reset(*found_interrupts);
+            }
+
             if phase.phase == .ALL_TARGET_CODE_BUILT {
 
                 log("Assembling interrupt routines");
@@ -217,30 +229,15 @@ compile_kernel :: () -> success: bool {
                 if result.exit_code != 0 {
                     log_error("Failed to assemble interrupt routines.");
                     compiler_set_workspace_status(.FAILED, workspace);
-                    return false;
+                    success = false;
                 }
-            }
-
-            if phase.phase == .TYPECHECKED_ALL_WE_CAN {
-                for found_interrupts {
-                    add_build_string(tprint("int__% :: () #foreign Interrupts;", it), workspace);
-                }
-
-                array_reset(*found_interrupts);
             }
         }
 
-        if message.kind == .TYPECHECKED {
-            typed := cast(*Message_Typechecked) message;
-            for header: typed.procedure_headers {
-                proc := header.expression;
-
-                for proc.notes {
-                    if it.text != "InterruptRoutine" continue;
-                    print_to_builder(*interrupt_assembly, INTERRUPT_STUB_FORMAT, proc.name);
-                    array_add(*found_interrupts, proc.name);
-                }
-            }
+        if message.kind == .COMPLETE {
+            complete := cast(*Message_Complete) message;
+            success = complete.error_code == .NONE;
+            break;
         }
     }
 
@@ -266,12 +263,13 @@ format_disk :: () -> success: bool {
         "mcopy -i fat.img .build/kernel ::",
         "mcopy -i fat.img startup.nsh ::",
 
-        "cp fat.img disk_image.img",
-        "mv fat.img .build/iso",
+        "mv fat.img disk_image.img",
+
+        // "mv fat.img .build/iso",
         // "xorriso -as mkisofs -R -f -e fat.img -no-emul-boot -o disk_image.iso .build/iso",
     ];
 
-    make_directory_if_it_does_not_exist(".build/iso");
+    // make_directory_if_it_does_not_exist(".build/iso");
 
     for script {
         if !it.count continue;
