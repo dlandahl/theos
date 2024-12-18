@@ -210,40 +210,55 @@ apic_stuff :: () {
     apic_base |= .AE__Apic_Enable;
     write_msr(.APIC_BASE__Apic_Base, cast(u64) apic_base);
 
-    physical := cast(u64) apic_base & ~0xfff;
-    assert(0xfee0_0000 == physical);
-    assert(acpi_header.local_apic_address == cast(u32) physical);
+    {
+        physical := cast(u64) apic_base & ~0xfff;
+        assert(0xfee0_0000 == physical);
+        assert(acpi_header.local_apic_address == cast(u32) physical);
 
-    virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096); // Allocating an individual page using the block allocator because we don't have anything better for virtual memory yet
-    map_page(virtual, physical, Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE);
+        // Allocating an individual page using the block allocator because we don't have anything better for virtual memory yet
+        // Can't use the direct mapping because we want cache disabled for this page
+        virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096);
+        map_page(virtual, physical, Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE);
 
-    kernel_globals.apic = cast(*void) virtual;
+        kernel_globals.apic = cast(*void) virtual;
+    }
+
+    //
+    // Iterate interrupt controller structures
+    //
+
+    bootstrap_processor_local_apic_id := read_apic_register(.APIC_ID);
+    other_apic_ids: [..] u32;
 
     cursor := cast(u64) acpi_header + size_of(Acpi_MADT);
-
-    my_id := read_apic_register(.APIC_ID);
-    other_apic_ids: [..] u32;
 
     while cursor < cast(u64) acpi_header + acpi_header.length {
         ics := cast(*Acpi_MADT.Interrupt_Controller_Structure) cursor;
 
-        if ics.type == .LOCAL_APIC {
+        if ics.type == {
+          case .LOCAL_APIC;
             lapic := cast(*Acpi_MADT.Ics_Local_Apic) ics;
 
-            if lapic.apic_id != my_id {
+            if lapic.apic_id != bootstrap_processor_local_apic_id {
                 array_add(*other_apic_ids, lapic.apic_id);
             }
-        } else if ics.type == .IO_APIC {
+
+          case .IO_APIC;
             assert(kernel_globals.io_apic == null);
 
             ioapic_ics := cast(*Acpi_MADT.Ics_Io_Apic) ics;
-            virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096);
-            map_page(virtual, ioapic_ics.address, Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE);
+
+            {
+                // Comment above applies
+                virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096);
+                map_page(virtual, ioapic_ics.address, Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE);
+
+                kernel_globals.io_apic = cast(*u32) virtual;
+            }
 
             assert(ioapic_ics.address == 0xfec0_0000);
 
-            kernel_globals.io_apic = cast(*u32) virtual;
-        } else if ics.type == .INTERRUPT_SOURCE_OVERRIDE {
+          case .INTERRUPT_SOURCE_OVERRIDE;
             iso := cast(*Acpi_MADT.Ics_Source_Override) ics;
             print("Interrupt source override: %\n", << iso);
         }
@@ -266,12 +281,20 @@ apic_stuff :: () {
 
     for other_apic_ids print("Found APIC ID: %\n", it);
 
-    // Load the 16 bit AP initialization routine that was placed into static memory using metaprogramming
+    // Place the 16 bit AP initialization routine into static memory and load it
+    ap_startup_bin := #run,host -> [] u8 {
+        #import "Compiler";
+        #import "File";
+
+        code := read_entire_file(".build/ap_startup.bin");
+        return add_global_data(cast([] u8) code, .WRITABLE);
+    }
+
     memcpy(cast(*void) 0x8000 + DIRECT_MAPPING_BASE, ap_startup_bin.data, 4096);
 
     stack := alloc_block(*kernel_globals.physical_block_allocator, 0x20_0000) + DIRECT_MAPPING_BASE;
     << cast(*u64)   (0x8200 + DIRECT_MAPPING_BASE) = stack; // Hardcoded offset from ap_startup_bin
-    << cast(**void) (0x8208 + DIRECT_MAPPING_BASE) = cast(*void) ap_startup;
+    << cast(**void) (0x8208 + DIRECT_MAPPING_BASE) = cast(*void) ap_entry_point;
     << cast(*u32)   (0x8210 + DIRECT_MAPPING_BASE) = cast(u32) kernel_globals.boot_data.page_tables.pml4.data;
 
     for other_apic_ids {
@@ -286,15 +309,7 @@ apic_stuff :: () {
     }
 }
 
-ap_startup_bin :: #run,host -> [] u8 {
-    #import "Compiler";
-    #import "File";
-
-    code := read_entire_file(".build/ap_startup.bin");
-    return add_global_data(cast([] u8) code, .WRITABLE);
-}
-
-ap_startup :: () #c_call {
+ap_entry_point :: () #c_call {
     push_context .{} {
         write_string("AP Startup\n");
         while true #asm { cli; hlt; }
@@ -336,6 +351,20 @@ write :: (reg: Hpet_Register, value: u64) #no_context {
 
 read :: (reg: Hpet_Register) -> u64 #no_context {
     return << cast(*u64) (kernel_globals.high_precision_timer.base_address + cast(u64) reg);
+}
+
+Hpet_Config_Flags :: enum_flags u64 {
+    ENABLE         :: 0x1;
+    LEGACY_ROUTING :: 0x2;
+}
+
+Hpet_Timer_Flags :: enum_flags u64 {
+    INTERRUPT_TYPE           :: 0x2;  // (0=edge  1=level)
+    INTERRUPT_ENABLE         :: 0x4;
+    PERIODIC_ENABLE          :: 0x8;  // (0=non-periodic  1=periodic)
+    PERIODIC_CAPABLE         :: 0x10;
+    _64BIT_CAPABLE           :: 0x20;
+    WRITE_ACCUMULATOR_ENABLE :: 0x40;
 }
 
 HPET :: struct {
@@ -383,32 +412,24 @@ init_hpet :: () {
     hpet.initialized = true;
 }
 
-hpet_enable_interrupts :: (freq: u64) {
+hpet_enable_interrupts :: (frequency: u64) {
     hpet := *kernel_globals.high_precision_timer;
 
-    LEG_RT_CNF :: 0x2; // Enable legacy mode until we support allocating interrupts
-    write(.CONFIG, read(.CONFIG) | LEG_RT_CNF);
+    // Enable legacy routing until interrupt gate allocation is supported
+    write(.CONFIG, read(.CONFIG) | cast(u64) Hpet_Config_Flags.LEGACY_ROUTING);
 
-    timer := read(.TIMER0);
+    timer := cast(Hpet_Timer_Flags) read(.TIMER0);
 
-    Tn_PER_INT_CAP :: 0x10;
-    assert(timer & Tn_PER_INT_CAP > 0, "HPET timer 0 is not periodic capable");
+    assert(timer & .PERIODIC_CAPABLE > 0, "HPET timer 0 is not periodic capable");
+    assert(timer & ._64BIT_CAPABLE > 0, "HPET timer 0 is not 64bit");
 
-    // Tn_SIZE_CAP :: 0x20;
-    // assert(timer & Tn_SIZE_CAP > 0, "HPET timer 0 is not 64bit");
+    timer |= (.PERIODIC_ENABLE | .INTERRUPT_ENABLE | .WRITE_ACCUMULATOR_ENABLE);
+    timer &= ~.INTERRUPT_TYPE;
 
-    Tn_INT_TYPE_CNF :: 0x2;  // Interrupt type (0=edge  1=level)
-    Tn_INT_ENB_CNF  :: 0x4;  // Interrupt enable
-    Tn_TYPE_CNF     :: 0x8;  // Timer type (0=non-periodic  1=periodic)
-    Tn_VAL_SET_CNF  :: 0x40; // Periodic-mode enable write accumulator
-
-    timer |= (Tn_TYPE_CNF | Tn_INT_ENB_CNF | Tn_VAL_SET_CNF);
-    timer &= ~Tn_INT_TYPE_CNF;
-
-    write(.TIMER0, timer);
+    write(.TIMER0, cast(u64) timer);
 
     ticks_per_second := cast(u64) 1_000_000_000_000_000 / hpet.base_period_femtoseconds;
-    hpet.ticks_per_interrupt = ticks_per_second / freq;
+    hpet.ticks_per_interrupt = ticks_per_second / frequency;
 
     write(.TIMER0_COMP, hpet.ticks_per_interrupt);
 
@@ -426,126 +447,88 @@ hpet_enable_interrupts :: (freq: u64) {
 }
 
 hpet_restart :: () {
-    ENABLE_CNF :: 0x1;
     config := read(Hpet_Register.CONFIG);
 
-    write(.CONFIG, config & ~ENABLE_CNF);
+    ENABLE_BIT :: cast(u64) Hpet_Config_Flags.ENABLE;
+
+    write(.CONFIG, config & ~ENABLE_BIT);
     write(Hpet_Register.COUNTER, 0);
-    write(.CONFIG, config | ENABLE_CNF);
+    write(.CONFIG, config | ENABLE_BIT);
 }
 
 #program_export
 hpet_interrupt :: (data: *Interrupt_Data(false)) #c_call {
     push_context .{} {
         write_string("HPET Tick\n");
-        while true #asm { cli; hlt; }
+        write_apic_register(.EOI__END_OF_INTERRUPT, 0);
     }
 } @InterruptRoutine
 
 
 
-#program_export
-fault_0 :: (stack: *void) #c_call {
-    push_context .{} {
-        write_string("Something bad happened (0)\n");
-        bluescreen();
-    }
+#program_export fault_0 :: (stack: *void) #c_call {
+    write_string("Something bad happened (0)\n");
+    bluescreen();
 } @InterruptRoutine
 
-#program_export
-fault_1 :: (stack: *void) #c_call {
-    push_context .{} {
-        write_string("Something bad happened (1)\n");
-        bluescreen();
-    }
+#program_export fault_1 :: (stack: *void) #c_call {
+    write_string("Something bad happened (1)\n");
+    bluescreen();
 } @InterruptRoutine
 
-#program_export
-fault_2 :: (stack: *void) #c_call {
-    push_context .{} {
-        write_string("Something bad happened (2)\n");
-        bluescreen();
-    }
+#program_export fault_2 :: (stack: *void) #c_call {
+    write_string("Something bad happened (2)\n");
+    bluescreen();
 } @InterruptRoutine
 
-#program_export
-fault_3 :: (stack: *void) #c_call {
-    push_context .{} {
-        write_string("Something bad happened (3)\n");
-        bluescreen();
-    }
+#program_export fault_3 :: (stack: *void) #c_call {
+    write_string("Something bad happened (3)\n");
+    bluescreen();
 } @InterruptRoutine
 
-#program_export
-fault_4 :: (stack: *void) #c_call {
-    push_context .{} {
-        write_string("Something bad happened (4)\n");
-        bluescreen();
-    }
+#program_export fault_4 :: (stack: *void) #c_call {
+    write_string("Something bad happened (4)\n");
+    bluescreen();
 } @InterruptRoutine
 
-#program_export
-fault_5 :: (stack: *void) #c_call {
-    push_context .{} {
-        write_string("Something bad happened (5)\n");
-        bluescreen();
-    }
+#program_export fault_5 :: (stack: *void) #c_call {
+    write_string("Something bad happened (5)\n");
+    bluescreen();
 } @InterruptRoutine
 
-#program_export
-fault_6 :: (stack: *void) #c_call {
-    push_context .{} {
-        write_string("Something bad happened (6)\n");
-        bluescreen();
-    }
+#program_export fault_6 :: (stack: *void) #c_call {
+    write_string("Something bad happened (6)\n");
+    bluescreen();
 } @InterruptRoutine
 
-#program_export
-fault_7 :: (stack: *void) #c_call {
-    push_context .{} {
-        write_string("Something bad happened (7)\n");
-        bluescreen();
-    }
+#program_export fault_7 :: (stack: *void) #c_call {
+    write_string("Something bad happened (7)\n");
+    bluescreen();
 } @InterruptRoutine
 
-#program_export
-fault_8 :: (stack: *void) #c_call {
-    push_context .{} {
-        write_string("Something bad happened (8)\n");
-        bluescreen();
-    }
+#program_export fault_8 :: (stack: *void) #c_call {
+    write_string("Something bad happened (8)\n");
+    bluescreen();
 } @InterruptRoutine
 
-#program_export
-fault_9 :: (stack: *void) #c_call {
-    push_context .{} {
-        write_string("Something bad happened (9)\n");
-        bluescreen();
-    }
+#program_export fault_9 :: (stack: *void) #c_call {
+    write_string("Something bad happened (9)\n");
+    bluescreen();
 } @InterruptRoutine
 
-#program_export
-fault_10 :: (stack: *void) #c_call {
-    push_context .{} {
-        write_string("Something bad happened (10)\n");
-        bluescreen();
-    }
+#program_export fault_10 :: (stack: *void) #c_call {
+    write_string("Something bad happened (10)\n");
+    bluescreen();
 } @InterruptRoutine
 
-#program_export
-fault_11 :: (stack: *void) #c_call {
-    push_context .{} {
-        write_string("Something bad happened (11)\n");
-        bluescreen();
-    }
+#program_export fault_11 :: (stack: *void) #c_call {
+    write_string("Something bad happened (11)\n");
+    bluescreen();
 } @InterruptRoutine
 
-#program_export
-fault_12 :: (stack: *void) #c_call {
-    push_context .{} {
-        write_string("Something bad happened (12)\n");
-        bluescreen();
-    }
+#program_export fault_12 :: (stack: *void) #c_call {
+    write_string("Something bad happened (12)\n");
+    bluescreen();
 } @InterruptRoutine
 
 #program_export
@@ -564,21 +547,21 @@ general_protection_fault :: (stack: *Interrupt_Data(true)) #c_call {
     }
 } @InterruptRoutine
 
-#program_export
-fault_14 :: (stack: *void) #c_call {
-    push_context .{} {
-        write_string("Something bad happened (14)\n");
-        bluescreen();
-    }
+#program_export fault_14 :: (stack: *void) #c_call {
+    write_string("Something bad happened (14)\n");
+    bluescreen();
 } @InterruptRoutine
 
-#program_export
-fault_15 :: (stack: *void) #c_call {
-    push_context .{} {
-        write_string("Something bad happened (15)\n");
-        bluescreen();
-    }
+#program_export fault_15 :: (stack: *void) #c_call {
+    write_string("Something bad happened (15)\n");
+    bluescreen();
 } @InterruptRoutine
+
+
+
+//
+// Implement the uACPI kernel API callbacks
+//
 
 #import "Uacpi";
 
@@ -632,9 +615,20 @@ fault_15 :: (stack: *void) #c_call {
     return .OK;
 }
 
-#program_export uacpi_kernel_raw_io_write :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_kernel_raw_io_write\"\n");
-    bluescreen();
+#program_export uacpi_kernel_raw_io_write :: (address: uacpi_io_addr, byte_width: uacpi_u8, value: uacpi_u64) -> uacpi_status #c_call {
+    #asm {
+        address === d;
+        value   === a;
+    }
+
+    if byte_width == {
+        case 1; #asm { out.b address, value; }
+        case 2; #asm { out.w address, value; }
+        case 4; #asm { out.d address, value; }
+        case; bluescreen();
+    }
+
+    return .OK;
 }
 
 #program_export uacpi_kernel_pci_read :: () #c_call {
@@ -679,7 +673,8 @@ fault_15 :: (stack: *void) #c_call {
     // Not currently thread synced, and alloc_block is not efficient for small allocations.
 
     // The block allocator functions are #no_context now so that they can be used in these callbacks,
-    // but in the future it might be better to detect what thread we're on and push the corresponding context.
+    // but in general it might be better to push a context, so #no_context doesn't start propagating
+    // everywhere and make things difficult
 
     phys := alloc_block(*kernel_globals.physical_block_allocator, cast(s64) size);
     virt := cast(*void) phys + DIRECT_MAPPING_BASE;

@@ -213,13 +213,14 @@ kernel_entry :: () #no_context {
 
         apic_stuff();
         init_hpet();
+        hpet_enable_interrupts(frequency = 10);
 
-        uacpi_context_set_log_level(.DEBUG);
-
-        acpi_init_result := uacpi_initialize(0);
-        if acpi_init_result != .OK {
-            log_error("uACPI initalize failed with status \"%\"", acpi_init_result);
-        }
+        // uacpi_context_set_log_level(.DEBUG);
+        // 
+        // acpi_init_result := uacpi_initialize(0);
+        // if acpi_init_result != .OK {
+        //     log_error("uACPI initalize failed with status \"%\"", acpi_init_result);
+        // }
     }
 
     while true #asm { hlt; }
