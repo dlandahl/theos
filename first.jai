@@ -194,6 +194,7 @@ compile_kernel :: () -> success: bool {
 
         if message.kind == .TYPECHECKED {
             typed := cast(*Message_Typechecked) message;
+
             for header: typed.procedure_headers {
                 proc := header.expression;
 

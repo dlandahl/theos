@@ -105,22 +105,24 @@ kernel_entry :: () #no_context {
             if mode == .ALLOCATE || mode == .RESIZE {
                 physical: u64;
 
-                if size <= 4096 {
+                use_block_allocator := size > 4096;
+
+                if use_block_allocator {
+                    physical = alloc_block(*kernel_globals.physical_block_allocator, size);
+                } else {
                     page := get_page_frame();
                     physical = get_physical_address(page);
-                } else {
-                    physical = alloc_block(*kernel_globals.physical_block_allocator, size);
                 }
 
                 new := cast(*void) physical + DIRECT_MAPPING_BASE;
 
                 if old_size {
                     memcpy(new, old_memory, old_size);
-                    context.allocator.proc(.FREE, old_size, 0, old_memory, null);
+                    #this(.FREE, old_size, 0, old_memory, null);
                 }
 
                 page := *kernel_globals.page_frames[physical / 4096];
-                page.flags |= ifx size <= 4096 then .ALLOCATOR_TAG_SINGLE_PAGE else .ALLOCATOR_TAG_BLOCK;
+                page.flags |= ifx use_block_allocator then .ALLOCATOR_TAG_BLOCK else .ALLOCATOR_TAG_SINGLE_PAGE;
 
                 return new;
             }
@@ -212,8 +214,22 @@ kernel_entry :: () #no_context {
         }
 
         apic_stuff();
-        init_hpet();
-        hpet_enable_interrupts(frequency = 10);
+        initialize_hpet();
+
+        for 0..10 {
+            // Calibrate Local APIC timer using HPET
+            hpet_configure_timer(timer_index = 1, frequency = 10, periodic = false);
+            hpet_restart();
+
+            write_apic_register(.TIC__TIMER_INITIAL, 0xffff_ffff);
+
+            while kernel_globals.high_precision_timer.counters[1] == 0 {
+                #asm { hlt; }
+            }
+
+            apic_ticks_elapsed := 0xffff_ffff - read_apic_register(.TCC__TIMER_CURRENT);
+            print("APIC ticks in 100ms: %\n", apic_ticks_elapsed);
+        }
 
         // uacpi_context_set_log_level(.DEBUG);
         // 

@@ -138,13 +138,19 @@ APIC_Register :: enum {
     DV__TIMER_DIVIDE          :: 0x3e0;
 }
 
-read_apic_register :: (register: APIC_Register) -> u32 {
-    assert(kernel_globals.apic != null);
+read_apic_register :: (register: APIC_Register) -> u32 #no_context {
+    if kernel_globals.apic == null {
+        bluescreen();
+    }
+
     return << cast(*u32) (kernel_globals.apic + cast(u64) register);
 }
 
-write_apic_register :: (register: APIC_Register, value: u32) {
-    assert(kernel_globals.apic != null);
+write_apic_register :: (register: APIC_Register, value: u32) #no_context {
+    if kernel_globals.apic == null {
+        bluescreen();
+    }
+
     << cast(*u32) (kernel_globals.apic + cast(u64) register) = value;
 }
 
@@ -281,15 +287,7 @@ apic_stuff :: () {
 
     for other_apic_ids print("Found APIC ID: %\n", it);
 
-    // Place the 16 bit AP initialization routine into static memory and load it
-    ap_startup_bin := #run,host -> [] u8 {
-        #import "Compiler";
-        #import "File";
-
-        code := read_entire_file(".build/ap_startup.bin");
-        return add_global_data(cast([] u8) code, .WRITABLE);
-    }
-
+    // Load the 16 bit AP initialization routine from static memory
     memcpy(cast(*void) 0x8000 + DIRECT_MAPPING_BASE, ap_startup_bin.data, 4096);
 
     stack := alloc_block(*kernel_globals.physical_block_allocator, 0x20_0000) + DIRECT_MAPPING_BASE;
@@ -309,13 +307,33 @@ apic_stuff :: () {
     }
 }
 
-ap_entry_point :: () #c_call {
-    push_context .{} {
-        write_string("AP Startup\n");
-        while true #asm { cli; hlt; }
-    }
+ap_startup_bin := #run,host -> [] u8 {
+    #import "Compiler";
+    #import "File";
+
+    code := read_entire_file(".build/ap_startup.bin");
+    return add_global_data(cast([] u8) code, .WRITABLE);
 }
 
+ap_entry_point :: () #c_call {
+    write_string("AP Startup\n");
+    while true #asm { cli; hlt; }
+}
+
+
+
+ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, gate_number: int) {
+    REDIRECTION_TABLE_BASE       : u32 : 0x10;
+    REDIRECTION_TABLE_ENTRY_SIZE : u32 : 0x2;
+
+    register_index := REDIRECTION_TABLE_BASE + redirection_index * REDIRECTION_TABLE_ENTRY_SIZE;
+
+    kernel_globals.io_apic[0] = register_index;
+    kernel_globals.io_apic[4] = cast(u32) gate_number;
+
+    kernel_globals.io_apic[0] = register_index+1;
+    kernel_globals.io_apic[4] = 0;
+}
 
 
 
@@ -358,92 +376,101 @@ Hpet_Config_Flags :: enum_flags u64 {
     LEGACY_ROUTING :: 0x2;
 }
 
+Hpet_Capability_Flags :: enum_flags u64 {
+    SIXTYFOUR_BIT_COUNTER :: 0x2000;
+    LEGACY_ROUTING        :: 0x8000;
+}
+
 Hpet_Timer_Flags :: enum_flags u64 {
     INTERRUPT_TYPE           :: 0x2;  // (0=edge  1=level)
     INTERRUPT_ENABLE         :: 0x4;
     PERIODIC_ENABLE          :: 0x8;  // (0=non-periodic  1=periodic)
     PERIODIC_CAPABLE         :: 0x10;
-    _64BIT_CAPABLE           :: 0x20;
+    SIXTYFOUR_BIT_CAPABLE    :: 0x20;
     WRITE_ACCUMULATOR_ENABLE :: 0x40;
 }
 
 HPET :: struct {
-    initialized: bool;
-
     base_address: *void;
     base_period_femtoseconds: u64;
 
-    ticks_per_interrupt: u64;
-    total_ticks: Apollo_Time;
-
-    _64bit_counter: bool;
-    counter_value_at_last_interrupt: u64;
+    counters_are_64_bit: bool;
+    counters: [2] u64;
 }
 
-init_hpet :: () {
+initialize_hpet :: () {
     hpet := *kernel_globals.high_precision_timer;
 
     acpi_header := find_acpi_table("HPET");
-    assert(acpi_header != null, "HPET is not available");
+
+    if acpi_header == null {
+        log_error("HPET is not available");
+        bluescreen();
+    }
 
     acpi_table := cast(*Hpet_Acpi_Table) acpi_header;
     assert(acpi_table.address_space == .MAIN_MEMORY);
 
     virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096); // Allocating an individual page using the block allocator because we don't have anything better for virtual memory yet
-
     map_page(virtual, acpi_table.base_address, Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE);
 
     offset_in_page := acpi_table.base_address % 0x1000;
     hpet.base_address = xx (virtual + offset_in_page);
 
-    capabilities := read(Hpet_Register.CAPABILITIES);
+    capabilities := cast(Hpet_Capability_Flags) read(Hpet_Register.CAPABILITIES);
 
-    LEG_RT_CAP :: 0x8000;
-    assert(capabilities & LEG_RT_CAP > 0, "HPET does not support legacy replacement route");
+    if !(capabilities & .LEGACY_ROUTING) {
+        log_error("HPET does not support legacy replacement route");
+        bluescreen();
+    }
 
-    COUNT_SIZE_CAP :: 0x2000;
-    hpet._64bit_counter = capabilities & COUNT_SIZE_CAP > 0;
+    // Todo: might have to check this per-counter
+    hpet.counters_are_64_bit = capabilities & .SIXTYFOUR_BIT_COUNTER > 0;
+    hpet.base_period_femtoseconds = cast(u64) (capabilities >> 32);
 
-    hpet.base_period_femtoseconds = capabilities >> 32;
     assert(hpet.base_period_femtoseconds > 0 && hpet.base_period_femtoseconds < 100_000_000);
-
-    hpet_restart();
-
-    hpet.initialized = true;
-}
-
-hpet_enable_interrupts :: (frequency: u64) {
-    hpet := *kernel_globals.high_precision_timer;
 
     // Enable legacy routing until interrupt gate allocation is supported
     write(.CONFIG, read(.CONFIG) | cast(u64) Hpet_Config_Flags.LEGACY_ROUTING);
 
-    timer := cast(Hpet_Timer_Flags) read(.TIMER0);
-
-    assert(timer & .PERIODIC_CAPABLE > 0, "HPET timer 0 is not periodic capable");
-    assert(timer & ._64BIT_CAPABLE > 0, "HPET timer 0 is not 64bit");
-
-    timer |= (.PERIODIC_ENABLE | .INTERRUPT_ENABLE | .WRITE_ACCUMULATOR_ENABLE);
-    timer &= ~.INTERRUPT_TYPE;
-
-    write(.TIMER0, cast(u64) timer);
-
-    ticks_per_second := cast(u64) 1_000_000_000_000_000 / hpet.base_period_femtoseconds;
-    hpet.ticks_per_interrupt = ticks_per_second / frequency;
-
-    write(.TIMER0_COMP, hpet.ticks_per_interrupt);
-
-    register_interrupt_gate(int__hpet_interrupt, 55);
-    // Allocate INTI2 (interrupt input 2) for the HPET.
-
-    // Get INTI2 redirection entry.
-    kernel_globals.io_apic.* = 0x14;
-    (kernel_globals.io_apic + 4).* = 55;
-
-    kernel_globals.io_apic.* = 0x15;
-    (kernel_globals.io_apic + 4).* = 0;
-
     hpet_restart();
+
+    //
+    // Hardcoded interrupt routing
+    //
+
+    gate_number: u32 = 55; // Arbitrarily hardcoded for now
+    register_interrupt_gate(int__hpet_timer0_interrupt, gate_number);
+    register_interrupt_gate(int__hpet_timer1_interrupt, gate_number+1);
+
+    // Get INTI2/8 redirection entry. The numbers 2 and 8 come from the legacy replacement routing.
+    // Todo: need to detect if there is an interrupt source override in the ACPI table.
+    ioapic_add_interrupt_redirection_table_entry(2, gate_number);
+    ioapic_add_interrupt_redirection_table_entry(8, gate_number+1);
+}
+
+hpet_configure_timer :: (timer_index: int, frequency: u64, periodic: bool) {
+    hpet := *kernel_globals.high_precision_timer;
+    register_offset := cast(Hpet_Register) (0x20 * timer_index);
+
+    timer := cast(Hpet_Timer_Flags) read(register_offset + .TIMER0);
+
+    if !(timer & .PERIODIC_CAPABLE) log("HPET timer 0 is not periodic capable");
+
+    timer |=  (.INTERRUPT_ENABLE | .WRITE_ACCUMULATOR_ENABLE);
+    timer &= ~ .INTERRUPT_TYPE;
+
+    if periodic  timer |=  .PERIODIC_ENABLE;
+    else         timer &= ~.PERIODIC_ENABLE;
+
+    write(register_offset + .TIMER0, cast(u64) timer);
+
+    ticks_per_second    := cast(u64) 1_000_000_000_000_000 / hpet.base_period_femtoseconds;
+    ticks_per_interrupt := ticks_per_second / frequency;
+
+    write(register_offset + .TIMER0_COMP, ticks_per_interrupt);
+
+    hpet.counters[timer_index] = 0;
 }
 
 hpet_restart :: () {
@@ -456,12 +483,14 @@ hpet_restart :: () {
     write(.CONFIG, config | ENABLE_BIT);
 }
 
-#program_export
-hpet_interrupt :: (data: *Interrupt_Data(false)) #c_call {
-    push_context .{} {
-        write_string("HPET Tick\n");
-        write_apic_register(.EOI__END_OF_INTERRUPT, 0);
-    }
+#program_export hpet_timer0_interrupt :: (data: *Interrupt_Data(false)) #c_call {
+    kernel_globals.high_precision_timer.counters[0] += 1;
+    write_apic_register(.EOI__END_OF_INTERRUPT, 0);
+} @InterruptRoutine
+
+#program_export hpet_timer1_interrupt :: (data: *Interrupt_Data(false)) #c_call {
+    kernel_globals.high_precision_timer.counters[1] += 1;
+    write_apic_register(.EOI__END_OF_INTERRUPT, 0);
 } @InterruptRoutine
 
 
