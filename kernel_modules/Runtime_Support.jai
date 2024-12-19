@@ -141,7 +141,7 @@ serial_out :: (data: string) #no_context {
     COM1 :: 0x3f8;
 
     for cast([] u8) data {
-        for 1..1_0000 {
+        for 1..10_0000 {
             status: u8;
             port := COM1 + 5;
 

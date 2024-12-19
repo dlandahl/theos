@@ -222,6 +222,7 @@ kernel_entry :: () #no_context {
             hpet_restart();
 
             write_apic_register(.TIC__TIMER_INITIAL, 0xffff_ffff);
+            write_apic_register(.DV__TIMER_DIVIDE, 0b011);
 
             while kernel_globals.high_precision_timer.counters[1] == 0 {
                 #asm { hlt; }
@@ -534,5 +535,24 @@ free_block :: (allocator: *Block_Allocator, address: u64) -> bool #no_context {
 
 
 
-#import "Bit_Array";
-#import "Bit_Operations";
+
+Spinlock :: #type,distinct u32;
+
+acquire :: (lock: *Spinlock) #no_context {
+    carry: u8 = 1;
+
+    while carry {
+        while lock.* {
+            #asm { pause; }
+        }
+
+        #asm {
+            lock_bts.d [lock], 0;
+            setc carry;
+        }
+    }
+}
+
+release :: (lock: *Spinlock) #no_context {
+    lock.* = 0;
+}

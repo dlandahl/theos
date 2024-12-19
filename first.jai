@@ -474,6 +474,7 @@ times 512-($-start) db 0
 stack: dq 0
 jai:   dq 0
 pml4:  dd 0
+space: dd 0 ; alignment
 
 serial:
     mov ax, 66
@@ -494,7 +495,7 @@ ap_long_mode_start:
     mov gs, ax
     mov ss, ax
 
-    mov rsp, stack
+    mov rsp, [stack]
     mov rbp, rsp
 
     call [jai]

@@ -176,12 +176,10 @@ tock: bool;
 
 #program_export
 timer_interrupt :: (stack: *void) #c_call {
-    push_context .{} {
-        write_string(ifx tock then "tock\n" else "tick\n");
-        tock = !tock;
+    write_string(ifx tock then "tock\n" else "tick\n");
+    tock = !tock;
 
-        write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
-    }
+    write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 } @InterruptRoutine
 
 apic_stuff :: () {
@@ -234,6 +232,7 @@ apic_stuff :: () {
     //
 
     bootstrap_processor_local_apic_id := read_apic_register(.APIC_ID);
+    print("bootstrap_processor_local_apic_id: %\n", bootstrap_processor_local_apic_id);
     other_apic_ids: [..] u32;
 
     cursor := cast(u64) acpi_header + size_of(Acpi_MADT);
@@ -290,12 +289,25 @@ apic_stuff :: () {
     // Load the 16 bit AP initialization routine from static memory
     memcpy(cast(*void) 0x8000 + DIRECT_MAPPING_BASE, ap_startup_bin.data, 4096);
 
-    stack := alloc_block(*kernel_globals.physical_block_allocator, 0x20_0000) + DIRECT_MAPPING_BASE;
-    << cast(*u64)   (0x8200 + DIRECT_MAPPING_BASE) = stack; // Hardcoded offset from ap_startup_bin
-    << cast(**void) (0x8208 + DIRECT_MAPPING_BASE) = cast(*void) ap_entry_point;
-    << cast(*u32)   (0x8210 + DIRECT_MAPPING_BASE) = cast(u32) kernel_globals.boot_data.page_tables.pml4.data;
+    Ap_Startup_Data :: struct {
+        // Layout matches the ap_startup assembly code in first.jai
+        stack: u64;
+        entry_point: *void;
+        pml4: u32;
+        space: u32;
+    }
+
+    data := cast(*Ap_Startup_Data) (0x8200 + DIRECT_MAPPING_BASE);
+    data.entry_point = cast(*void) ap_entry_point;
+    data.pml4 = cast(u32) kernel_globals.boot_data.page_tables.pml4.data;
 
     for other_apic_ids {
+        // This lock is to ensure that APs have time to copy their stack into their stack register before the next AP is started up.
+        acquire(*ap_stack_lock);
+
+        stack := alloc_block(*kernel_globals.physical_block_allocator, 0x1_0000) + DIRECT_MAPPING_BASE;
+        data.stack = stack;
+
         write_apic_register(.DES__INTERRUPT_DEST, xx it << 24);
 
         command: u32;
@@ -312,14 +324,57 @@ ap_startup_bin := #run,host -> [] u8 {
     #import "File";
 
     code := read_entire_file(".build/ap_startup.bin");
+    assert(code.count == 4096);
     return add_global_data(cast([] u8) code, .WRITABLE);
 }
 
+ap_stack_lock: Spinlock;
+
 ap_entry_point :: () #c_call {
-    write_string("AP Startup\n");
+    using kernel_globals;
+
+    release(*ap_stack_lock);
+
+    {
+        gdt_desc: struct {
+            limit: u16;
+            base: *Global_Descriptor_Table #align 2;
+        }
+
+        gdt_desc.limit = size_of(Global_Descriptor_Table);
+        gdt_desc.base = *global_descriptor_table;
+        pointer := *gdt_desc;
+        #asm { lgdt [pointer]; }
+
+        init_segment_registers();
+    }
+
+    {
+        // Interrupt descriptor table
+        idt_desc: struct {
+            limit: u16;
+            base: *Interrupt_Gate_Desc #align 2;
+        }
+
+        idt_desc.limit = size_of(type_of(interrupt_descriptor_table));
+        idt_desc.base = interrupt_descriptor_table.data;
+
+        pointer := *idt_desc;
+        #asm { lidt [pointer]; }
+    }
+
+    apic_id := read_apic_register(.APIC_ID);
+
+    acquire(*ap_startup_message_lock);
+    write_string("AP Startup - ");
+    write_number(apic_id, base=16);
+    write_string(" -\n");
+    release(*ap_startup_message_lock);
+
     while true #asm { cli; hlt; }
 }
 
+ap_startup_message_lock: Spinlock;
 
 
 ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, gate_number: int) {
@@ -384,7 +439,7 @@ Hpet_Capability_Flags :: enum_flags u64 {
 Hpet_Timer_Flags :: enum_flags u64 {
     INTERRUPT_TYPE           :: 0x2;  // (0=edge  1=level)
     INTERRUPT_ENABLE         :: 0x4;
-    PERIODIC_ENABLE          :: 0x8;  // (0=non-periodic  1=periodic)
+    PERIODIC_ENABLE          :: 0x8;
     PERIODIC_CAPABLE         :: 0x10;
     SIXTYFOUR_BIT_CAPABLE    :: 0x20;
     WRITE_ACCUMULATOR_ENABLE :: 0x40;
@@ -428,9 +483,6 @@ initialize_hpet :: () {
     hpet.counters_are_64_bit = capabilities & .SIXTYFOUR_BIT_COUNTER > 0;
     hpet.base_period_femtoseconds = cast(u64) (capabilities >> 32);
 
-    assert(hpet.base_period_femtoseconds > 0 && hpet.base_period_femtoseconds < 100_000_000);
-
-    // Enable legacy routing until interrupt gate allocation is supported
     write(.CONFIG, read(.CONFIG) | cast(u64) Hpet_Config_Flags.LEGACY_ROUTING);
 
     hpet_restart();
@@ -455,7 +507,7 @@ hpet_configure_timer :: (timer_index: int, frequency: u64, periodic: bool) {
 
     timer := cast(Hpet_Timer_Flags) read(register_offset + .TIMER0);
 
-    if !(timer & .PERIODIC_CAPABLE) log("HPET timer 0 is not periodic capable");
+    if !(timer & .PERIODIC_CAPABLE) log("HPET timer % is not periodic capable", timer_index);
 
     timer |=  (.INTERRUPT_ENABLE | .WRITE_ACCUMULATOR_ENABLE);
     timer &= ~ .INTERRUPT_TYPE;
@@ -525,9 +577,18 @@ hpet_restart :: () {
     bluescreen();
 } @InterruptRoutine
 
-#program_export fault_6 :: (stack: *void) #c_call {
-    write_string("Something bad happened (6)\n");
-    bluescreen();
+#program_export fault_6 :: (stack: *Interrupt_Data(false)) #c_call {
+    c: Context;
+    c.print_style.default_format_int.base = 16;
+
+    push_context c {
+        print("Invalid Opcode.\n");
+        print("RIP: 0x%\n", stack.ip);
+        print("RSP: 0x%\n", stack.sp);
+        print("SS: 0x%\n", stack.ss);
+        print("CS: 0x%\n", stack.cs);
+        bluescreen();
+    }
 } @InterruptRoutine
 
 #program_export fault_7 :: (stack: *void) #c_call {
@@ -562,13 +623,17 @@ hpet_restart :: () {
 
 #program_export
 general_protection_fault :: (stack: *Interrupt_Data(true)) #c_call {
-    push_context .{} {
+    c: Context;
+    c.print_style.default_format_int.base = 16;
+
+    push_context c {
         print("General Protection Fault.\n");
-        print("RIP: 0x%\n", formatInt(stack.ip, base=16));
-        print("RSP: 0x%\n", formatInt(stack.sp, base=16));
-        print("SS: 0x%\n", formatInt(stack.ss, base=16));
-        print("CS: 0x%\n", formatInt(stack.cs, base=16));
-        print("Error Code: 0x%\n", formatInt(stack.error_code, base=16));
+        print("RIP: 0x%\n", stack.ip);
+        print("RSP: 0x%\n", stack.sp);
+        print("SS: 0x%\n", stack.ss);
+        print("CS: 0x%\n", stack.cs);
+        print("Error Code: 0x%\n", stack.error_code);
+
         print("Stack trace of the main thread:\n");
         print_stack_trace(kernel_globals.main_thread_context.stack_trace);
 
