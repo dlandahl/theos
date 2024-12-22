@@ -5,6 +5,7 @@
 #load "acpi.jai";
 #load "x64.jai";
 #load "journal.jai";
+#load "pci_express.jai";
 
 Kernel_Globals :: struct {
     using boot_data: *Boot_Data;
@@ -243,6 +244,8 @@ kernel_entry :: () #no_context {
         // if acpi_init_result != .OK {
         //     log_error("uACPI initalize failed with status \"%\"", acpi_init_result);
         // }
+
+        find_all_pci_devices();
     }
 
     while true #asm { hlt; }

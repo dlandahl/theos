@@ -1,0 +1,10 @@
+
+*.vdi
+*.img
+.build/
+
+*.nvram
+*.vbox-prev
+virtualbox_vm/new_os/Logs/
+
+logs/

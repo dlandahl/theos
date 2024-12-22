@@ -68,14 +68,10 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
             if low == acpi_table_guid_low && high == acpi_table_guid_high {
                 magic: string = .{ 8, table.VendorTable };
-                display("Found ACPI table (", magic, ")\n\r");
-
                 boot_data.acpi_rsdp = table.VendorTable;
                 break;
             }
         }
-
-        display("Boot data size: ", size_of(Boot_Data), "\n\r");
 
 
 

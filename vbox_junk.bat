@@ -1,5 +1,6 @@
 
 rm disk_image.vdi
+VBoxManage modifyvm new_os --hpet on
 VBoxManage convertfromraw --format VDI disk_image.img disk_image.vdi
 VBoxManage storageattach new_os --storagectl AHCI --port 0 --medium none --device 0
 VBoxManage closemedium disk_image.vdi

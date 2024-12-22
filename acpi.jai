@@ -22,6 +22,8 @@ Acpi_Table_Header :: struct {
     oem_revision: u32;
     creator_id: u32;
     creator_revision: u32;
+
+    // Note that this is only aligned to 4 bytes, so if you put this in a struct followed by a u64, it will be wrong.
 } #no_padding
 
 Acpi_FADT__Fixed_Description_Table :: struct {
@@ -136,6 +138,7 @@ APIC_Register :: enum {
     TIC__TIMER_INITIAL        :: 0x380;
     TCC__TIMER_CURRENT        :: 0x390;
     DV__TIMER_DIVIDE          :: 0x3e0;
+    EXTENDED_FEATURE          :: 0x400;
 }
 
 read_apic_register :: (register: APIC_Register) -> u32 #no_context {
@@ -282,6 +285,11 @@ apic_stuff :: () {
     lvtt.vector = cast(u8) lapic_timer_gate;
     lvtt.flags &= ~.M__mask;
     write_apic_register(.LVT__TIMER, << cast(*u32) lvtt);
+
+    efr := read_apic_register(.EXTENDED_FEATURE);
+    if efr & 1 {
+        print("\n\nInterrupt enable registers supported\n\n");
+    }
 
     #asm {
         sti;
