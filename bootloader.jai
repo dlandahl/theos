@@ -63,8 +63,8 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             low :=  <<  cast(*u64) *table.VendorGuid;
             high := << (cast(*u64) *table.VendorGuid + 1);
 
-            acpi_table_guid_low:  u64 = 0x11d3e4f18868e871;
-            acpi_table_guid_high: u64 = 0x81883cc7800022bc;
+            acpi_table_guid_low  : u64 : 0x11d3e4f18868e871;
+            acpi_table_guid_high : u64 : 0x81883cc7800022bc;
 
             if low == acpi_table_guid_low && high == acpi_table_guid_high {
                 magic: string = .{ 8, table.VendorTable };
@@ -115,6 +115,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
 
         // Firmware physical memory map
+
         limit :: (region: Boot_Data.Memory_Region) -> u64 {
             return region.address + region.pages * 4096;
         }

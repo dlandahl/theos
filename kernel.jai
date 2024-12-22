@@ -19,6 +19,8 @@ Kernel_Globals :: struct {
     interrupt_descriptor_table: [256] Interrupt_Gate_Desc #align 16; // Hardware requires 16 byte alignment on IDT
     global_descriptor_table: Global_Descriptor_Table #align 64; // Align to cache block so no extra memory accesses are required on context switch
 
+    next_free_interrupt_gate: int;
+
     apic: *void;
     io_apic: *u32;
 
@@ -42,13 +44,13 @@ kernel_entry :: () #no_context {
     boot_data = cast(*Boot_Data) Boot_Data.BASE_ADDRESS;
 
     main_thread_context.assertion_failed = (location: Source_Code_Location, message: string) -> bool {
+        write_string("Assertion failure");
         if message.count {
-            write_string("Assertion failure: ");
-            write_string(message);
-            write_string("\n");
+            write_strings(": ", message);
         }
+        write_string("\n");
 
-        bluescreen();
+        bluescreen(location);
         return true;
     };
 
@@ -108,6 +110,7 @@ kernel_entry :: () #no_context {
                 use_block_allocator := size > 4096;
 
                 if use_block_allocator {
+                    // Todo: attempt to grow existing block in case of resize
                     physical = alloc_block(*kernel_globals.physical_block_allocator, size);
                 } else {
                     page := get_page_frame();
@@ -200,6 +203,8 @@ kernel_entry :: () #no_context {
 
             pointer := *idt_desc;
             #asm { lidt [pointer]; }
+
+            next_free_interrupt_gate = 32; // Sequentially allocating interrupt gates, starting after the ISA exceptions
         }
 
         rsdp := cast(*Acpi_RSDP__Root_System_Description_Pointer) boot_data.acpi_rsdp;
@@ -531,10 +536,6 @@ free_block :: (allocator: *Block_Allocator, address: u64) -> bool #no_context {
 // serial_out :: (data: string)
 
 
-#program_export __libc_start_main :: () {}
-
-
-
 
 Spinlock :: #type,distinct u32;
 
@@ -555,4 +556,12 @@ acquire :: (lock: *Spinlock) #no_context {
 
 release :: (lock: *Spinlock) #no_context {
     lock.* = 0;
+}
+
+
+
+allocate_interrupt_gate :: () -> int {
+    result := kernel_globals.next_free_interrupt_gate;
+    kernel_globals.next_free_interrupt_gate += 1;
+    return result;
 }

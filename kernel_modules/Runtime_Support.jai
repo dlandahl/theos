@@ -96,15 +96,132 @@ to_string :: (c_string: *u8) -> string #no_context {
 
 // @Incomplete: Pass loc to Runtime_Support versions.
 __array_bounds_check_fail :: (index: s64, limit: s64, line_number: s64, filename: *u8) #no_context {
+    // @Volatile: It is a good idea for these to match the error reports in constant-expression evaluation inside the compiler.
+    write_string("Array bounds check failed. (The attempted index is ", to_standard_error = true);
+    write_number(index, to_standard_error = true);
+
+    if limit > 0 {
+        write_string(", but the highest valid index is ", to_standard_error = true);
+        write_number(limit-1, to_standard_error = true);
+    } else if limit == 0 {
+        write_string(", but the array has dimension 0, so no index is valid", to_standard_error = true);
+    } else {
+        write_string(", but the array has invalid negative dimension ", to_standard_error = true);
+        write_number(limit, to_standard_error = true);
+    }
+
+    write_string("). Site is ", to_standard_error = true);
+    write_string(to_string(filename), to_standard_error = true);
+    write_string(":", to_standard_error = true);
+    write_number(line_number, to_standard_error = true);
+    write_string(".\n", to_standard_error = true);
+
+    my_panic();
 }
 
 __cast_bounds_check_fail :: (pre_value: s64, pre_flags: u32, post_value: s64, post_flags: u32, fatal: u8, line_number: s64, filename: *u8) #no_context {
+    bits : s32 = 0;
+
+    NUMBER_FLAG_SIGNED   :: 0x40;
+    NUMBER_FLAG_8BIT     :: 0x100;
+    NUMBER_FLAG_16BIT    :: 0x200;
+    NUMBER_FLAG_32BIT    :: 0x400;
+    NUMBER_FLAG_64BIT    :: 0x800;
+
+    if post_flags & NUMBER_FLAG_64BIT bits = 64;
+    if post_flags & NUMBER_FLAG_32BIT bits = 32;
+    if post_flags & NUMBER_FLAG_16BIT bits = 16;
+    if post_flags & NUMBER_FLAG_8BIT  bits = 8;
+
+    write_string("Cast bounds check failed.  Number must be in [", to_standard_error = true);
+
+    if post_flags & NUMBER_FLAG_SIGNED {
+        high_value := (1 << (bits - 1)) - 1;
+        low_value  := ~high_value;
+        write_number(low_value, to_standard_error = true);
+        write_string(", ", to_standard_error = true);
+        write_number(high_value, to_standard_error = true);
+    } else {
+        // We don't yet have our stringent definition of left-shift, so, we are generating results
+        // that will vary on different machines unless we check. So let's check.
+        high_value: u64;
+        if bits == 64 {
+            high_value = 0xffff_ffff_ffff_ffff;
+        } else {
+            high_value = ((cast(u64)1) << bits) - 1;
+        }
+
+        write_string("0, ", to_standard_error = true);
+        write_nonnegative_number(high_value, to_standard_error = true);
+    }
+
+    write_string("]; it was ", to_standard_error = true);
+
+    if pre_flags & NUMBER_FLAG_SIGNED {
+        write_number(pre_value, to_standard_error = true);
+    } else {
+        write_nonnegative_number(cast,no_check(u64) pre_value, to_standard_error = true);
+    }
+
+    write_string(".  Site is ", to_standard_error = true);
+
+    write_string(to_string(filename), to_standard_error = true);
+    write_string(":", to_standard_error = true);
+    write_number(line_number, to_standard_error = true);
+    write_string(".\n", to_standard_error = true);
+
+    if fatal my_panic();
 }
 
 __null_pointer_check_fail :: (index: s64, line_number: s64, filename: *u8) #no_context {
+    // @Volatile: It is a good idea for these to match the error reports in constant-expression evaluation inside the compiler.
+    if index {
+        // This is a procedure argument.
+        write_string("Null pointer check failed: Argument ", to_standard_error = true);
+        write_number(index, to_standard_error = true);
+        write_string(" is undergoing an automatic dereference, but the pointer is null. Site is ", to_standard_error = true);
+    } else {
+        // It was a dereference that happened in some other way.
+        write_string("Null pointer check failed: A pointer is undergoing an automatic dereference, but the pointer is null. Site is ", to_standard_error = true);
+    }
+
+    write_string(to_string(filename), to_standard_error = true);
+    write_string(":", to_standard_error = true);
+    write_number(line_number, to_standard_error = true);
+    write_string(".\n", to_standard_error = true);
+
+    my_panic();
 }
 
 __arithmetic_overflow :: (left: s64, right: s64, type_code: u16, line_number: s64, filename: *u8) #no_context #no_aoc {
+    // We have some free bits in type_code...!
+    fatal  := (type_code & 0x8000);
+    signed := (type_code & 0x4000);
+    operator_index := (type_code >> 7) & 0x3;
+    size := (cast(u64)(type_code & 0x000f))*8;
+
+    signed_string := ifx signed then "s" else "u";
+    operator_string := " / ";
+    
+    if      operator_index == 1 then operator_string = " + ";
+    else if operator_index == 2 then operator_string = " - ";
+    else if operator_index == 3 then operator_string = " * ";
+    
+    write_string("Arithmetic overflow. We tried to compute:\n    ", to_standard_error = true);
+
+    if signed  write_number(left, to_standard_error = true);
+    else       write_nonnegative_number(cast,no_check(u64)left, to_standard_error = true);
+
+    write_string(operator_string, to_standard_error = true);
+    
+    if signed  write_number(right, to_standard_error = true);
+    else       write_nonnegative_number(cast,no_check(u64)right, to_standard_error = true);
+    
+    write_strings("\nThe operand type is ", signed_string, to_standard_error = true);
+    write_nonnegative_number(size, to_standard_error = true);
+    write_string(", but the result does not fit into this type.\n", to_standard_error = true);
+    
+    if fatal my_panic();
 }
 
 write_string_unsynchronized :: (s: string, to_standard_error := false) #no_context {

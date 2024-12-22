@@ -17,6 +17,7 @@
             -m 256M 
             -smp 8 
     QEMU_CMD);
+
     run_command(.. command);
 }
 

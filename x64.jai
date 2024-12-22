@@ -12,18 +12,7 @@ X64_Flags :: enum_flags u64 {
     RF__resume    :: 0x10000;
 }
 
-Interrupt_Stack_Frame :: struct (with_error_code: bool) {
-#if with_error_code {
-    error_code: u64;
-}
-    ip:    u64;
-    cs:    u64;
-    flags: X64_Flags;
-    sp:    u64;
-    ss:    u64;
-}
-
-Interrupt_Data :: struct (with_error_code := false) {
+Interrupt_Stack :: struct (with_error_code := false) {
     r15:  u64;
     r14:  u64;
     r13:  u64;
@@ -39,7 +28,16 @@ Interrupt_Data :: struct (with_error_code := false) {
     rcx:  u64;
     rbx:  u64;
     rax:  u64;
-    using interrupt_frame: Interrupt_Stack_Frame(with_error_code);
+
+#if with_error_code {
+    error_code: u64;
+}
+
+    ip:    u64;
+    cs:    u64;
+    flags: X64_Flags;
+    sp:    u64;
+    ss:    u64;
 }
 
 Interrupt_Gate_Desc :: struct {
@@ -52,8 +50,8 @@ Interrupt_Gate_Desc :: struct {
     reserved: u32;
 }
 
-register_interrupt_gate :: (handler: () #c_call, vector_number: int) {
-    desc := *kernel_globals.interrupt_descriptor_table[vector_number];
+register_interrupt_gate :: (handler: () #c_call, index: int) {
+    desc := *kernel_globals.interrupt_descriptor_table[index];
     address := cast(u64) cast(*void) handler;
 
     desc.offset_1 = xx  address        & 0xffff;

@@ -255,6 +255,7 @@ compile_kernel :: () -> success: bool {
 
 format_disk :: () -> success: bool {
     log("Formatting disk image\n\n");
+
     script :: string.[
         "dd if=/dev/zero of=fat.img bs=1k count=1440",
         "mformat -i fat.img -f 1440 ::",
@@ -474,7 +475,7 @@ times 512-($-start) db 0
 stack: dq 0
 jai:   dq 0
 pml4:  dd 0
-space: dd 0 ; alignment
+dd 0 ; alignment
 
 serial:
     mov ax, 66

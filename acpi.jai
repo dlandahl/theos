@@ -90,8 +90,8 @@ Acpi_MADT :: struct {
         apic_id: u8;
 
         flags: enum_flags u32 {
-            enabled;
-            online_capable;
+            ENABLED           :: 0x1;
+            ONLINE_CAPABLE    :: 0x2;
         };
     }
 
@@ -232,21 +232,26 @@ apic_stuff :: () {
     //
 
     bootstrap_processor_local_apic_id := read_apic_register(.APIC_ID);
-    print("bootstrap_processor_local_apic_id: %\n", bootstrap_processor_local_apic_id);
     other_apic_ids: [..] u32;
 
     cursor := cast(u64) acpi_header + size_of(Acpi_MADT);
 
     while cursor < cast(u64) acpi_header + acpi_header.length {
         ics := cast(*Acpi_MADT.Interrupt_Controller_Structure) cursor;
+        defer cursor += ics.length;
 
         if ics.type == {
           case .LOCAL_APIC;
-            lapic := cast(*Acpi_MADT.Ics_Local_Apic) ics;
+            lapic_ics := cast(*Acpi_MADT.Ics_Local_Apic) ics;
 
-            if lapic.apic_id != bootstrap_processor_local_apic_id {
-                array_add(*other_apic_ids, lapic.apic_id);
+            if lapic_ics.apic_id == bootstrap_processor_local_apic_id {
+                continue;
             }
+
+            // Apparently we should be able to use the ONLINE_CAPABLE bit in the ics flags to determine if
+            // this processor core is usable, but for some reason it's always 0 in Qemu and Vbox.
+
+            array_add(*other_apic_ids, lapic_ics.apic_id);
 
           case .IO_APIC;
             assert(kernel_globals.io_apic == null);
@@ -254,7 +259,6 @@ apic_stuff :: () {
             ioapic_ics := cast(*Acpi_MADT.Ics_Io_Apic) ics;
 
             {
-                // Comment above applies
                 virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096);
                 map_page(virtual, ioapic_ics.address, Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE);
 
@@ -265,20 +269,19 @@ apic_stuff :: () {
 
           case .INTERRUPT_SOURCE_OVERRIDE;
             iso := cast(*Acpi_MADT.Ics_Source_Override) ics;
-            print("Interrupt source override: %\n", << iso);
+            // Todo
         }
-
-        cursor += ics.length;
     }
 
-    register_interrupt_gate(int__timer_interrupt, 49);
+    lapic_timer_gate := allocate_interrupt_gate();
+    register_interrupt_gate(int__timer_interrupt, lapic_timer_gate);
 
     write_apic_register(.TIC__TIMER_INITIAL, 0x0800_0000);
 
-    lvtt := << cast(*Acpi_Lvt) *read_apic_register(.LVT__TIMER);
-    lvtt.vector = 49;
+    lvtt := cast(*Acpi_Lvt) *read_apic_register(.LVT__TIMER);
+    lvtt.vector = cast(u8) lapic_timer_gate;
     lvtt.flags &= ~.M__mask;
-    write_apic_register(.LVT__TIMER, << cast(*u32) *lvtt);
+    write_apic_register(.LVT__TIMER, << cast(*u32) lvtt);
 
     #asm {
         sti;
@@ -293,20 +296,20 @@ apic_stuff :: () {
         // Layout matches the ap_startup assembly code in first.jai
         stack: u64;
         entry_point: *void;
-        pml4: u32;
-        space: u32;
+        pml4: u32 #align 8;
     }
 
-    data := cast(*Ap_Startup_Data) (0x8200 + DIRECT_MAPPING_BASE);
-    data.entry_point = cast(*void) ap_entry_point;
-    data.pml4 = cast(u32) kernel_globals.boot_data.page_tables.pml4.data;
+    ap_startup_data := cast(*Ap_Startup_Data) (0x8200 + DIRECT_MAPPING_BASE);
+    ap_startup_data.entry_point = cast(*void) ap_entry_point;
+    ap_startup_data.pml4 = cast(u32) kernel_globals.boot_data.page_tables.pml4.data;
 
     for other_apic_ids {
-        // This lock is to ensure that APs have time to copy their stack into their stack register before the next AP is started up.
+        // This lock is to ensure that APs have time to copy their stack's base address into their stack register before the next AP is started up.
+        // Maybe if processors could use their APIC ID to find their stack memory it would be faster
         acquire(*ap_stack_lock);
 
         stack := alloc_block(*kernel_globals.physical_block_allocator, 0x1_0000) + DIRECT_MAPPING_BASE;
-        data.stack = stack;
+        ap_startup_data.stack = stack;
 
         write_apic_register(.DES__INTERRUPT_DEST, xx it << 24);
 
@@ -319,12 +322,11 @@ apic_stuff :: () {
     }
 }
 
-ap_startup_bin := #run,host -> [] u8 {
+ap_startup_bin :: #run,host -> [] u8 {
     #import "Compiler";
     #import "File";
 
     code := read_entire_file(".build/ap_startup.bin");
-    assert(code.count == 4096);
     return add_global_data(cast([] u8) code, .WRITABLE);
 }
 
@@ -350,7 +352,6 @@ ap_entry_point :: () #c_call {
     }
 
     {
-        // Interrupt descriptor table
         idt_desc: struct {
             limit: u16;
             base: *Interrupt_Gate_Desc #align 2;
@@ -491,12 +492,12 @@ initialize_hpet :: () {
     // Hardcoded interrupt routing
     //
 
-    gate_number: u32 = 55; // Arbitrarily hardcoded for now
+    gate_number := cast(u32) allocate_interrupt_gate();
     register_interrupt_gate(int__hpet_timer0_interrupt, gate_number);
     register_interrupt_gate(int__hpet_timer1_interrupt, gate_number+1);
 
     // Get INTI2/8 redirection entry. The numbers 2 and 8 come from the legacy replacement routing.
-    // Todo: need to detect if there is an interrupt source override in the ACPI table.
+    // Todo: need to detect if there is an interrupt source override in the MADT.
     ioapic_add_interrupt_redirection_table_entry(2, gate_number);
     ioapic_add_interrupt_redirection_table_entry(8, gate_number+1);
 }
@@ -535,12 +536,12 @@ hpet_restart :: () {
     write(.CONFIG, config | ENABLE_BIT);
 }
 
-#program_export hpet_timer0_interrupt :: (data: *Interrupt_Data(false)) #c_call {
+#program_export hpet_timer0_interrupt :: (data: *Interrupt_Stack()) #c_call {
     kernel_globals.high_precision_timer.counters[0] += 1;
     write_apic_register(.EOI__END_OF_INTERRUPT, 0);
 } @InterruptRoutine
 
-#program_export hpet_timer1_interrupt :: (data: *Interrupt_Data(false)) #c_call {
+#program_export hpet_timer1_interrupt :: (data: *Interrupt_Stack()) #c_call {
     kernel_globals.high_precision_timer.counters[1] += 1;
     write_apic_register(.EOI__END_OF_INTERRUPT, 0);
 } @InterruptRoutine
@@ -577,7 +578,7 @@ hpet_restart :: () {
     bluescreen();
 } @InterruptRoutine
 
-#program_export fault_6 :: (stack: *Interrupt_Data(false)) #c_call {
+#program_export fault_6 :: (stack: *Interrupt_Stack(false)) #c_call {
     c: Context;
     c.print_style.default_format_int.base = 16;
 
@@ -622,7 +623,7 @@ hpet_restart :: () {
 } @InterruptRoutine
 
 #program_export
-general_protection_fault :: (stack: *Interrupt_Data(true)) #c_call {
+general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c_call {
     c: Context;
     c.print_style.default_format_int.base = 16;
 
