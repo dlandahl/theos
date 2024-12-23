@@ -2,7 +2,7 @@
 #import "Lil_Uefi";
 #import "Elf";
 
-#load "boot_data.jai";
+#load "../boot_data.jai";
 
 #add_context system_table: *EFI_SYSTEM_TABLE;
 
@@ -160,6 +160,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             // Reserve physical memory for page frame descriptors. We'll remap this to a kernel address below
             count := highest_address / 4096;
             EFI_CHECK(boot_services.AllocatePool(UserReservedMemoryType, size_of(Page_Frame_Desc) * count, cast(**void) *boot_data.page_frames.data));
+            memset(boot_data.page_frames.data, 0, size_of(Page_Frame_Desc) * cast(s64) count);
             boot_data.page_frames.count = cast(s64) count;
         }
 

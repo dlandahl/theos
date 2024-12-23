@@ -386,6 +386,7 @@ ap_entry_point :: () #c_call {
 ap_startup_message_lock: Spinlock;
 
 
+
 ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, gate_number: int) {
     REDIRECTION_TABLE_BASE       : u32 : 0x10;
     REDIRECTION_TABLE_ENTRY_SIZE : u32 : 0x2;
@@ -774,34 +775,38 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
 
 #program_export uacpi_kernel_alloc :: (size: uacpi_size) -> *void #c_call {
     // Not currently thread synced, and alloc_block is not efficient for small allocations.
+    c: Context;
+    push_context c {
+        phys := alloc_block(*kernel_globals.physical_block_allocator, cast(s64) size);
+        virt := cast(*void) phys + DIRECT_MAPPING_BASE;
 
-    // The block allocator functions are #no_context now so that they can be used in these callbacks,
-    // but in general it might be better to push a context, so #no_context doesn't start propagating
-    // everywhere and make things difficult
-
-    phys := alloc_block(*kernel_globals.physical_block_allocator, cast(s64) size);
-    virt := cast(*void) phys + DIRECT_MAPPING_BASE;
-
-    return virt;
+        return virt;
+    }
 }
 
 #program_export uacpi_kernel_calloc :: (count: uacpi_size, size: uacpi_size) -> *void #c_call {
     // Comment in uacpi_kernel_alloc applies
     size_bytes := cast(s64) (size*count);
 
-    phys := alloc_block(*kernel_globals.physical_block_allocator, size_bytes);
-    virt := cast(*void) phys + DIRECT_MAPPING_BASE;
+    c: Context;
+    push_context c {
+        phys := alloc_block(*kernel_globals.physical_block_allocator, size_bytes);
+        virt := cast(*void) phys + DIRECT_MAPPING_BASE;
 
-    memset(virt, 0, size_bytes);
-    return virt;
+        memset(virt, 0, size_bytes);
+        return virt;
+    }
 }
 
 #program_export uacpi_kernel_free :: (mem: *void) #c_call {
     // Comment in uacpi_kernel_alloc applies
     if mem == null return;
 
-    phys := cast(u64) mem - DIRECT_MAPPING_BASE;
-    free_block(*kernel_globals.physical_block_allocator, phys);
+    c: Context;
+    push_context c {
+        phys := cast(u64) mem - DIRECT_MAPPING_BASE;
+        free_block(*kernel_globals.physical_block_allocator, phys);
+    }
 }
 
 #program_export uacpi_kernel_log :: (log_level: uacpi_log_level, c_string: *uacpi_char) #c_call {

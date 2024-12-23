@@ -1,7 +1,8 @@
 
 #import "Basic";
 
-#load "boot_data.jai";
+#load "../boot_data.jai";
+
 #load "acpi.jai";
 #load "x64.jai";
 #load "journal.jai";
@@ -35,7 +36,7 @@ Kernel_Globals :: struct {
 
 kernel_globals: Kernel_Globals;
 
-Interrupts :: #library,no_dll ".build/interrupts";
+Interrupts :: #library,no_dll "../.build/interrupts";
 init_segment_registers :: () #foreign Interrupts;
 
 #program_export
@@ -132,6 +133,10 @@ kernel_entry :: () #no_context {
             }
 
             if mode == .FREE {
+                if old_memory == null {
+                    return null;
+                }
+
                 phys := cast(u64) old_memory - DIRECT_MAPPING_BASE;
                 index := phys / 4096;
 
@@ -222,7 +227,7 @@ kernel_entry :: () #no_context {
         apic_stuff();
         initialize_hpet();
 
-        for 0..10 {
+        for 1..10 {
             // Calibrate Local APIC timer using HPET
             hpet_configure_timer(timer_index = 1, frequency = 10, periodic = false);
             hpet_restart();
@@ -246,6 +251,10 @@ kernel_entry :: () #no_context {
         // }
 
         find_all_pci_devices();
+
+        for pci_devices {
+            print("Device at 0x%, %\n", cast(*void) it.configuration_space, it.configuration_space.class_code);
+        }
     }
 
     while true #asm { hlt; }
@@ -447,7 +456,7 @@ init_block_allocator :: (allocator: *Block_Allocator, start_page: int, total_pag
     };
 }
 
-alloc_block :: (using allocator: *Block_Allocator, size_bytes: int) -> address: u64, Block_Desc #no_context {
+alloc_block :: (using allocator: *Block_Allocator, size_bytes: int) -> address: u64, Block_Desc {
 
     pages_needed := size_bytes / 4096;
     if size_bytes % 4096 pages_needed += 1;
@@ -484,7 +493,7 @@ alloc_block :: (using allocator: *Block_Allocator, size_bytes: int) -> address: 
     return 0, .{};
 }
 
-free_block :: (allocator: *Block_Allocator, address: u64) -> bool #no_context {
+free_block :: (allocator: *Block_Allocator, address: u64) -> bool {
     // Find the block corresponding to that address using linear search
     // Todo hash table
 
@@ -494,7 +503,7 @@ free_block :: (allocator: *Block_Allocator, address: u64) -> bool #no_context {
     defer allocator.blocks = blocks;
 
     m := -1;
-    
+
     for blocks {
         if it.start_page == start_page {
             m = it_index;
@@ -503,6 +512,7 @@ free_block :: (allocator: *Block_Allocator, address: u64) -> bool #no_context {
     }
 
     if m == -1 {
+        print_stack_trace(context.stack_trace);
         bluescreen();
         return false;
     }

@@ -63,7 +63,6 @@ Page_Frame_Desc :: struct {
     Flags :: enum_flags u8 {
         ALLOCATOR_TAG_SINGLE_PAGE;
         ALLOCATOR_TAG_BLOCK;
-        ALLOCATOR_TAG_BUDDY;
     };
 }
 

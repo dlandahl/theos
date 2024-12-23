@@ -10,7 +10,7 @@
 #if OS == .WINDOWS {
     #import "Windows_Utf8";
     #import "Windows";
-    #import,dir "modules/Wsl";
+    #import,file "modules/Windows_Subsystem_For_Linux.jai";
     #import,dir "modules/VirtualBox";
 }
 
@@ -95,7 +95,7 @@ compile_bootloader :: () -> success: bool {
         options.dead_code_elimination = .ALL;
 
         new_path: [..] string;
-        array_add(*new_path, "bootloader_modules/");
+        array_add(*new_path, "bootloader/modules/");
         array_add(*new_path, ..options.import_path);
         options.import_path = new_path;
 
@@ -103,7 +103,7 @@ compile_bootloader :: () -> success: bool {
     }
 
     compiler_begin_intercept(workspace);
-    add_build_file("bootloader.jai", workspace);
+    add_build_file("bootloader/bootloader.jai", workspace);
 
     success: bool;
 
@@ -172,7 +172,7 @@ compile_kernel :: () -> success: bool {
         options.os_target = .LINUX;
 
         new_path: [..] string;
-        array_add(*new_path, "kernel_modules/");
+        array_add(*new_path, "kernel/modules/");
         array_add(*new_path, ..options.import_path);
         options.import_path = new_path;
 
@@ -181,7 +181,7 @@ compile_kernel :: () -> success: bool {
 
     compiler_begin_intercept(workspace);
 
-    add_build_file("kernel.jai", workspace);
+    add_build_file("kernel/kernel.jai", workspace);
 
     interrupt_assembly: String_Builder;
     append(*interrupt_assembly, ASSEMBLY_HEADER);
