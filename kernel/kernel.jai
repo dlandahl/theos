@@ -7,6 +7,7 @@
 #load "x64.jai";
 #load "journal.jai";
 #load "pci_express.jai";
+#load "multitasking.jai";
 
 Kernel_Globals :: struct {
     using boot_data: *Boot_Data;
@@ -255,6 +256,8 @@ kernel_entry :: () #no_context {
         for pci_devices {
             print("Device at 0x%, %\n", cast(*void) it.configuration_space, it.configuration_space.class_code);
         }
+
+        start_multitasking();
     }
 
     while true #asm { hlt; }
@@ -574,7 +577,15 @@ release :: (lock: *Spinlock) #no_context {
 
 
 allocate_interrupt_gate :: () -> int {
-    result := kernel_globals.next_free_interrupt_gate;
-    kernel_globals.next_free_interrupt_gate += 1;
+    using kernel_globals;
+
+    if next_free_interrupt_gate == TASK_SWITCH_GATE {
+        // Some gates need to be reserved as constants so they can be used in instruction immediates.
+        // In the future we might need to support allocating specific gates anyway.
+        next_free_interrupt_gate += 1;
+    }
+
+    result := next_free_interrupt_gate;
+    next_free_interrupt_gate += 1;
     return result;
 }

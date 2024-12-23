@@ -33,16 +33,16 @@ Interrupt_Stack :: struct (with_error_code := false) {
     error_code: u64;
 }
 
-    ip:    u64;
-    cs:    u64;
+    ip:    *void;
+    cs:    Gdt_Segment_Offset;
     flags: X64_Flags;
-    sp:    u64;
-    ss:    u64;
+    sp:    *void;
+    ss:    Gdt_Segment_Offset;
 }
 
 Interrupt_Gate_Desc :: struct {
     offset_1: u16;
-    selector: u16;
+    segment:  Gdt_Segment_Offset;
     ist:      u8;
     flags:    u8;
     offset_2: u16;
@@ -50,16 +50,16 @@ Interrupt_Gate_Desc :: struct {
     reserved: u32;
 }
 
-register_interrupt_gate :: (handler: () #c_call, index: int) {
+register_interrupt_gate :: (handler: () #c_call, index: int, trap := false) {
     desc := *kernel_globals.interrupt_descriptor_table[index];
     address := cast(u64) cast(*void) handler;
 
     desc.offset_1 = xx  address        & 0xffff;
     desc.offset_2 = xx (address >> 16) & 0xffff;
     desc.offset_3 = xx (address >> 32) & 0xffffffff;
-    desc.selector = 0x8;
+    desc.segment  = .RING0_CODE;
     desc.ist      = 0x0;
-    desc.flags    = 0x8e;
+    desc.flags    = cast(u8) ifx trap 0x8f else 0x8e;
     desc.reserved = 0x0;
 }
 
@@ -70,6 +70,13 @@ Global_Descriptor_Table :: struct {
     ring3_code: Gdt_Entry_Flags;
     ring3_data: Gdt_Entry_Flags;
     terminator: u64;
+}
+
+Gdt_Segment_Offset :: enum u16 {
+    RING0_CODE :: 0x08;
+    RING0_DATA :: 0x10;
+    RING3_CODE :: 0x18;
+    RING3_DATA :: 0x20;
 }
 
 Gdt_Entry_Flags :: enum u64 {

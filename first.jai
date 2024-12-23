@@ -343,19 +343,29 @@ task_switch:
     push_all
 
     mov rcx, [rax]
-    mov r8, [rcx + 16]
-    fxsave64 [r8] ; Store FPU and SIMD state in the old task's xsave_area
-    mov [rcx], rsp ; Store current stack on current (old) task
 
-    mov [rax], rbx ; Set the current task to the new task
-    mov r8, [rbx + 16]
-    fxrstor64 [r8] ; Load FPU and SIMD state from the new task's xsave_area
+    ; Store FPU and SIMD state in the old task's xsave_area
+    ; mov r8, [rcx + 16]
+    ; fxsave64 [r8]
 
-    mov rsp, [rbx] ; Restore the stack pointer from the current (new) task
-    mov rdx, [rbx + 8]
-    mov cr3, rdx ; Restore the page table from the current (new) task
+    ; Store current stack on current (old) task
+    mov [rcx], rsp
+
+    ; Set the current task to the new task
+    mov [rax], rbx
+
+    ; Load FPU and SIMD state from the new task's xsave_area
+    ; mov r8, [rbx + 16]
+    ; fxrstor64 [r8]
+
+    ; Restore the stack pointer from the current (new) task
+    mov rsp, [rbx]
+
+    ; Restore the page table from the current (new) task
+    ; mov rdx, [rbx + 8]
+    ; mov cr3, rdx
+
     pop_all
-
     iretq
 
 

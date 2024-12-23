@@ -175,33 +175,23 @@ Acpi_Lvt :: struct {
     };
 }
 
-tock: bool;
-
-#program_export
-timer_interrupt :: (stack: *void) #c_call {
-    write_string(ifx tock then "tock\n" else "tick\n");
-    tock = !tock;
-
-    write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
-} @InterruptRoutine
-
 apic_stuff :: () {
-    register_interrupt_gate(int__fault_0, 0);
-    register_interrupt_gate(int__fault_1, 1);
-    register_interrupt_gate(int__fault_2, 2);
-    register_interrupt_gate(int__fault_3, 3);
-    register_interrupt_gate(int__fault_4, 4);
-    register_interrupt_gate(int__fault_5, 5);
-    register_interrupt_gate(int__fault_6, 6);
-    register_interrupt_gate(int__fault_7, 7);
-    register_interrupt_gate(int__fault_8, 8);
-    register_interrupt_gate(int__fault_9, 9);
-    register_interrupt_gate(int__fault_10, 10);
-    register_interrupt_gate(int__fault_11, 11);
-    register_interrupt_gate(int__fault_12, 12);
-    register_interrupt_gate(int__general_protection_fault, 13);
-    register_interrupt_gate(int__fault_14, 14);
-    register_interrupt_gate(int__fault_15, 15);
+    register_interrupt_gate(int__fault_0, 0, true);
+    register_interrupt_gate(int__fault_1, 1, true);
+    register_interrupt_gate(int__fault_2, 2, true);
+    register_interrupt_gate(int__fault_3, 3, true);
+    register_interrupt_gate(int__fault_4, 4, true);
+    register_interrupt_gate(int__fault_5, 5, true);
+    register_interrupt_gate(int__fault_6, 6, true);
+    register_interrupt_gate(int__fault_7, 7, true);
+    register_interrupt_gate(int__fault_8, 8, true);
+    register_interrupt_gate(int__fault_9, 9, true);
+    register_interrupt_gate(int__fault_10, 10, true);
+    register_interrupt_gate(int__fault_11, 11, true);
+    register_interrupt_gate(int__fault_12, 12, true);
+    register_interrupt_gate(int__general_protection_fault, 13, true);
+    register_interrupt_gate(int__fault_14, 14, true);
+    register_interrupt_gate(int__fault_15, 15, true);
 
     acpi_header := cast(*Acpi_MADT) find_acpi_table("APIC");
 
@@ -275,16 +265,6 @@ apic_stuff :: () {
             // Todo
         }
     }
-
-    lapic_timer_gate := allocate_interrupt_gate();
-    register_interrupt_gate(int__timer_interrupt, lapic_timer_gate);
-
-    write_apic_register(.TIC__TIMER_INITIAL, 0x0800_0000);
-
-    lvtt := cast(*Acpi_Lvt) *read_apic_register(.LVT__TIMER);
-    lvtt.vector = cast(u8) lapic_timer_gate;
-    lvtt.flags &= ~.M__mask;
-    write_apic_register(.LVT__TIMER, << cast(*u32) lvtt);
 
     efr := read_apic_register(.EXTENDED_FEATURE);
     if efr & 1 {
