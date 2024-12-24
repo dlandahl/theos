@@ -19,6 +19,8 @@
             -smp 8 
     QEMU_CMD);
 
+    // -d int
+
     run_command(.. command);
 }
 

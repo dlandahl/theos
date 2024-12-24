@@ -170,7 +170,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
             using boot_data.page_tables;
 
-            PAGE_PRESENT    : u64 : 0x1;
+            PAGE_PRESENT    : u64 : 0x1 | 0x4; // Adding the USER/SUPERVISOR bit to all pages so we can do stuff in ring 3 and not think about this yet.
             PAGE_READ_WRITE : u64 : 0x2;
             PAGE_SIZE       : u64 : 0x80;
 
@@ -214,7 +214,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             virtual_base : u64 : 0xffff_ffff_8000_0000;
             offset := cast(u64) boot_data.framebuffer.buffer & 0x1fffff;
 
-            // Map the framebuffer
+            // Map the framebuffer. Todo: enable write combining for this memory
             pd[4] = (cast(u64) boot_data.framebuffer.buffer - offset            ) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             pd[5] = (cast(u64) boot_data.framebuffer.buffer - offset + 0x20_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
 

@@ -21,6 +21,7 @@ Kernel_Globals :: struct {
 
     interrupt_descriptor_table: [256] Interrupt_Gate_Desc #align 16; // Hardware requires 16 byte alignment on IDT
     global_descriptor_table: Global_Descriptor_Table #align 64; // Align to cache block so no extra memory accesses are required on context switch
+    task_state_segment: Tss_With_Iopb #align 0x80;
 
     next_free_interrupt_gate: int;
 
@@ -155,7 +156,7 @@ kernel_entry :: () #no_context {
             }
 
             if mode == .CAPS {
-                return cast(*void) Allocator_Caps.FREE | .ACTUALLY_RESIZE | .HINT_I_AM_A_GENERAL_HEAP_ALLOCATOR;
+                return cast(*void) Allocator_Caps.FREE | .HINT_I_AM_A_GENERAL_HEAP_ALLOCATOR;
             }
 
             return null;
@@ -173,15 +174,31 @@ kernel_entry :: () #no_context {
         }
 
         {
-            // Global descriptor table boilerplate
+            // Global descriptor table
+
+            // Use IOPB to give user mode access to IO ports for now
+            memset(task_state_segment.bitmap.data, 0, 8192);
+            task_state_segment.iopb = size_of(Task_State_Segment);
+
+            tss_desc: System_Segment_Descriptor;
+            tss_address := cast(u64) *task_state_segment;
+
+            tss_desc.segment_limit = size_of(Tss_With_Iopb);
+            tss_desc.base_address_0 = cast(u16)  tss_address;
+            tss_desc.base_address_1 = cast(u8)  (tss_address >> 16);
+            tss_desc.base_address_2 = cast(u8)  (tss_address >> 24);
+            tss_desc.base_address_3 = cast(u32) (tss_address >> 32);
+            tss_desc.flags_0        = 0b1_00_0_1001; // type=TSS non-busy | PRESENT
+
             using Gdt_Entry_Flags;
 
             global_descriptor_table = Global_Descriptor_Table.{
                 0x0,
-                READ_WRITE|PRESENT|DESCRIPTOR_TYPE|LONG_MODE_CODE|EXECUTABLE,
-                READ_WRITE|PRESENT|DESCRIPTOR_TYPE,
-                READ_WRITE|PRESENT|DESCRIPTOR_TYPE|PRIVILEGE0|PRIVILEGE1|LONG_MODE_CODE|EXECUTABLE,
-                READ_WRITE|PRESENT|DESCRIPTOR_TYPE|PRIVILEGE0|PRIVILEGE1,
+                READ_WRITE | PRESENT | DESCRIPTOR_TYPE | LONG_MODE_CODE | EXECUTABLE,
+                READ_WRITE | PRESENT | DESCRIPTOR_TYPE,
+                READ_WRITE | PRESENT | DESCRIPTOR_TYPE | PRIVILEGE0 | PRIVILEGE1,
+                READ_WRITE | PRESENT | DESCRIPTOR_TYPE | PRIVILEGE0 | PRIVILEGE1 | LONG_MODE_CODE | EXECUTABLE,
+                tss_desc,
                 0xffff_ffff,
             };
 
@@ -194,6 +211,11 @@ kernel_entry :: () #no_context {
             gdt_desc.base = *global_descriptor_table;
             pointer := *gdt_desc;
             #asm { lgdt [pointer]; }
+
+            #bytes .[
+                0x66, 0xb8, 0x28, 0x00, // mov ax, 0x28
+                0x0f, 0x00, 0xd8        // ltr ax
+            ];
 
             init_segment_registers();
         }
@@ -251,11 +273,26 @@ kernel_entry :: () #no_context {
         //     log_error("uACPI initalize failed with status \"%\"", acpi_init_result);
         // }
 
+
+
         find_all_pci_devices();
 
         for pci_devices {
             print("Device at 0x%, %\n", cast(*void) it.configuration_space, it.configuration_space.class_code);
         }
+
+        // Enable syscalls
+
+        star := (cast(u64) Segment_Selector.RING0_DATA) << 48;
+        write_msr(.STAR__syscall_segment, cast(u64) star);
+        write_msr(.SFMASK__syscall_flags, ~0);
+        write_msr(.LSTAR__syscall_address, 0);
+
+        EFER_SCE__syscall_enable :: 1;
+
+        efer := read_msr(.EFER__extended_features);
+        efer |= EFER_SCE__syscall_enable;
+        write_msr(.EFER__extended_features, efer);
 
         start_multitasking();
     }

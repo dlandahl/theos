@@ -266,11 +266,6 @@ apic_stuff :: () {
         }
     }
 
-    efr := read_apic_register(.EXTENDED_FEATURE);
-    if efr & 1 {
-        print("\n\nInterrupt enable registers supported\n\n");
-    }
-
     #asm {
         sti;
     }
@@ -481,14 +476,16 @@ initialize_hpet :: () {
     // Hardcoded interrupt routing
     //
 
-    gate_number := cast(u32) allocate_interrupt_gate();
-    register_interrupt_gate(int__hpet_timer0_interrupt, gate_number);
-    register_interrupt_gate(int__hpet_timer1_interrupt, gate_number+1);
+    t0_gate := cast(u32) allocate_interrupt_gate();
+    t1_gate := cast(u32) allocate_interrupt_gate();
+
+    register_interrupt_gate(int__hpet_timer0_interrupt, t0_gate);
+    register_interrupt_gate(int__hpet_timer1_interrupt, t1_gate);
 
     // Get INTI2/8 redirection entry. The numbers 2 and 8 come from the legacy replacement routing.
     // Todo: need to detect if there is an interrupt source override in the MADT.
-    ioapic_add_interrupt_redirection_table_entry(2, gate_number);
-    ioapic_add_interrupt_redirection_table_entry(8, gate_number+1);
+    ioapic_add_interrupt_redirection_table_entry(2, t0_gate);
+    ioapic_add_interrupt_redirection_table_entry(8, t1_gate);
 }
 
 hpet_configure_timer :: (timer_index: int, frequency: u64, periodic: bool) {

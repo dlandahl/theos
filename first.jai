@@ -391,6 +391,22 @@ syscall_entry:
     ret
 
 
+global switch_to_ring_3_using_sysret
+align 0x10
+switch_to_ring_3_using_sysret:
+    ; mov ax, 0x18|3
+    ; mov ds, ax
+    ; mov es, ax
+    ; mov gs, ax
+    ; mov fs, ax
+
+    mov rcx, rdi
+    xor r11, r11
+    ; mov r11, 0x202
+
+    o64 sysret
+
+
 global init_segment_registers
 align 0x8
 init_segment_registers:
@@ -406,6 +422,7 @@ init_segment_registers:
     mov gs, ax
     mov fs, ax
     ret
+
 END;
 
 

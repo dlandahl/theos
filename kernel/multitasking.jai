@@ -32,7 +32,7 @@ start_multitasking :: () {
         write_apic_register(.LVT__TIMER, << cast(*u32) lvtt);
     }
 
-    task_switch :: () #c_call #foreign Interrupts;
+    task_switch :: () #foreign Interrupts;
     register_interrupt_gate(task_switch, TASK_SWITCH_GATE);
 
     main_thread.next = *task_a;
@@ -72,7 +72,15 @@ task_do_work :: () #c_call {
     yield();
 
     write_string(".. 3 ..\n");
-    while true yield();
+
+    switch_to_ring_3_using_sysret :: (address: *void, flags: u64) #foreign Interrupts;
+    switch_to_ring_3_using_sysret(cast(*void) task_do_work_in_ring_3, 0x202);
+    while true {};
+}
+
+task_do_work_in_ring_3 :: () #c_call {
+    write_string("Doing stuff in ring 3\n");
+    while true { }
 }
 
 #program_export
