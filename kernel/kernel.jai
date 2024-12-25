@@ -1,5 +1,6 @@
 
 #import "Basic";
+#import "Machine_X64";
 
 #load "../boot_data.jai";
 
@@ -275,7 +276,7 @@ kernel_entry :: () #no_context {
         //     log_error("uACPI initalize failed with status \"%\"", acpi_init_result);
         // }
 
-
+        enable_cpu_features();
 
         find_all_pci_devices();
 

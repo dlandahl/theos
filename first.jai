@@ -351,9 +351,8 @@ task_switch:
     ; Put *current_task in rcx
     mov rcx, [rax]
 
-    ; Store FPU and SIMD state in the old task's xsave_area
-    ; mov r8, [rcx + Task_Info.xsave]
-    ; fxsave64 [r8]
+    ; Store FPU state in the old task's xsave_area
+    fxsave64 [rcx + Task_Info.xsave]
 
     ; Store current stack on current (old) task
     mov [rcx + Task_Info.rsp], rsp
@@ -361,9 +360,8 @@ task_switch:
     ; Set *current_task to point to the new task
     mov [rax], rbx
 
-    ; Load FPU and SIMD state from the new task's xsave_area
-    ; mov r8, [rbx + Task_Info.xsave]
-    ; fxrstor64 [r8]
+    ; Load FPU state from the new task's xsave_area
+    fxrstor64 [rbx + Task_Info.xsave]
 
     ; Restore the stack pointer from the current (new) task
     mov rsp, [rbx + Task_Info.rsp]

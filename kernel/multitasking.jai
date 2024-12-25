@@ -1,30 +1,50 @@
 
+#import "Bucket_Array";
+
 Task_Info :: struct {
     // ========
     // These fields are volatile, because they get dereferenced in the
     // context switch routine implemented in assembly in first.jai
     rsp: *void;
     cr3: u64;
-    xsave_area: *[512] u8 #align 16;
+    xsave_area: Xsave_Area;
     // ========
 
     next: *Task_Info;
 
     user_stack:   *void;
     kernel_stack: *void;
+
+    id: int;
+
+    state: enum {
+        RUNNING;
+        WAITING_TO_RUN;
+        SLEEPING;
+    }
 }
 
 TASK_SWITCH_GATE :: 64;
 
 Scheduler :: struct {
-    main_task: Task_Info;
+    main_task: *Task_Info;
     current_task: *Task_Info;
+
+    sleeping:       [..] *Task_Info;
+    waiting_to_run: [..] *Task_Info;
+
+    tasks: Bucket_Array(Task_Info, 256, always_iterate_by_pointer=true);
+    next_id: int;
 
     lock: Spinlock;
 }
 
+Xsave_Area :: struct {
+    fpu: [512] u8 #align 16;
+}
+
 start_multitasking :: () {
-    if false {
+    if true {
         //
         // Enable local apic timer interrupts
         //
@@ -32,7 +52,7 @@ start_multitasking :: () {
         lapic_timer_gate := allocate_interrupt_gate();
         register_interrupt_gate(int__local_apic_timer_interrupt, lapic_timer_gate);
 
-        write_apic_register(.TIC__TIMER_INITIAL, 0x0800_0000);
+        write_apic_register(.TIC__TIMER_INITIAL, 0x0100_0000);
 
         lvtt := cast(*Acpi_Lvt) *read_apic_register(.LVT__TIMER);
         lvtt.vector = cast(u8) lapic_timer_gate;
@@ -44,19 +64,23 @@ start_multitasking :: () {
     register_interrupt_gate(task_switch, TASK_SWITCH_GATE);
 
     using kernel_globals.scheduler;
+    tasks.allocator = context.allocator;
+    next_id = 1;
+
+    locator:, main_task = bucket_array_add(*tasks, .{});
 
     main_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
+    main_task.next = main_task;
+    main_task.id = next_id;
 
-    main_task.next = *main_task;
-    current_task   = *main_task;
+    next_id += 1;
+    current_task = main_task;
 
-    create_task();
-    for 1..2 yield();
-
-    create_task();
-    for 1..1 yield();
 
     create_task();
+    create_task();
+    create_task();
+
     for 1..10 yield();
 
     write_string("Made it past all the yields.\n");
@@ -67,7 +91,7 @@ create_task :: () -> *Task_Info {
 
     Scoped_Acquire(*scheduler.lock);
 
-    new_task := New(Task_Info);
+    locator, new_task := bucket_array_add(*scheduler.tasks, .{});
     new_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
 
     new_task.next = scheduler.current_task.next;
@@ -84,6 +108,8 @@ create_task :: () -> *Task_Info {
     stack.sp = new_task.kernel_stack;
 
     new_task.rsp = cast(*void) stack;
+    new_task.id = scheduler.next_id;
+    scheduler.next_id += 1;
 
     return new_task;
 }
@@ -130,19 +156,20 @@ enter_user_mode :: (entry_point: () #c_call, flags: X64_Flags, user_stack: *void
 
 
 task_do_work :: () #c_call {
-    write_string(".. 1 ..\n");
-    yield();
+    while true {
+        write_string("Thread ");
+        write_number(kernel_globals.scheduler.current_task.id);
+        write_string(" doing some work.\n");
 
-    write_string(".. 2 ..\n");
-    yield();
-
-    write_string(".. 3 ..\n");
-    yield();
+        for 1..10_000_000 {
+            #asm { pause; }
+        }
+    }
 
     entry_point := task_do_work_in_ring_3;
     user_stack  := kernel_globals.scheduler.current_task.user_stack;
 
-    enter_user_mode(entry_point, .IF__interrupt, user_stack);
+    // enter_user_mode(entry_point, .IF__interrupt, user_stack);
 }
 
 task_do_work_in_ring_3 :: () #c_call {
@@ -160,4 +187,5 @@ task_do_work_in_ring_3 :: () #c_call {
 #program_export
 local_apic_timer_interrupt :: (stack: *void) #c_call {
     write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
+    yield();
 } @InterruptRoutine

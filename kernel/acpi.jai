@@ -251,12 +251,10 @@ apic_stuff :: () {
 
             ioapic_ics := cast(*Acpi_MADT.Ics_Io_Apic) ics;
 
-            {
-                virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096);
-                map_page(virtual, ioapic_ics.address, Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE);
+            virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096);
+            map_page(virtual, ioapic_ics.address, Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE);
 
-                kernel_globals.io_apic = cast(*u32) virtual;
-            }
+            kernel_globals.io_apic = cast(*u32) virtual;
 
             assert(ioapic_ics.address == 0xfec0_0000);
 

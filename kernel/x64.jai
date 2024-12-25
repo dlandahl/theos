@@ -180,3 +180,48 @@ read_msr :: (msr: Ia32_Model_Specific_Register) -> u64 {
 
     return low | (high << 32);
 }
+
+
+
+enable_cpu_features :: () {
+    cpu_features := get_cpu_info().feature_leaves;
+
+    CR0_MP         :=   1 << 1;
+    CR0_EM_CLEAR   := ~(1 << 2);
+
+    CR4_OSFXSR     :=   1 << 9;
+    CR4_OSXMMEXCPT :=   1 << 10;
+    CR4_OSXSAVE    :=   1 << 18;
+    CR4_FSGSBASE   :=   1 << 16;
+
+    if check_feature(cpu_features, .SSE) {
+        #asm {
+            get_cr0 cr0:;
+            and cr0, CR0_EM_CLEAR;
+            or  cr0, CR0_MP;
+            set_cr0 cr0;
+
+            get_cr4 cr4:;
+            or  cr4, CR4_OSFXSR;
+            or  cr4, CR4_OSXMMEXCPT;
+            set_cr4 cr4;
+        }
+    }
+
+    if check_feature(cpu_features, .FSGSBASE) {
+        #asm {
+            get_cr4 cr4:;
+            or  cr4, CR4_FSGSBASE;
+            set_cr4 cr4;
+        }
+    }
+
+    if check_feature(cpu_features, .XSAVE) {
+        // This doesn't seem to be needed to execute fxsave64 etc. Maybe UEFI enables some CPU features for us
+        #asm {
+            get_cr4 cr4:;
+            or  cr4, CR4_OSXSAVE;
+            set_cr4 cr4;
+        }
+    }
+}
