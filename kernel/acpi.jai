@@ -201,11 +201,11 @@ apic_stuff :: () {
         AE__Apic_Enable      :: 1 << 11;
     }
 
-    apic_base := << cast(*Apic_Base_Flags) *read_msr(.APIC_BASE__Apic_Base);
+    apic_base := << cast(*Apic_Base_Flags) *read_msr(.APIC_BASE__apic_base);
     assert(apic_base & .BSC__Boot_Strap_Core > 0);
 
     apic_base |= .AE__Apic_Enable;
-    write_msr(.APIC_BASE__Apic_Base, cast(u64) apic_base);
+    write_msr(.APIC_BASE__apic_base, cast(u64) apic_base);
 
     {
         physical := cast(u64) apic_base & ~0xfff;
@@ -472,9 +472,8 @@ initialize_hpet :: () {
 
     hpet_restart();
 
-    //
-    // Hardcoded interrupt routing
-    //
+
+    // Interrupt routing
 
     t0_gate := cast(u32) allocate_interrupt_gate();
     t1_gate := cast(u32) allocate_interrupt_gate();

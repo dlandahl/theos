@@ -145,7 +145,7 @@ System_Segment_Descriptor :: struct {
 
 
 Ia32_Model_Specific_Register :: enum {
-    APIC_BASE__Apic_Base      :: 0x0000_001b;
+    APIC_BASE__apic_base      :: 0x0000_001b;
     PAT__page_attribute_table :: 0x0000_0277;
     EFER__extended_features   :: 0xc000_0080;
     STAR__syscall_segment     :: 0xc000_0081;

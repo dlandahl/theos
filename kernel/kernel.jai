@@ -34,6 +34,7 @@ Kernel_Globals :: struct {
     temporary_storage_buffer: [TEMPORARY_STORAGE_SIZE] u8 #align 64;
 
     main_thread_context: Context;
+    scheduler: Scheduler;
 }
 
 kernel_globals: Kernel_Globals;
@@ -45,7 +46,8 @@ init_segment_registers :: () #foreign Interrupts;
 kernel_entry :: () #no_context {
     using kernel_globals;
 
-    boot_data = cast(*Boot_Data) Boot_Data.BASE_ADDRESS;
+    // We should avoid using the UEFI identity map because we'll need to get rid of it once we run user processes in low memory.
+    boot_data = cast(*Boot_Data) (Boot_Data.BASE_ADDRESS + DIRECT_MAPPING_BASE);
 
     main_thread_context.assertion_failed = (location: Source_Code_Location, message: string) -> bool {
         write_string("Assertion failure");
@@ -73,14 +75,14 @@ kernel_entry :: () #no_context {
 
     push_context main_thread_context {
 
-        fb := framebuffer;
+        using framebuffer;
 
-        for y: 0..fb.y_resolution-1 {
-            red := cast(int) (0xff * (1.0 / fb.y_resolution) * y);
+        for y: 0..y_resolution-1 {
+            for x: 0..x_resolution-1 {
+                red   := cast(int) (0xff * (1.0 / y_resolution) * y);
+                green := cast(int) (0xff * (1.0 / x_resolution) * x);
 
-            for x: 0..fb.x_resolution-1 {
-                green := cast(int) (0xff * (1.0 / fb.x_resolution) * x);
-                fb.buffer[x + y * fb.stride] = cast(u32) ((red << 16) | (green << 8));
+                buffer[x + y * stride] = cast(u32) ((red << 16) | (green << 8));
             }
         }
 
@@ -300,7 +302,9 @@ kernel_entry :: () #no_context {
         start_multitasking();
     }
 
-    while true #asm { hlt; }
+    while true #asm {
+        hlt;
+    }
 }
 
 bluescreen :: (loc := #caller_location) #no_context {
@@ -614,6 +618,10 @@ release :: (lock: *Spinlock) #no_context {
     lock.* = 0;
 }
 
+Scoped_Acquire :: (lock: *Spinlock) #expand {
+    acquire(lock);
+    `defer release(lock);
+}
 
 
 allocate_interrupt_gate :: () -> int {

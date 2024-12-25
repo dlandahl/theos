@@ -337,69 +337,73 @@ global task_switch
 ; **current_task is in rax
 ; *new_task is in rbx
 
+struc Task_Info
+    .rsp:   resq 1
+    .cr3:   resq 1
+    .xsave: resq 1
+endstruc
+
 align 0x8
 task_switch:
     cli
     push_all
 
+    ; Put *current_task in rcx
     mov rcx, [rax]
 
     ; Store FPU and SIMD state in the old task's xsave_area
-    ; mov r8, [rcx + 16]
+    ; mov r8, [rcx + Task_Info.xsave]
     ; fxsave64 [r8]
 
     ; Store current stack on current (old) task
-    mov [rcx], rsp
+    mov [rcx + Task_Info.rsp], rsp
 
-    ; Set the current task to the new task
+    ; Set *current_task to point to the new task
     mov [rax], rbx
 
     ; Load FPU and SIMD state from the new task's xsave_area
-    ; mov r8, [rbx + 16]
+    ; mov r8, [rbx + Task_Info.xsave]
     ; fxrstor64 [r8]
 
     ; Restore the stack pointer from the current (new) task
-    mov rsp, [rbx]
+    mov rsp, [rbx + Task_Info.rsp]
 
     ; Restore the page table from the current (new) task
-    ; mov rdx, [rbx + 8]
-    ; mov cr3, rdx
+    mov rdx, [rbx + Task_Info.cr3]
+    mov cr3, rdx
 
     pop_all
     iretq
 
 
 
+extern get_kernel_stack
 extern syscall_handler
 global syscall_entry
 
 align 0x10
 syscall_entry:
-    mov r8, rsp
-
     pushfq
-    cli
     push_all
+    mov r12, rsp
 
-    mov rdi, rsp
+    call get_kernel_stack
+    mov rsp, rax
+
+    mov rdi, r12
     call syscall_handler
 
+    mov rsp, r12
     pop_all
     popfq
 
-    mov rsp, r8
     o64 sysret
 
 
-global switch_to_ring_3_using_sysret
+global enter_user_mode
 align 0x10
-switch_to_ring_3_using_sysret:
-    ; mov ax, 0x18|3
-    ; mov ds, ax
-    ; mov es, ax
-    ; mov gs, ax
-    ; mov fs, ax
-
+enter_user_mode:
+    mov rsp, rdx
     mov rcx, rdi
     mov r11, rsi
 
