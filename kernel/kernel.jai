@@ -284,9 +284,12 @@ kernel_entry :: () #no_context {
         // Enable syscalls
 
         star := (cast(u64) Segment_Selector.RING0_DATA) << 48;
-        write_msr(.STAR__syscall_segment, cast(u64) star);
+        star |= (cast(u64) Segment_Selector.RING0_CODE) << 32;
+        write_msr(.STAR__syscall_segment, star);
         write_msr(.SFMASK__syscall_flags, ~0);
-        write_msr(.LSTAR__syscall_address, 0);
+
+        syscall_entry :: () #foreign Interrupts;
+        write_msr(.LSTAR__syscall_address, cast(u64) cast(*void) syscall_entry);
 
         EFER_SCE__syscall_enable :: 1;
 

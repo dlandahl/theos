@@ -5,7 +5,8 @@ Task_Info :: struct {
     // xsave_area: *[512] u8 #align 16;
 
     next: *Task_Info;
-    stack: *void;
+    user_stack:   *void;
+    kernel_stack: *void;
 }
 
 main_thread: Task_Info;
@@ -39,18 +40,21 @@ start_multitasking :: () {
     current_task = *main_thread;
 
     task_a.next = *main_thread;
-    task_a.stack = alloc(0x10_0000) + 0x10_0000;
+    task_a.user_stack   = alloc(0x10_0000) + 0x10_0000;
+    task_a.kernel_stack = alloc(0x2000) + 0x2000;
 
-    stack := cast(*Interrupt_Stack) task_a.stack - 1;
+    stack := cast(*Interrupt_Stack) task_a.kernel_stack - 1;
     stack.flags = .IF__interrupt;
     stack.cs = .RING0_CODE;
     stack.ss = .RING0_DATA;
     stack.ip = cast(*void) task_do_work;
-    stack.sp = task_a.stack - 8; // Todo, figure out what this means exactly
+    stack.sp = task_a.kernel_stack;
 
     task_a.rsp = cast(*void) stack;
 
     for 1..10 yield();
+
+    write_string("Made it past all the yields.\n");
 }
 
 yield :: () #no_context {
@@ -72,14 +76,40 @@ task_do_work :: () #c_call {
     yield();
 
     write_string(".. 3 ..\n");
+    yield();
 
-    switch_to_ring_3_using_sysret :: (address: *void, flags: u64) #foreign Interrupts;
-    switch_to_ring_3_using_sysret(cast(*void) task_do_work_in_ring_3, 0x202);
-    while true {};
+    address := task_do_work_in_ring_3;
+
+    #asm SYSCALL_SYSRET {
+        mov rcx: gpr === c,  address;
+        mov r11: gpr === 11, 0x202;
+        sysret.q;
+    }
+}
+
+yield_from_user_mode :: () #no_context {
+    syscall_number := 12345;
+
+    #asm SYSCALL_SYSRET {
+        syscall_number === a;
+        syscall c:, _11:, syscall_number;
+    }
+}
+
+#program_export
+syscall_handler :: (data: *Syscall_Stack) #c_call {
+    syscall_number := data.rax;
+    if syscall_number == 12345 {
+        yield();
+    }
 }
 
 task_do_work_in_ring_3 :: () #c_call {
+    // #asm {int 0xd;}
     write_string("Doing stuff in ring 3\n");
+    yield_from_user_mode();
+    write_string("Doing more stuff.\n");
+    for 1..50 yield_from_user_mode();
     while true { }
 }
 

@@ -370,25 +370,25 @@ task_switch:
 
 
 
+extern syscall_handler
 global syscall_entry
+
 align 0x10
 syscall_entry:
-    push rcx
     mov r8, rsp
-    and rsp, ~0xf
 
     pushfq
     cli
     push_all
 
     mov rdi, rsp
-    ; call syscall_interrupt
+    call syscall_handler
 
     pop_all
     popfq
 
     mov rsp, r8
-    ret
+    o64 sysret
 
 
 global switch_to_ring_3_using_sysret
@@ -401,8 +401,7 @@ switch_to_ring_3_using_sysret:
     ; mov fs, ax
 
     mov rcx, rdi
-    xor r11, r11
-    ; mov r11, 0x202
+    mov r11, rsi
 
     o64 sysret
 

@@ -12,6 +12,24 @@ X64_Flags :: enum_flags u64 {
     RF__resume    :: 0x10000;
 }
 
+Syscall_Stack :: struct {
+    r15:  u64;
+    r14:  u64;
+    r13:  u64;
+    r12:  u64;
+    r11:  u64;
+    r10:  u64;
+    r9:   u64;
+    r8:   u64;
+    rbp:  u64;
+    rdi:  u64;
+    rsi:  u64;
+    rdx:  u64;
+    rcx:  u64;
+    rbx:  u64;
+    rax:  u64;
+}
+
 Interrupt_Stack :: struct (with_error_code := false) {
     r15:  u64;
     r14:  u64;
@@ -63,7 +81,7 @@ register_interrupt_gate :: (handler: () #c_call, index: int, trap := false) {
     desc.reserved = 0x0;
 
     // Allow all gates to be used in ring 3 for now.
-    desc.flags   |= 0b11 << 5;
+    desc.flags   |= 0b1100000;
 }
 
 Global_Descriptor_Table :: struct {
