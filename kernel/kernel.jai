@@ -2,6 +2,9 @@
 #import "Basic";
 #import "Machine_X64";
 
+#import "Bitfield";
+set :: bitfield_set;
+
 #load "../boot_data.jai";
 
 #load "acpi.jai";
@@ -20,8 +23,12 @@ Kernel_Globals :: struct {
     root_acpi_table: *Acpi_Table_Header;
     acpi_version: int;
 
-    interrupt_descriptor_table: [256] Interrupt_Gate_Desc #align 16; // Hardware requires 16 byte alignment on IDT
-    global_descriptor_table: Global_Descriptor_Table #align 64; // Align to cache block so no extra memory accesses are required on context switch
+    // Hardware requires 16 byte alignment on IDT
+    interrupt_descriptor_table: [256] Interrupt_Gate_Descriptor #align 16;
+
+    // Align to cache block so no extra memory accesses are required on context switch
+    global_descriptor_table: Global_Descriptor_Table #align 64;
+
     task_state_segment: Tss_With_Iopb #align 0x80;
 
     next_free_interrupt_gate: int;
@@ -75,7 +82,6 @@ kernel_entry :: () #no_context {
     main_thread_context.print_style.default_format_struct.use_newlines_if_long_form = true;
 
     push_context main_thread_context {
-
         using framebuffer;
 
         for y: 0..y_resolution-1 {
@@ -227,7 +233,7 @@ kernel_entry :: () #no_context {
             // Interrupt descriptor table
             idt_desc: struct {
                 limit: u16;
-                base: *Interrupt_Gate_Desc #align 2;
+                base: *Interrupt_Gate_Descriptor #align 2;
             }
 
             idt_desc.limit = size_of(type_of(interrupt_descriptor_table));

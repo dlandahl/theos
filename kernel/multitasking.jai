@@ -2,15 +2,14 @@
 #import "Bucket_Array";
 
 Task_Info :: struct {
-    // ========
+
     // These fields are volatile, because they get dereferenced in the
     // context switch routine implemented in assembly in first.jai
+    // ============
     rsp: *void;
     cr3: u64;
     xsave_area: Xsave_Area;
-    // ========
-
-    next: *Task_Info;
+    // ============
 
     user_stack:   *void;
     kernel_stack: *void;
@@ -36,7 +35,7 @@ Scheduler :: struct {
     tasks: Bucket_Array(Task_Info, 256, always_iterate_by_pointer=true);
     next_id: int;
 
-    lock: Spinlock;
+    spinlock: Spinlock;
 }
 
 Xsave_Area :: struct {
@@ -44,15 +43,12 @@ Xsave_Area :: struct {
 }
 
 start_multitasking :: () {
-    if true {
-        //
-        // Enable local apic timer interrupts
-        //
-
+    {
+        // Enable Local APIC timer interrupts
         lapic_timer_gate := allocate_interrupt_gate();
         register_interrupt_gate(int__local_apic_timer_interrupt, lapic_timer_gate);
 
-        write_apic_register(.TIC__TIMER_INITIAL, 0x0100_0000);
+        write_apic_register(.TIC__TIMER_INITIAL, 0x0080_0000);
 
         lvtt := cast(*Acpi_Lvt) *read_apic_register(.LVT__TIMER);
         lvtt.vector = cast(u8) lapic_timer_gate;
@@ -64,18 +60,17 @@ start_multitasking :: () {
     register_interrupt_gate(task_switch, TASK_SWITCH_GATE);
 
     using kernel_globals.scheduler;
+
     tasks.allocator = context.allocator;
     next_id = 1;
 
     locator:, main_task = bucket_array_add(*tasks, .{});
 
-    main_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
-    main_task.next = main_task;
-    main_task.id = next_id;
+    main_task.cr3  = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
+    main_task.id   = next_id;
 
     next_id += 1;
     current_task = main_task;
-
 
     create_task();
     create_task();
@@ -87,15 +82,12 @@ start_multitasking :: () {
 }
 
 create_task :: () -> *Task_Info {
-    scheduler := *kernel_globals.scheduler;
+    using kernel_globals;
 
-    Scoped_Acquire(*scheduler.lock);
+    Scoped_Acquire(*scheduler.spinlock);
 
     locator, new_task := bucket_array_add(*scheduler.tasks, .{});
-    new_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
-
-    new_task.next = scheduler.current_task.next;
-    scheduler.current_task.next = new_task;
+    new_task.cr3 = cast(u64) *page_tables.pml4 - DIRECT_MAPPING_BASE;
 
     new_task.user_stack   = alloc(0x10_0000) + 0x10_0000;
     new_task.kernel_stack = alloc(0x2000) + 0x2000;
@@ -111,14 +103,43 @@ create_task :: () -> *Task_Info {
     new_task.id = scheduler.next_id;
     scheduler.next_id += 1;
 
+    array_add(*scheduler.waiting_to_run, new_task);
+
     return new_task;
 }
 
 yield :: () #no_context {
-    using kernel_globals.scheduler;
+    using kernel_globals;
 
-    current := *current_task;
-    next := current_task.next;
+    next: *Task_Info;
+
+    c: Context;
+    push_context c {
+        while true {
+            while scheduler.waiting_to_run.count == 0 {
+                #asm { hlt; }
+            }
+
+            Scoped_Acquire(*scheduler.spinlock);
+
+            if scheduler.waiting_to_run.count == 0 {
+                continue;
+            }
+
+            next = scheduler.waiting_to_run[0];
+
+            // Ordered remove to prevent starvation.
+            array_ordered_remove_by_index(*scheduler.waiting_to_run, 0);
+
+            // This should never be an allocation since we just removed.
+            array_add(*scheduler.waiting_to_run, scheduler.current_task);
+
+            break;
+        }
+    }
+
+    current := *scheduler.current_task;
+    task_state_segment.rsp[0] = next.kernel_stack;
 
     #asm {
         mov rax: gpr === a, current;
@@ -156,30 +177,22 @@ enter_user_mode :: (entry_point: () #c_call, flags: X64_Flags, user_stack: *void
 
 
 task_do_work :: () #c_call {
+    entry_point := task_do_work_in_ring_3;
+    user_stack  := kernel_globals.scheduler.current_task.user_stack;
+
+    enter_user_mode(entry_point, .IF__interrupt, user_stack);
+}
+
+task_do_work_in_ring_3 :: () #c_call {
     while true {
         write_string("Thread ");
         write_number(kernel_globals.scheduler.current_task.id);
         write_string(" doing some work.\n");
 
-        for 1..10_000_000 {
+        for 1..5_000_000 {
             #asm { pause; }
         }
     }
-
-    entry_point := task_do_work_in_ring_3;
-    user_stack  := kernel_globals.scheduler.current_task.user_stack;
-
-    // enter_user_mode(entry_point, .IF__interrupt, user_stack);
-}
-
-task_do_work_in_ring_3 :: () #c_call {
-    write_string("Doing stuff in ring 3\n");
-    yield_from_user_mode();
-
-    write_string("Doing more stuff in ring 3\n");
-    for 1..50 yield_from_user_mode();
-
-    while true { }
 }
 
 

@@ -58,11 +58,18 @@ Interrupt_Stack :: struct (with_error_code := false) {
     ss:    Segment_Selector;
 }
 
-Interrupt_Gate_Desc :: struct {
+Gate_Descriptor_Flags :: enum u8 {
+    gate_type             :: 4;
+    always_zero           :: 1;
+    protection_level      :: 2;
+    present               :: 1;
+} @Bitfield
+
+Interrupt_Gate_Descriptor :: struct {
     offset_1: u16;
     segment:  Segment_Selector;
     ist:      u8;
-    flags:    u8;
+    flags:    Gate_Descriptor_Flags;
     offset_2: u16;
     offset_3: u32;
     reserved: u32;
@@ -70,18 +77,18 @@ Interrupt_Gate_Desc :: struct {
 
 register_interrupt_gate :: (handler: () #c_call, index: int, trap := false) {
     desc := *kernel_globals.interrupt_descriptor_table[index];
-    address := cast(u64) cast(*void) handler;
+    desc.* = .{};
 
+    address := cast(u64) cast(*void) handler;
     desc.offset_1 = xx  address        & 0xffff;
     desc.offset_2 = xx (address >> 16) & 0xffff;
     desc.offset_3 = xx (address >> 32) & 0xffffffff;
-    desc.segment  = .RING0_CODE;
-    desc.ist      = 0x0;
-    desc.flags    = cast(u8) ifx trap 0x8f else 0x8e;
-    desc.reserved = 0x0;
 
-    // Allow all gates to be used in ring 3 for now.
-    desc.flags   |= 0b1100000;
+    desc.segment  = .RING0_CODE;
+
+    set(*desc.flags, .protection_level, 3);
+    set(*desc.flags, .present, 1);
+    set(*desc.flags, .gate_type, ifx trap 0b1111 else 0b1110);
 }
 
 Global_Descriptor_Table :: struct {
@@ -118,7 +125,7 @@ Gdt_Entry_Flags :: enum u64 {
 
 Task_State_Segment :: struct {
     reserved_0: u32;
-    rsp:        [3] u64 #align 4;
+    rsp:        [3] *void #align 4;
     reserved_1: [2] u32;
     ist:        [7] u64 #align 4;
     reserved_2: [2] u32;

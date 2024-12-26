@@ -23,6 +23,10 @@ Usage example:
         print("Flags is %\n", formatInt(cast(int) gate_flags, base=2));
     }
 
+Todo: would like to have this syntax:
+
+    Set(gate_flags.protection_level, 3);
+
 */
 
 #scope_export

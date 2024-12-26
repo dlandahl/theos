@@ -335,7 +335,7 @@ ap_entry_point :: () #c_call {
     {
         idt_desc: struct {
             limit: u16;
-            base: *Interrupt_Gate_Desc #align 2;
+            base: *Interrupt_Gate_Descriptor #align 2;
         }
 
         idt_desc.limit = size_of(type_of(interrupt_descriptor_table));
@@ -434,6 +434,8 @@ HPET :: struct {
 
     counters_are_64_bit: bool;
     counters: [2] u64;
+
+    spinlock: Spinlock;
 }
 
 initialize_hpet :: () {
@@ -487,6 +489,8 @@ initialize_hpet :: () {
 
 hpet_configure_timer :: (timer_index: int, frequency: u64, periodic: bool) {
     hpet := *kernel_globals.high_precision_timer;
+    Scoped_Acquire(*hpet.spinlock);
+
     register_offset := cast(Hpet_Register) (0x20 * timer_index);
 
     timer := cast(Hpet_Timer_Flags) read(register_offset + .TIMER0);
@@ -510,6 +514,8 @@ hpet_configure_timer :: (timer_index: int, frequency: u64, periodic: bool) {
 }
 
 hpet_restart :: () {
+    Scoped_Acquire(*kernel_globals.high_precision_timer.spinlock);
+
     config := read(Hpet_Register.CONFIG);
 
     ENABLE_BIT :: cast(u64) Hpet_Config_Flags.ENABLE;
