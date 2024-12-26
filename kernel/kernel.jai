@@ -13,6 +13,16 @@ set :: bitfield_set;
 #load "pci_express.jai";
 #load "multitasking.jai";
 
+X64_Core :: struct {
+    // Align to cache block so no extra memory accesses are required on context switch
+    global_descriptor_table: Global_Descriptor_Table #align 64;
+
+    task_state_segment: Tss_With_Iopb #align 0x80;
+
+    local_apic_id: u32;
+    processor_id: int;
+}
+
 Kernel_Globals :: struct {
     using boot_data: *Boot_Data;
 
@@ -25,13 +35,10 @@ Kernel_Globals :: struct {
 
     // Hardware requires 16 byte alignment on IDT
     interrupt_descriptor_table: [256] Interrupt_Gate_Descriptor #align 16;
-
-    // Align to cache block so no extra memory accesses are required on context switch
-    global_descriptor_table: Global_Descriptor_Table #align 64;
-
-    task_state_segment: Tss_With_Iopb #align 0x80;
-
     next_free_interrupt_gate: int;
+
+    using bootstrap_processor: *X64_Core;
+    processor_cores: [..] X64_Core;
 
     apic: *void;
     io_apic: *u32;
@@ -48,7 +55,6 @@ Kernel_Globals :: struct {
 kernel_globals: Kernel_Globals;
 
 Interrupts :: #library,no_dll "../.build/interrupts";
-init_segment_registers :: () #foreign Interrupts;
 
 #program_export
 kernel_entry :: () #no_context {
@@ -182,68 +188,10 @@ kernel_entry :: () #no_context {
             init_block_allocator(*virtual_block_allocator, heap_base / 4096, heap_size / 4096);
         }
 
-        {
-            // Global descriptor table
+        next_free_interrupt_gate = 32; // Sequentially allocating interrupt gates, starting after the ISA exceptions
 
-            // Use IOPB to give user mode access to IO ports for now
-            memset(task_state_segment.bitmap.data, 0, 8192);
-            task_state_segment.iopb = size_of(Task_State_Segment);
-
-            tss_desc: System_Segment_Descriptor;
-            tss_address := cast(u64) *task_state_segment;
-
-            tss_desc.segment_limit = size_of(Tss_With_Iopb);
-            tss_desc.base_address_0 = cast(u16)  tss_address;
-            tss_desc.base_address_1 = cast(u8)  (tss_address >> 16);
-            tss_desc.base_address_2 = cast(u8)  (tss_address >> 24);
-            tss_desc.base_address_3 = cast(u32) (tss_address >> 32);
-            tss_desc.flags_0        = 0b1_00_0_1001; // type=TSS non-busy | PRESENT
-
-            using Gdt_Entry_Flags;
-
-            global_descriptor_table = Global_Descriptor_Table.{
-                0x0,
-                READ_WRITE | PRESENT | DESCRIPTOR_TYPE | LONG_MODE_CODE | EXECUTABLE,
-                READ_WRITE | PRESENT | DESCRIPTOR_TYPE,
-                READ_WRITE | PRESENT | DESCRIPTOR_TYPE | PRIVILEGE0 | PRIVILEGE1,
-                READ_WRITE | PRESENT | DESCRIPTOR_TYPE | PRIVILEGE0 | PRIVILEGE1 | LONG_MODE_CODE | EXECUTABLE,
-                tss_desc,
-                0xffff_ffff,
-            };
-
-            gdt_desc: struct {
-                limit: u16;
-                base: *Global_Descriptor_Table #align 2;
-            }
-
-            gdt_desc.limit = size_of(Global_Descriptor_Table);
-            gdt_desc.base = *global_descriptor_table;
-            pointer := *gdt_desc;
-            #asm { lgdt [pointer]; }
-
-            #bytes .[
-                0x66, 0xb8, 0x28, 0x00, // mov ax, 0x28
-                0x0f, 0x00, 0xd8        // ltr ax
-            ];
-
-            init_segment_registers();
-        }
-
-        {
-            // Interrupt descriptor table
-            idt_desc: struct {
-                limit: u16;
-                base: *Interrupt_Gate_Descriptor #align 2;
-            }
-
-            idt_desc.limit = size_of(type_of(interrupt_descriptor_table));
-            idt_desc.base = interrupt_descriptor_table.data;
-
-            pointer := *idt_desc;
-            #asm { lidt [pointer]; }
-
-            next_free_interrupt_gate = 32; // Sequentially allocating interrupt gates, starting after the ISA exceptions
-        }
+        bootstrap_processor = array_add(*processor_cores);
+        init_processor_core(bootstrap_processor);
 
         rsdp := cast(*Acpi_RSDP__Root_System_Description_Pointer) boot_data.acpi_rsdp;
         acpi_version = rsdp.revision;
@@ -259,7 +207,7 @@ kernel_entry :: () #no_context {
         apic_stuff();
         initialize_hpet();
 
-        for 1..10 {
+        if false for 1..10 {
             // Calibrate Local APIC timer using HPET
             hpet_configure_timer(timer_index = 1, frequency = 10, periodic = false);
             hpet_restart();
@@ -282,14 +230,84 @@ kernel_entry :: () #no_context {
         //     log_error("uACPI initalize failed with status \"%\"", acpi_init_result);
         // }
 
-        enable_cpu_features();
-
-        find_all_pci_devices();
+        // find_all_pci_devices();
 
         for pci_devices {
             print("Device at 0x%, %\n", cast(*void) it.configuration_space, it.configuration_space.class_code);
         }
 
+        start_multitasking();
+    }
+
+    while true #asm {
+        hlt;
+    }
+}
+
+init_processor_core :: (using core: *X64_Core) #no_context {
+    {
+        // Global descriptor table
+
+        // Use IOPB to give user mode access to IO ports for now
+        memset(task_state_segment.bitmap.data, 0, 8192);
+        task_state_segment.iopb = size_of(Task_State_Segment);
+
+        tss_desc: System_Segment_Descriptor;
+        tss_address := cast(u64) *task_state_segment;
+
+        tss_desc.segment_limit = size_of(Tss_With_Iopb);
+        tss_desc.base_address_0 = cast(u16)  tss_address;
+        tss_desc.base_address_1 = cast(u8)  (tss_address >> 16);
+        tss_desc.base_address_2 = cast(u8)  (tss_address >> 24);
+        tss_desc.base_address_3 = cast(u32) (tss_address >> 32);
+        tss_desc.flags_0        = 0b1_00_0_1001; // type=TSS non-busy | PRESENT
+
+        using Gdt_Entry_Flags;
+
+        global_descriptor_table = Global_Descriptor_Table.{
+            0x0,
+            READ_WRITE | PRESENT | DESCRIPTOR_TYPE | LONG_MODE_CODE | EXECUTABLE,
+            READ_WRITE | PRESENT | DESCRIPTOR_TYPE,
+            READ_WRITE | PRESENT | DESCRIPTOR_TYPE | PRIVILEGE0 | PRIVILEGE1,
+            READ_WRITE | PRESENT | DESCRIPTOR_TYPE | PRIVILEGE0 | PRIVILEGE1 | LONG_MODE_CODE | EXECUTABLE,
+            tss_desc,
+            0xffff_ffff,
+        };
+
+        gdt_desc: struct {
+            limit: u16;
+            base: *Global_Descriptor_Table #align 2;
+        }
+
+        gdt_desc.limit = size_of(Global_Descriptor_Table);
+        gdt_desc.base = *global_descriptor_table;
+        pointer := *gdt_desc;
+        #asm { lgdt [pointer]; }
+
+        #bytes .[
+            0x66, 0xb8, 0x28, 0x00, // mov ax, 0x28
+            0x0f, 0x00, 0xd8        // ltr ax
+        ];
+
+        init_segment_registers :: () #foreign Interrupts;
+        init_segment_registers();
+    }
+
+    {
+        // Interrupt descriptor table
+        idt_desc: struct {
+            limit: u16;
+            base: *Interrupt_Gate_Descriptor #align 2;
+        }
+
+        idt_desc.limit = size_of(type_of(kernel_globals.interrupt_descriptor_table));
+        idt_desc.base = kernel_globals.interrupt_descriptor_table.data;
+
+        pointer := *idt_desc;
+        #asm { lidt [pointer]; }
+    }
+
+    {
         // Enable syscalls
 
         star := (cast(u64) Segment_Selector.RING0_DATA) << 48;
@@ -305,13 +323,9 @@ kernel_entry :: () #no_context {
         efer := read_msr(.EFER__extended_features);
         efer |= EFER_SCE__syscall_enable;
         write_msr(.EFER__extended_features, efer);
-
-        start_multitasking();
     }
 
-    while true #asm {
-        hlt;
-    }
+    enable_cpu_features();
 }
 
 bluescreen :: (loc := #caller_location) #no_context {

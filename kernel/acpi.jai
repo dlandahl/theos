@@ -26,15 +26,6 @@ Acpi_Table_Header :: struct {
     // Note that this is only aligned to 4 bytes, so if you put this in a struct followed by a u64, it will be wrong.
 } #no_padding
 
-Acpi_FADT__Fixed_Description_Table :: struct {
-    #as header: Acpi_Table_Header;
-    firmware_ctrl: u32;
-    dsdt_address: u32;
-
-    // Todo: doesn't handle 64bit dsdt address
-    // https://uefi.org/htmlspecs/ACPI_Spec_6_4_html/05_ACPI_Software_Programming_Model/ACPI_Software_Programming_Model.html?highlight=dsdt#fadt-format
-}
-
 find_acpi_table :: (signature: string) -> *Acpi_Table_Header {
     table_size := kernel_globals.root_acpi_table.length - size_of(Acpi_Table_Header);
 
@@ -224,8 +215,8 @@ apic_stuff :: () {
     // Iterate interrupt controller structures
     //
 
-    bootstrap_processor_local_apic_id := read_apic_register(.APIC_ID);
-    other_apic_ids: [..] u32;
+    kernel_globals.bootstrap_processor.local_apic_id = read_apic_register(.APIC_ID) >> 24;
+    other_local_apic_ids: [..] u32;
 
     cursor := cast(u64) acpi_header + size_of(Acpi_MADT);
 
@@ -237,14 +228,14 @@ apic_stuff :: () {
           case .LOCAL_APIC;
             lapic_ics := cast(*Acpi_MADT.Ics_Local_Apic) ics;
 
-            if lapic_ics.apic_id == bootstrap_processor_local_apic_id {
+            if lapic_ics.apic_id == kernel_globals.bootstrap_processor.local_apic_id {
                 continue;
             }
 
             // Apparently we should be able to use the ONLINE_CAPABLE bit in the ics flags to determine if
             // this processor core is usable, but for some reason it's always 0 in Qemu and Vbox.
 
-            array_add(*other_apic_ids, lapic_ics.apic_id);
+            array_add(*other_local_apic_ids, lapic_ics.apic_id);
 
           case .IO_APIC;
             assert(kernel_globals.io_apic == null);
@@ -268,7 +259,12 @@ apic_stuff :: () {
         sti;
     }
 
-    for other_apic_ids print("Found APIC ID: %\n", it);
+    for other_local_apic_ids {
+        new_core := array_add(*kernel_globals.processor_cores);
+
+        new_core.local_apic_id = it;
+        new_core.processor_id = it_index + 1; // BSP is ID 0
+    }
 
     // Load the 16 bit AP initialization routine from static memory
     memcpy(cast(*void) 0x8000 + DIRECT_MAPPING_BASE, ap_startup_bin.data, 4096);
@@ -284,10 +280,10 @@ apic_stuff :: () {
     ap_startup_data.entry_point = cast(*void) ap_entry_point;
     ap_startup_data.pml4 = cast(u32) kernel_globals.boot_data.page_tables.pml4.data;
 
-    for other_apic_ids {
+    for other_local_apic_ids {
         // This lock is to ensure that APs have time to copy their stack's base address into their stack register before the next AP is started up.
         // Maybe if processors could use their APIC ID to find their stack memory it would be faster
-        acquire(*ap_stack_lock);
+        acquire(*ap_startup_spinlock);
 
         stack := alloc_block(*kernel_globals.physical_block_allocator, 0x1_0000) + DIRECT_MAPPING_BASE;
         ap_startup_data.stack = stack;
@@ -311,52 +307,28 @@ ap_startup_bin :: #run,host -> [] u8 {
     return add_global_data(cast([] u8) code, .WRITABLE);
 }
 
-ap_stack_lock: Spinlock;
+ap_startup_spinlock: Spinlock;
 
 ap_entry_point :: () #c_call {
     using kernel_globals;
 
-    release(*ap_stack_lock);
+    release(*ap_startup_spinlock);
 
-    {
-        gdt_desc: struct {
-            limit: u16;
-            base: *Global_Descriptor_Table #align 2;
+    my_local_apic_id := read_apic_register(.APIC_ID) >> 24;
+
+    for* processor_cores {
+        if it.local_apic_id == my_local_apic_id {
+            init_processor_core(it);
+            break;
         }
-
-        gdt_desc.limit = size_of(Global_Descriptor_Table);
-        gdt_desc.base = *global_descriptor_table;
-        pointer := *gdt_desc;
-        #asm { lgdt [pointer]; }
-
-        init_segment_registers();
     }
 
-    {
-        idt_desc: struct {
-            limit: u16;
-            base: *Interrupt_Gate_Descriptor #align 2;
-        }
+    write_string("Initialized a CPU core.\n");
 
-        idt_desc.limit = size_of(type_of(interrupt_descriptor_table));
-        idt_desc.base = interrupt_descriptor_table.data;
-
-        pointer := *idt_desc;
-        #asm { lidt [pointer]; }
+    while true #asm {
+        cli; hlt;
     }
-
-    apic_id := read_apic_register(.APIC_ID);
-
-    acquire(*ap_startup_message_lock);
-    write_string("AP Startup - ");
-    write_number(apic_id, base=16);
-    write_string(" -\n");
-    release(*ap_startup_message_lock);
-
-    while true #asm { cli; hlt; }
 }
-
-ap_startup_message_lock: Spinlock;
 
 
 

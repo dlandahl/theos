@@ -48,7 +48,7 @@ start_multitasking :: () {
         lapic_timer_gate := allocate_interrupt_gate();
         register_interrupt_gate(int__local_apic_timer_interrupt, lapic_timer_gate);
 
-        write_apic_register(.TIC__TIMER_INITIAL, 0x0080_0000);
+        write_apic_register(.TIC__TIMER_INITIAL, 0x0280_0000);
 
         lvtt := cast(*Acpi_Lvt) *read_apic_register(.LVT__TIMER);
         lvtt.vector = cast(u8) lapic_timer_gate;
