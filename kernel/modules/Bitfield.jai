@@ -1,29 +1,95 @@
 
-#import "Basic";
+/*
+
+Usage example:
+
+    Gate_Descriptor_Flags :: enum u16 {
+        interrupt_stack_table :: 3;
+        ignored               :: 5;
+        gate_type             :: 4;
+        always_zero           :: 1;
+        protection_level      :: 2;
+        present               :: 1;
+    }
+
+    main :: () {
+        set :: bitfield_set; // Optional
+
+        gate_flags: Gate_Descriptor_Flags;
+
+        set(*gate_flags, .protection_level, 3);
+        set(*gate_flags, .interrupt_stack_table, 1);
+
+        print("Flags is %\n", formatInt(cast(int) gate_flags, base=2));
+    }
+
+*/
+
+#scope_export
+
+bitfield_set :: (bitfield: *$B, flag: B, value: s64, $loc := #caller_location, $call := #caller_code) {
+    bit_mask, bit_offset := #run calculate_mask_and_offset(B, loc, call);
+
+    max_value := bit_mask >> bit_offset;
+    assert(value <= max_value, "The bitfield slot does not have enough bits to represent the value %. It can maximally represent %.", value, max_value);
+
+    bitfield.* &= cast,no_check(B) (~bit_mask);
+    bitfield.* |= cast,no_check(B) ((value << bit_offset) & bit_mask);
+}
+
+#scope_module
+
 #import "Compiler";
+#import "Basic";
 
-bitfield_0  :: 0x100;
-bitfield_1  :: 0x200;
-bitfield_2  :: 0x300;
-bitfield_3  :: 0x400;
-bitfield_4  :: 0x500;
-bitfield_5  :: 0x600;
-bitfield_6  :: 0x700;
-bitfield_7  :: 0x800;
-bitfield_8  :: 0x900;
-bitfield_9  :: 0x1000;
-bitfield_10 :: 0x1100;
+calculate_mask_and_offset :: (bitfield: Type, loc: Source_Code_Location, call: Code) -> int, int {
+    ti := cast(*Type_Info_Enum) bitfield;
+    validate_bitfield(ti, loc);
 
+    bit_offset: int;
 
+    nodes := compiler_get_nodes(call);
+    procedure_call := cast(*Code_Procedure_Call) nodes;
+    expression := procedure_call.arguments_unsorted[1].expression;
 
+    // This procedure should have been called with either an unary or a binary enum dereference as the second argument.
+    operator_type: Operator_Type.loose;
 
-Gate_Descriptor_Flags :: enum u16 {
-    interrupt_stack_table :: 3 |bitfield_0;
-    ignored               :: 5 |bitfield_1;
-    gate_type             :: 4 |bitfield_2;
-    always_zero           :: 1 |bitfield_3;
-    protection_level      :: 2 |bitfield_4;
-    present               :: 1 |bitfield_5;
+    if expression.kind == .UNARY_OPERATOR {
+        unary := cast(*Code_Unary_Operator) expression;
+        operator_type = unary.operator_type;
+        expression = unary.subexpression;
+    } else if expression.kind == .BINARY_OPERATOR {
+        binary := cast(*Code_Binary_Operator) expression;
+        operator_type = binary.operator_type;
+        expression = binary.left;
+    }
+
+    if operator_type != #char "." || expression.kind != .IDENT {
+        error := tprint("Here, please pass a single field from the bitfield \"%\"", ti.name);
+        compiler_report(error, make_location(expression));
+    }
+
+    ident := cast(*Code_Ident) expression;
+    field_name := ident.name;
+
+    bit_count: int;
+
+    for ti.names {
+        if it == field_name {
+            bit_count = ti.values[it_index];
+            break;
+        }
+
+        bit_offset += ti.values[it_index] % 0x100;
+    }
+
+    bit_mask: int = 1;
+    for 1..bit_count bit_mask *= 2;
+    bit_mask -= 1;
+
+    bit_mask <<= bit_offset;
+    return bit_mask, bit_offset;
 }
 
 validate_bitfield :: (bitfield: *Type_Info, loc: Source_Code_Location) {
@@ -35,17 +101,9 @@ validate_bitfield :: (bitfield: *Type_Info, loc: Source_Code_Location) {
     ti := cast(*Type_Info_Enum) bitfield;
 
     total_width: int;
+
     for ti.values {
         bit_width := it % 0x100;
-
-        expected_tag := (it_index+1) * 0x100;
-        actual_tag   := it - bit_width;
-
-        if expected_tag != actual_tag {
-            error_message := tprint("Bitfield \"%\" tags are not sequentially assigned. The tag at index %2 should have been bitfield_%2.", ti.name, it_index);
-            compiler_report(error_message, loc);
-        }
-
         total_width += bit_width;
     }
 
@@ -54,50 +112,4 @@ validate_bitfield :: (bitfield: *Type_Info, loc: Source_Code_Location) {
         error_message := tprint("Bitfield \"%\" values do not sum to the width of its integer type. The total width was %, expected %", ti.name, total_width, expected_width);
         compiler_report(error_message, loc);
     }
-}
-
-bitfield_set :: (bitfield: *$B, $flag: B, value: s64, $loc := #caller_location, call := #caller_code) {
-
-    bit_mask, bit_offset := #run -> int, int {
-        ti := type_info(B);
-        validate_bitfield(ti, loc);
-
-        bit_offset: int;
-
-        found: bool;
-        for ti.values {
-            if it == cast(s64) flag {
-                found = true;
-                break;
-            }
-
-            bit_offset += it % 0x100;
-        }
-
-        if !found {
-            error_message := tprint("Trying to set a field on bitfield \"%\", that it doesn't contain.", ti.name);
-            compiler_report(error_message, loc);
-        }
-
-        bit_count := (cast(int) flag % 0x100);
-
-        bit_mask: int = 1;
-        for 1..bit_count bit_mask *= 2;
-        bit_mask -= 1;
-
-        bit_mask <<= bit_offset;
-        return bit_mask, bit_offset;
-    };
-
-    bitfield.* &= cast,no_check(B) (~bit_mask);
-    bitfield.* |= cast,no_check(B) ((value << bit_offset) & bit_mask);
-}
-
-set :: bitfield_set;
-
-#run {
-    flags: Gate_Descriptor_Flags;
-    bitfield_set(*flags, .protection_level, 3);
-
-    print("Flags is %\n", formatInt(cast(int) flags, base=2));
 }
