@@ -47,15 +47,19 @@ Interrupt_Stack :: struct (with_error_code := false) {
     rbx:  u64;
     rax:  u64;
 
-#if with_error_code {
-    error_code: u64;
-}
+    Architectural_Part :: struct {
+        #if with_error_code {
+            error_code: u64;
+        }
 
-    ip:    *void;
-    cs:    Segment_Selector;
-    flags: X64_Flags;
-    sp:    *void;
-    ss:    Segment_Selector;
+        ip:    *void;
+        cs:    Segment_Selector;
+        flags: X64_Flags;
+        sp:    *void;
+        ss:    Segment_Selector;
+    }
+
+    using arch: Architectural_Part;
 }
 
 Gate_Descriptor_Flags :: enum u8 {

@@ -29,13 +29,17 @@ Todo: would like to have this syntax:
 
 */
 
+#module_parameters(ENABLE_RUNTIME_ERROR_CHECKS := true);
+
 #scope_export
 
 bitfield_set :: (bitfield: *$B, flag: B, value: s64, $loc := #caller_location, $call := #caller_code) {
     bit_mask, bit_offset := #run calculate_mask_and_offset(B, loc, call);
 
-    max_value := bit_mask >> bit_offset;
-    assert(value <= max_value, "The bitfield slot does not have enough bits to represent the value %. It can maximally represent %.", value, max_value);
+    #if ENABLE_RUNTIME_ERROR_CHECKS {
+        max_value := bit_mask >> bit_offset;
+        assert(value <= max_value, "The bitfield slot does not have enough bits to represent the value %. It can maximally represent %.", value, max_value);
+    }
 
     bitfield.* &= cast,no_check(B) (~bit_mask);
     bitfield.* |= cast,no_check(B) ((value << bit_offset) & bit_mask);
@@ -59,14 +63,19 @@ calculate_mask_and_offset :: (bitfield: Type, loc: Source_Code_Location, call: C
     // This procedure should have been called with either an unary or a binary enum dereference as the second argument.
     operator_type: Operator_Type.loose;
 
-    if expression.kind == .UNARY_OPERATOR {
+    if expression.kind == {
+      case .UNARY_OPERATOR;
         unary := cast(*Code_Unary_Operator) expression;
         operator_type = unary.operator_type;
         expression = unary.subexpression;
-    } else if expression.kind == .BINARY_OPERATOR {
+
+      case .BINARY_OPERATOR;
         binary := cast(*Code_Binary_Operator) expression;
         operator_type = binary.operator_type;
         expression = binary.left;
+
+      case .IDENT;
+        operator_type = #char ".";
     }
 
     if operator_type != #char "." || expression.kind != .IDENT {
@@ -78,14 +87,21 @@ calculate_mask_and_offset :: (bitfield: Type, loc: Source_Code_Location, call: C
     field_name := ident.name;
 
     bit_count: int;
+    found: bool;
 
     for ti.names {
         if it == field_name {
             bit_count = ti.values[it_index];
+            found = true;
             break;
         }
 
         bit_offset += ti.values[it_index] % 0x100;
+    }
+
+    if !found {
+        error := tprint("The name \"%\" is not a field of the bitfield \"%\". (You can't use variables as the second argument to bitfield_set.)", field_name, ti.name);
+        compiler_report(error, make_location(expression));
     }
 
     bit_mask: int = 1;
@@ -107,11 +123,11 @@ validate_bitfield :: (bitfield: *Type_Info, loc: Source_Code_Location) {
     total_width: int;
 
     for ti.values {
-        bit_width := it % 0x100;
-        total_width += bit_width;
+        total_width += it;
     }
 
     expected_width := bitfield.runtime_size*8;
+
     if total_width != expected_width {
         error_message := tprint("Bitfield \"%\" values do not sum to the width of its integer type. The total width was %, expected %", ti.name, total_width, expected_width);
         compiler_report(error_message, loc);

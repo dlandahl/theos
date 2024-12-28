@@ -132,9 +132,9 @@ APIC_Register :: enum {
     EXTENDED_FEATURE          :: 0x400;
 }
 
-read_apic_register :: (register: APIC_Register) -> u32 #no_context {
+read_apic_register :: (register: APIC_Register, loc := #caller_location) -> u32 #no_context {
     if kernel_globals.apic == null {
-        bluescreen();
+        bluescreen(loc);
     }
 
     return << cast(*u32) (kernel_globals.apic + cast(u64) register);
@@ -166,7 +166,7 @@ Acpi_Lvt :: struct {
     };
 }
 
-apic_stuff :: () {
+initialize_apic :: () {
     register_interrupt_gate(int__fault_0, 0, true);
     register_interrupt_gate(int__fault_1, 1, true);
     register_interrupt_gate(int__fault_2, 2, true);
@@ -215,8 +215,8 @@ apic_stuff :: () {
     // Iterate interrupt controller structures
     //
 
-    kernel_globals.bootstrap_processor.local_apic_id = read_apic_register(.APIC_ID) >> 24;
-    other_local_apic_ids: [..] u32;
+    bootstrap_processor := get_bootstrap_processor();
+    bootstrap_processor.local_apic_id = read_apic_register(.APIC_ID) >> 24;
 
     cursor := cast(u64) acpi_header + size_of(Acpi_MADT);
 
@@ -228,14 +228,17 @@ apic_stuff :: () {
           case .LOCAL_APIC;
             lapic_ics := cast(*Acpi_MADT.Ics_Local_Apic) ics;
 
-            if lapic_ics.apic_id == kernel_globals.bootstrap_processor.local_apic_id {
+            if lapic_ics.apic_id == bootstrap_processor.local_apic_id {
                 continue;
             }
 
             // Apparently we should be able to use the ONLINE_CAPABLE bit in the ics flags to determine if
             // this processor core is usable, but for some reason it's always 0 in Qemu and Vbox.
 
-            array_add(*other_local_apic_ids, lapic_ics.apic_id);
+            new_core := array_add(*kernel_globals.processor_cores);
+
+            new_core.local_apic_id = lapic_ics.apic_id;
+            new_core.id = kernel_globals.processor_cores.count-1;
 
           case .IO_APIC;
             assert(kernel_globals.io_apic == null);
@@ -254,17 +257,9 @@ apic_stuff :: () {
             // Todo
         }
     }
+}
 
-    #asm {
-        sti;
-    }
-
-    for other_local_apic_ids {
-        new_core := array_add(*kernel_globals.processor_cores);
-
-        new_core.local_apic_id = it;
-        new_core.processor_id = it_index + 1; // BSP is ID 0
-    }
+startup_application_processors :: () {
 
     // Load the 16 bit AP initialization routine from static memory
     memcpy(cast(*void) 0x8000 + DIRECT_MAPPING_BASE, ap_startup_bin.data, 4096);
@@ -280,15 +275,24 @@ apic_stuff :: () {
     ap_startup_data.entry_point = cast(*void) ap_entry_point;
     ap_startup_data.pml4 = cast(u32) kernel_globals.boot_data.page_tables.pml4.data;
 
-    for other_local_apic_ids {
+    bsp := get_bootstrap_processor();
+
+    for* kernel_globals.processor_cores {
+        if it == bsp {
+            continue;
+        }
+
         // This lock is to ensure that APs have time to copy their stack's base address into their stack register before the next AP is started up.
         // Maybe if processors could use their APIC ID to find their stack memory it would be faster
         acquire(*ap_startup_spinlock);
 
-        stack := alloc_block(*kernel_globals.physical_block_allocator, 0x1_0000) + DIRECT_MAPPING_BASE;
-        ap_startup_data.stack = stack;
+        acquire(*kernel_globals.memory_spinlock);
+        stack := alloc_block(*kernel_globals.physical_block_allocator, 0x1_0000) + 0x1_0000;
+        release(*kernel_globals.memory_spinlock);
 
-        write_apic_register(.DES__INTERRUPT_DEST, xx it << 24);
+        ap_startup_data.stack = stack + DIRECT_MAPPING_BASE;
+
+        write_apic_register(.DES__INTERRUPT_DEST, it.local_apic_id << 24);
 
         command: u32;
         command = (0b101 << 8) | (1 << 14); // INIT IPI
@@ -314,20 +318,30 @@ ap_entry_point :: () #c_call {
 
     release(*ap_startup_spinlock);
 
+    c: Context;
+
+    push_context c {
+        init_processor_core();
+
+        core_begin_multitasking();
+
+        #asm { sti; }
+
+        while true yield();
+    }
+}
+
+get_current_core :: (loc := #caller_location) -> *X64_Core #no_context {
     my_local_apic_id := read_apic_register(.APIC_ID) >> 24;
 
-    for* processor_cores {
+    for* kernel_globals.processor_cores {
         if it.local_apic_id == my_local_apic_id {
-            init_processor_core(it);
-            break;
+            return it;
         }
     }
 
-    write_string("Initialized a CPU core.\n");
-
-    while true #asm {
-        cli; hlt;
-    }
+    bluescreen(loc);
+    return null;
 }
 
 
@@ -497,6 +511,24 @@ hpet_restart :: () {
     write(.CONFIG, config | ENABLE_BIT);
 }
 
+calibrate_apic :: () {
+    for 1..10 {
+        // Calibrate Local APIC timer using HPET
+        hpet_configure_timer(timer_index = 1, frequency = 10, periodic = false);
+        hpet_restart();
+
+        write_apic_register(.TIC__TIMER_INITIAL, 0xffff_ffff);
+        write_apic_register(.DV__TIMER_DIVIDE, 0b011);
+
+        while kernel_globals.high_precision_timer.counters[1] == 0 {
+            #asm { hlt; }
+        }
+
+        apic_ticks_elapsed := 0xffff_ffff - read_apic_register(.TCC__TIMER_CURRENT);
+        print("APIC ticks in 100ms: %\n", apic_ticks_elapsed);
+    }
+}
+
 #program_export hpet_timer0_interrupt :: (data: *Interrupt_Stack()) #c_call {
     kernel_globals.high_precision_timer.counters[0] += 1;
     write_apic_register(.EOI__END_OF_INTERRUPT, 0);
@@ -510,32 +542,62 @@ hpet_restart :: () {
 
 
 #program_export fault_0 :: (stack: *void) #c_call {
-    write_string("Something bad happened (0)\n");
+    core := get_current_core();
+
+    write_string("Something bad happened (0) on core ");
+    write_number(core.id);
+    write_string("\n");
+
     bluescreen();
 } @InterruptRoutine
 
 #program_export fault_1 :: (stack: *void) #c_call {
-    write_string("Something bad happened (1)\n");
+    core := get_current_core();
+
+    write_string("Something bad happened (1) on core ");
+    write_number(core.id);
+    write_string("\n");
+
     bluescreen();
 } @InterruptRoutine
 
 #program_export fault_2 :: (stack: *void) #c_call {
-    write_string("Something bad happened (2)\n");
+    core := get_current_core();
+
+    write_string("Something bad happened (2) on core ");
+    write_number(core.id);
+    write_string("\n");
+
     bluescreen();
 } @InterruptRoutine
 
 #program_export fault_3 :: (stack: *void) #c_call {
-    write_string("Something bad happened (3)\n");
+    core := get_current_core();
+
+    write_string("Something bad happened (3) on core ");
+    write_number(core.id);
+    write_string("\n");
+
     bluescreen();
 } @InterruptRoutine
 
 #program_export fault_4 :: (stack: *void) #c_call {
-    write_string("Something bad happened (4)\n");
+    core := get_current_core();
+
+    write_string("Something bad happened (4) on core ");
+    write_number(core.id);
+    write_string("\n");
+
     bluescreen();
 } @InterruptRoutine
 
 #program_export fault_5 :: (stack: *void) #c_call {
-    write_string("Something bad happened (5)\n");
+    core := get_current_core();
+
+    write_string("Something bad happened (5) on core ");
+    write_number(core.id);
+    write_string("\n");
+
     bluescreen();
 } @InterruptRoutine
 
@@ -554,32 +616,62 @@ hpet_restart :: () {
 } @InterruptRoutine
 
 #program_export fault_7 :: (stack: *void) #c_call {
-    write_string("Something bad happened (7)\n");
+    core := get_current_core();
+
+    write_string("Something bad happened (7) on core ");
+    write_number(core.id);
+    write_string("\n");
+
     bluescreen();
 } @InterruptRoutine
 
 #program_export fault_8 :: (stack: *void) #c_call {
-    write_string("Something bad happened (8)\n");
+    core := get_current_core();
+
+    write_string("Something bad happened (8) on core ");
+    write_number(core.id);
+    write_string("\n");
+
     bluescreen();
 } @InterruptRoutine
 
 #program_export fault_9 :: (stack: *void) #c_call {
-    write_string("Something bad happened (9)\n");
+    core := get_current_core();
+
+    write_string("Something bad happened (9) on core ");
+    write_number(core.id);
+    write_string("\n");
+
     bluescreen();
 } @InterruptRoutine
 
 #program_export fault_10 :: (stack: *void) #c_call {
-    write_string("Something bad happened (10)\n");
+    core := get_current_core();
+
+    write_string("Something bad happened (10) on core ");
+    write_number(core.id);
+    write_string("\n");
+
     bluescreen();
 } @InterruptRoutine
 
 #program_export fault_11 :: (stack: *void) #c_call {
-    write_string("Something bad happened (11)\n");
+    core := get_current_core();
+
+    write_string("Something bad happened (11) on core ");
+    write_number(core.id);
+    write_string("\n");
+
     bluescreen();
 } @InterruptRoutine
 
 #program_export fault_12 :: (stack: *void) #c_call {
-    write_string("Something bad happened (12)\n");
+    core := get_current_core();
+
+    write_string("Something bad happened (12) on core ");
+    write_number(core.id);
+    write_string("\n");
+
     bluescreen();
 } @InterruptRoutine
 
@@ -589,27 +681,47 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
     c.print_style.default_format_int.base = 16;
 
     push_context c {
-        print("General Protection Fault.\n");
+        core := get_current_core();
+        print("General Protection Fault    (On core %)\n", core.id);
         print("RIP: 0x%\n", stack.ip);
         print("RSP: 0x%\n", stack.sp);
-        print("SS: 0x%\n", stack.ss);
-        print("CS: 0x%\n", stack.cs);
+        print("SS: %\n", stack.ss);
+        print("CS: %\n", stack.cs);
         print("Error Code: 0x%\n", stack.error_code);
 
         print("Stack trace of the main thread:\n");
         print_stack_trace(kernel_globals.main_thread_context.stack_trace);
 
+        print("Outer stack:\n");
+        outer := cast(*Interrupt_Stack().Architectural_Part) stack.sp + 1;
+        print("RIP: 0x%\n", outer.ip);
+        print("RSP: 0x%\n", outer.sp);
+        print("SS: %\n", outer.ss);
+        print("CS: %\n", outer.cs);
         bluescreen();
     }
 } @InterruptRoutine
 
 #program_export fault_14 :: (stack: *void) #c_call {
-    write_string("Something bad happened (14)\n");
+    core := get_current_core();
+
+    write_string("Something bad happened (14) on core ");
+    write_number(core.id);
+    write_string("\n");
+
+    push_context kernel_globals.main_thread_context {
+        print_stack_trace(kernel_globals.main_thread_context.stack_trace);
+    }
     bluescreen();
 } @InterruptRoutine
 
 #program_export fault_15 :: (stack: *void) #c_call {
-    write_string("Something bad happened (15)\n");
+    core := get_current_core();
+
+    write_string("Something bad happened (15) on core ");
+    write_number(core.id);
+    write_string("\n");
+
     bluescreen();
 } @InterruptRoutine
 
@@ -637,8 +749,7 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
 }
 
 #program_export uacpi_kernel_get_rsdp :: (rsdp_address: *uacpi_phys_addr) -> uacpi_status #c_call {
-    // We can cast this to a physical address, because the RSDP is stored in identity-mapped UEFI memory.
-    rsdp_address.* = cast(uacpi_phys_addr) kernel_globals.acpi_rsdp;
+    rsdp_address.* = cast(uacpi_phys_addr) kernel_globals.acpi_rsdp + DIRECT_MAPPING_BASE;
     return .OK;
 }
 

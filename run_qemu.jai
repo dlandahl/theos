@@ -2,6 +2,7 @@
 #import "Process";
 #import "Compiler";
 #import "File";
+#import "Basic";
 
 #run {
     set_build_options_dc(.{ do_output = false });
@@ -19,12 +20,12 @@
             -smp 8 
     QEMU_CMD);
 
-    // -d int
+        // -d int
 
     run_command(.. command);
 }
 
-#run {
+#if false #run {
     // Handy page table calculator
     x := cast(u64) 256 * 1024 * 1024;
 

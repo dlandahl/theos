@@ -14,13 +14,13 @@ set :: bitfield_set;
 #load "multitasking.jai";
 
 X64_Core :: struct {
+    task_state_segment: Tss_With_Iopb #align 0x80;
+
     // Align to cache block so no extra memory accesses are required on context switch
     global_descriptor_table: Global_Descriptor_Table #align 64;
 
-    task_state_segment: Tss_With_Iopb #align 0x80;
-
     local_apic_id: u32;
-    processor_id: int;
+    id: int;
 }
 
 Kernel_Globals :: struct {
@@ -37,7 +37,7 @@ Kernel_Globals :: struct {
     interrupt_descriptor_table: [256] Interrupt_Gate_Descriptor #align 16;
     next_free_interrupt_gate: int;
 
-    using bootstrap_processor: *X64_Core;
+    // It's not good how we're using resizable arrays in various places that get reallocated and make behavior less consistent and predictable. Better to use something like the Bucket_Array
     processor_cores: [..] X64_Core;
 
     apic: *void;
@@ -50,6 +50,12 @@ Kernel_Globals :: struct {
 
     main_thread_context: Context;
     scheduler: Scheduler;
+
+    memory_spinlock: Spinlock;
+}
+
+get_bootstrap_processor :: () -> *X64_Core {
+    return *kernel_globals.processor_cores[0];
 }
 
 kernel_globals: Kernel_Globals;
@@ -63,29 +69,28 @@ kernel_entry :: () #no_context {
     // We should avoid using the UEFI identity map because we'll need to get rid of it once we run user processes in low memory.
     boot_data = cast(*Boot_Data) (Boot_Data.BASE_ADDRESS + DIRECT_MAPPING_BASE);
 
-    main_thread_context.assertion_failed = (location: Source_Code_Location, message: string) -> bool {
-        write_string("Assertion failure");
-        if message.count {
-            write_strings(": ", message);
+    // Init memory allocation
+    pool_initted := false;
+    for 0..boot_data.memory_map_entries_used-1 {
+        entry := boot_data.memory_map[it];
+
+        if entry.pages >= 1024 {
+            if !pool_initted {
+                init_physical_page_pool(entry);
+                pool_initted = true;
+            } else {
+                init_block_allocator(*kernel_globals.physical_block_allocator, xx entry.address / 4096, xx entry.pages);
+                break;
+            }
         }
-        write_string("\n");
 
-        bluescreen(location);
-        return true;
-    };
-
-    main_thread_context.logger = (message: string, data: *void, info: Log_Info) {
-        write_string(message);
-        if message[message.count-1] != #char "\n" {
-            write_string("\n");
+        if it == boot_data.memory_map_entries_used-1 {
+            write_string("Not enough usable contiguous physical memory found.\n");
+            bluescreen();
         }
-    };
+    }
 
-    set_initial_data(*temporary_storage, TEMPORARY_STORAGE_SIZE, temporary_storage_buffer.data);
-    main_thread_context.temporary_storage = *temporary_storage;
-
-    main_thread_context.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = 2;
-    main_thread_context.print_style.default_format_struct.use_newlines_if_long_form = true;
+    main_thread_context = make_kernel_context();
 
     push_context main_thread_context {
         using framebuffer;
@@ -99,99 +104,20 @@ kernel_entry :: () #no_context {
             }
         }
 
-        // Init memory allocation
-        pool_initted := false;
-        for 0..boot_data.memory_map_entries_used-1 {
-            entry := boot_data.memory_map[it];
 
-            print("Free region at % (% KB)\n", formatInt(entry.address, base=16), entry.pages * 4);
+        // Put a virtual memory heap after the direct mapping
+        GB :: 0x4000_0000;
+        direct_mapping_size := boot_data.page_tables.direct_pd.count * GB;
 
-            if entry.pages >= 1024 {
-                if !pool_initted {
-                    init_physical_page_pool(entry);
-                    pool_initted = true;
-                } else {
-                    init_block_allocator(*kernel_globals.physical_block_allocator, xx entry.address / 4096, xx entry.pages);
-                    break;
-                }
-            }
+        heap_base := DIRECT_MAPPING_BASE + direct_mapping_size;
+        heap_size := 64 * GB;
 
-            if it == boot_data.memory_map_entries_used-1 {
-                print("Not enough usable contiguous physical memory found.\n");
-                bluescreen();
-            }
-        }
+        init_block_allocator(*virtual_block_allocator, heap_base / 4096, heap_size / 4096);
 
-        context.allocator.proc = (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
-            if mode == .ALLOCATE || mode == .RESIZE {
-                physical: u64;
 
-                use_block_allocator := size > 4096;
+        // Sequentially allocating interrupt gates, starting after the ISA exceptions
+        next_free_interrupt_gate = 32;
 
-                if use_block_allocator {
-                    // Todo: attempt to grow existing block in case of resize
-                    physical = alloc_block(*kernel_globals.physical_block_allocator, size);
-                } else {
-                    page := get_page_frame();
-                    physical = get_physical_address(page);
-                }
-
-                new := cast(*void) physical + DIRECT_MAPPING_BASE;
-
-                if old_size {
-                    memcpy(new, old_memory, old_size);
-                    #this(.FREE, old_size, 0, old_memory, null);
-                }
-
-                page := *kernel_globals.page_frames[physical / 4096];
-                page.flags |= ifx use_block_allocator then .ALLOCATOR_TAG_BLOCK else .ALLOCATOR_TAG_SINGLE_PAGE;
-
-                return new;
-            }
-
-            if mode == .FREE {
-                if old_memory == null {
-                    return null;
-                }
-
-                phys := cast(u64) old_memory - DIRECT_MAPPING_BASE;
-                index := phys / 4096;
-
-                page := *kernel_globals.page_frames[index];
-
-                if page.flags & .ALLOCATOR_TAG_BLOCK {
-                    free_block(*kernel_globals.physical_block_allocator, phys);
-                } else if page.flags & .ALLOCATOR_TAG_SINGLE_PAGE {
-                    release_page_frame(page);
-                } else {
-                    bluescreen();
-                }
-
-                page.flags &= ~(Page_Frame_Desc.Flags.ALLOCATOR_TAG_SINGLE_PAGE | .ALLOCATOR_TAG_BLOCK);
-            }
-
-            if mode == .CAPS {
-                return cast(*void) Allocator_Caps.FREE | .HINT_I_AM_A_GENERAL_HEAP_ALLOCATOR;
-            }
-
-            return null;
-        };
-
-        {
-            // Put a virtual memory heap after the direct mapping
-            GB :: 0x4000_0000;
-            direct_mapping_size := boot_data.page_tables.direct_pd.count * GB;
-
-            heap_base := DIRECT_MAPPING_BASE + direct_mapping_size;
-            heap_size := 64 * GB;
-
-            init_block_allocator(*virtual_block_allocator, heap_base / 4096, heap_size / 4096);
-        }
-
-        next_free_interrupt_gate = 32; // Sequentially allocating interrupt gates, starting after the ISA exceptions
-
-        bootstrap_processor = array_add(*processor_cores);
-        init_processor_core(bootstrap_processor);
 
         rsdp := cast(*Acpi_RSDP__Root_System_Description_Pointer) boot_data.acpi_rsdp;
         acpi_version = rsdp.revision;
@@ -204,51 +130,135 @@ kernel_entry :: () #no_context {
             root_acpi_table = xx (rsdp.rsdt_address + DIRECT_MAPPING_BASE);
         }
 
-        apic_stuff();
+        array_add(*processor_cores, .{});
+        init_processor_core(*processor_cores[0]);
+
+        initialize_apic();
+
         initialize_hpet();
 
-        if false for 1..10 {
-            // Calibrate Local APIC timer using HPET
-            hpet_configure_timer(timer_index = 1, frequency = 10, periodic = false);
-            hpet_restart();
+        initialize_scheduler();
 
-            write_apic_register(.TIC__TIMER_INITIAL, 0xffff_ffff);
-            write_apic_register(.DV__TIMER_DIVIDE, 0b011);
+        core_begin_multitasking();
 
-            while kernel_globals.high_precision_timer.counters[1] == 0 {
-                #asm { hlt; }
-            }
-
-            apic_ticks_elapsed := 0xffff_ffff - read_apic_register(.TCC__TIMER_CURRENT);
-            print("APIC ticks in 100ms: %\n", apic_ticks_elapsed);
+        acquire(*scheduler.spinlock);
+        for 1..17 {
+            new_task := create_task();
+            array_add(*scheduler.waiting_to_run, new_task);
         }
+        release(*scheduler.spinlock);
 
-        // uacpi_context_set_log_level(.DEBUG);
-        // 
-        // acpi_init_result := uacpi_initialize(0);
-        // if acpi_init_result != .OK {
-        //     log_error("uACPI initalize failed with status \"%\"", acpi_init_result);
-        // }
+        startup_application_processors();
 
-        // find_all_pci_devices();
-
-        for pci_devices {
-            print("Device at 0x%, %\n", cast(*void) it.configuration_space, it.configuration_space.class_code);
+        #asm { sti; }
+        while true {
+            yield();
         }
-
-        start_multitasking();
-    }
-
-    while true #asm {
-        hlt;
     }
 }
 
-init_processor_core :: (using core: *X64_Core) #no_context {
+make_kernel_context :: () -> Context #no_context {
+    c: Context;
+    
+    c.assertion_failed = (location: Source_Code_Location, message: string) -> bool {
+        write_string("Assertion failure");
+        if message.count {
+            write_strings(": ", message);
+        }
+        write_string("\n");
+
+        print_stack_trace(context.stack_trace);
+        bluescreen(location);
+        return true;
+    };
+
+    c.logger = (message: string, data: *void, info: Log_Info) {
+        write_string(message);
+        if message[message.count-1] != #char "\n" {
+            write_string("\n");
+        }
+    };
+
+    {
+        acquire(*kernel_globals.memory_spinlock);
+        ts_buffer_block := alloc_block(*kernel_globals.physical_block_allocator, 0x1000);
+        ts_buffer := cast(*void) ts_buffer_block + DIRECT_MAPPING_BASE;
+        c.temporary_storage = cast(*Temporary_Storage) ts_buffer;
+
+        set_initial_data(c.temporary_storage, 0x2_0000 - size_of(Temporary_Storage), ts_buffer + size_of(Temporary_Storage));
+        release(*kernel_globals.memory_spinlock);
+    }
+
+    c.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = 2;
+    c.print_style.default_format_struct.use_newlines_if_long_form = true;
+
+    c.allocator.proc = (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
+        Scoped_Acquire(*kernel_globals.memory_spinlock);
+
+        if mode == .ALLOCATE || mode == .RESIZE {
+            physical: u64;
+
+            use_block_allocator := size > 4096;
+
+            if use_block_allocator {
+                // Todo: attempt to grow existing block in case of resize
+                physical = alloc_block(*kernel_globals.physical_block_allocator, size);
+            } else {
+                page := get_page_frame();
+                physical = get_physical_address(page);
+            }
+
+            new := cast(*void) physical + DIRECT_MAPPING_BASE;
+
+            if old_size {
+                memcpy(new, old_memory, old_size);
+                #this(.FREE, old_size, 0, old_memory, null);
+            }
+
+            page := *kernel_globals.page_frames[physical / 4096];
+            page.flags |= ifx use_block_allocator then .ALLOCATOR_TAG_BLOCK else .ALLOCATOR_TAG_SINGLE_PAGE;
+
+            return new;
+        }
+
+        if mode == .FREE {
+            if old_memory == null {
+                return null;
+            }
+
+            phys := cast(u64) old_memory - DIRECT_MAPPING_BASE;
+            index := phys / 4096;
+
+            page := *kernel_globals.page_frames[index];
+
+            if page.flags & .ALLOCATOR_TAG_BLOCK {
+                free_block(*kernel_globals.physical_block_allocator, phys);
+            } else if page.flags & .ALLOCATOR_TAG_SINGLE_PAGE {
+                release_page_frame(page);
+            } else {
+                bluescreen();
+            }
+
+            page.flags &= ~(Page_Frame_Desc.Flags.ALLOCATOR_TAG_SINGLE_PAGE | .ALLOCATOR_TAG_BLOCK);
+        }
+
+        if mode == .CAPS {
+            return cast(*void) Allocator_Caps.FREE | .HINT_I_AM_A_GENERAL_HEAP_ALLOCATOR;
+        }
+
+        return null;
+    };
+
+    return c;
+}
+
+init_processor_core :: (using core: *X64_Core = null) #no_context {
+    if !core core = get_current_core();
+
     {
         // Global descriptor table
 
-        // Use IOPB to give user mode access to IO ports for now
+        // Use the IO Permission Bitmap to give user mode access to all IO ports for now
         memset(task_state_segment.bitmap.data, 0, 8192);
         task_state_segment.iopb = size_of(Task_State_Segment);
 
@@ -279,7 +289,7 @@ init_processor_core :: (using core: *X64_Core) #no_context {
             base: *Global_Descriptor_Table #align 2;
         }
 
-        gdt_desc.limit = size_of(Global_Descriptor_Table);
+        gdt_desc.limit = size_of(Global_Descriptor_Table)-1;
         gdt_desc.base = *global_descriptor_table;
         pointer := *gdt_desc;
         #asm { lgdt [pointer]; }
@@ -300,7 +310,7 @@ init_processor_core :: (using core: *X64_Core) #no_context {
             base: *Interrupt_Gate_Descriptor #align 2;
         }
 
-        idt_desc.limit = size_of(type_of(kernel_globals.interrupt_descriptor_table));
+        idt_desc.limit = size_of(type_of(kernel_globals.interrupt_descriptor_table))-1;
         idt_desc.base = kernel_globals.interrupt_descriptor_table.data;
 
         pointer := *idt_desc;
@@ -335,9 +345,8 @@ bluescreen :: (loc := #caller_location) #no_context {
         buffer[x + y * stride] = cast(u32) (0xff0000ff);
     }
 
-    write_string("\nSource code location:\n");
+    write_string("Bluescreen!\nSource code location:\n");
     write_loc(loc);
-    // print_stack_trace(context.stack_trace);
 
     while true #asm {
         cli;
@@ -359,7 +368,7 @@ Physical_Page_Pool :: struct {
     FREELIST_TAIL :: Page_Frame_Desc.FREELIST_TAIL;
 }
 
-init_physical_page_pool :: (memory: Boot_Data.Memory_Region) {
+init_physical_page_pool :: (memory: Boot_Data.Memory_Region) #no_context {
     using kernel_globals.physical_page_pool;
 
     start = cast(int) (memory.address / 4096);
@@ -368,7 +377,7 @@ init_physical_page_pool :: (memory: Boot_Data.Memory_Region) {
     freelist = FREELIST_TAIL;
 }
 
-get_page_frame :: () -> *Page_Frame_Desc, int {
+get_page_frame :: () -> *Page_Frame_Desc, int #no_context {
     using kernel_globals.physical_page_pool;
 
     if freelist != FREELIST_TAIL {
@@ -411,16 +420,16 @@ release_page_frame :: (page_frame: *Page_Frame_Desc) {
     freelist = index(page_frame);
 }
 
-get_physical_address :: (page_frame: *Page_Frame_Desc) -> u64 {
+get_physical_address :: (page_frame: *Page_Frame_Desc) -> u64 #no_context {
     return cast(u64) index(page_frame) * 4096;
 }
 
-get_virtual_address :: (page_frame: *Page_Frame_Desc) -> *void {
+get_virtual_address :: (page_frame: *Page_Frame_Desc) -> *void #no_context {
     phys := get_physical_address(page_frame);
     return cast(*void) phys + DIRECT_MAPPING_BASE;
 }
 
-index :: (page_frame: *Page_Frame_Desc) -> s32 {
+index :: (page_frame: *Page_Frame_Desc) -> s32 #no_context {
     index := (cast(u64) page_frame - cast(u64) kernel_globals.page_frames.data) / size_of(Page_Frame_Desc);
     return xx index;
 }
@@ -447,7 +456,7 @@ map_page :: (virtual_address: *void, physical_address: u64, flags := Page_Flags.
     map_page(cast(u64) virtual_address, physical_address);
 }
 
-map_page :: (virtual_address: u64, physical_address: u64, flags := Page_Flags.PRESENT | .READ_WRITE) {
+map_page :: (virtual_address: u64, physical_address: u64, flags := Page_Flags.PRESENT | .READ_WRITE, loc := #caller_location) {
     using Page_Flags;
 
     mask: u64 = 0b111111111;
@@ -464,7 +473,7 @@ map_page :: (virtual_address: u64, physical_address: u64, flags := Page_Flags.PR
     pt   := get_or_create_page_table(pd,   pd_offset);
 
     if pt[pt_offset] & xx PRESENT {
-        bluescreen();
+        bluescreen(loc);
     }
 
     pt[pt_offset] = physical_address | cast(u64) flags;
@@ -506,7 +515,7 @@ Block_Allocator :: struct {
     total_pages: int;
 }
 
-init_block_allocator :: (allocator: *Block_Allocator, start_page: int, total_pages: int) {
+init_block_allocator :: (allocator: *Block_Allocator, start_page: int, total_pages: int) #no_context {
     // For bootstrapping, just use a single page to store block descriptors. Todo: fix
     page := get_page_frame();
 
@@ -524,7 +533,7 @@ init_block_allocator :: (allocator: *Block_Allocator, start_page: int, total_pag
     };
 }
 
-alloc_block :: (using allocator: *Block_Allocator, size_bytes: int) -> address: u64, Block_Desc {
+alloc_block :: (using allocator: *Block_Allocator, size_bytes: int, loc := #caller_location) -> address: u64, Block_Desc #no_context {
 
     pages_needed := size_bytes / 4096;
     if size_bytes % 4096 pages_needed += 1;
@@ -542,10 +551,10 @@ alloc_block :: (using allocator: *Block_Allocator, size_bytes: int) -> address: 
                     bluescreen();
                 }
 
-                for< blocks.count .. it_index+2 {
+                blocks.count += 1;
+                for< blocks.count-1 .. it_index+2 {
                     blocks[it] = blocks[it-1];
                 }
-                blocks.count += 1;
 
                 blocks[it_index+1].start_page = it.start_page + pages_needed;
                 blocks[it_index+1].size_pages = cast(s32) remaining_pages;
@@ -557,7 +566,7 @@ alloc_block :: (using allocator: *Block_Allocator, size_bytes: int) -> address: 
     }
 
     // If we get here then there isn't a free block large enough
-    bluescreen();
+    bluescreen(loc);
     return 0, .{};
 }
 
@@ -643,6 +652,7 @@ Scoped_Acquire :: (lock: *Spinlock) #expand {
     acquire(lock);
     `defer release(lock);
 }
+
 
 
 allocate_interrupt_gate :: () -> int {
