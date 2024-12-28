@@ -123,9 +123,10 @@ yield :: (loc := #caller_location) #no_context {
                 #asm { hlt; }
             }
 
-            Scoped_Acquire(*scheduler.spinlock);
+            acquire(*scheduler.spinlock);
 
             if scheduler.waiting_to_run.count == 0 {
+                release(*scheduler.spinlock);
                 continue;
             }
 
@@ -149,6 +150,8 @@ yield :: (loc := #caller_location) #no_context {
         mov rbx: gpr === b, next;
         int TASK_SWITCH_GATE;
     }
+
+    release(*scheduler.spinlock);
 }
 
 yield_from_user_mode :: () #no_context {
@@ -197,6 +200,8 @@ enter_user_mode :: (entry_point: () #c_call, flags: X64_Flags, user_stack: *void
 
 
 task_do_work :: () #c_call {
+    release(*kernel_globals.scheduler.spinlock);
+
     core := get_current_core();
     user_stack := kernel_globals.scheduler.current_task[core.id].user_stack;
     entry_point := task_do_work_in_ring_3;
@@ -206,7 +211,7 @@ task_do_work :: () #c_call {
 
 task_do_work_in_ring_3 :: () #c_call {
 
-    c: Context;
+    c := make_kernel_context();;
     push_context c {
 
         while true {

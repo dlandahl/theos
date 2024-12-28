@@ -130,6 +130,7 @@ kernel_entry :: () #no_context {
             root_acpi_table = xx (rsdp.rsdt_address + DIRECT_MAPPING_BASE);
         }
 
+
         array_add(*processor_cores, .{});
         init_processor_core(*processor_cores[0]);
 
@@ -139,19 +140,19 @@ kernel_entry :: () #no_context {
 
         initialize_scheduler();
 
-        core_begin_multitasking();
-
-        acquire(*scheduler.spinlock);
-        for 1..17 {
-            new_task := create_task();
-            array_add(*scheduler.waiting_to_run, new_task);
-        }
-        release(*scheduler.spinlock);
-
         startup_application_processors();
+
+        core_begin_multitasking();
 
         #asm { sti; }
         while true {
+            acquire(*scheduler.spinlock);
+            for 1..1 {
+                new_task := create_task();
+                array_add(*scheduler.waiting_to_run, new_task);
+            }
+            release(*scheduler.spinlock);
+
             yield();
         }
     }
@@ -645,6 +646,7 @@ acquire :: (lock: *Spinlock) #no_context {
 }
 
 release :: (lock: *Spinlock) #no_context {
+    if !lock.* bluescreen();
     lock.* = 0;
 }
 

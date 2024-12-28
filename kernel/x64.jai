@@ -53,10 +53,10 @@ Interrupt_Stack :: struct (with_error_code := false) {
         }
 
         ip:    *void;
-        cs:    Segment_Selector;
+        cs:    Segment_Selector #align 8;
         flags: X64_Flags;
         sp:    *void;
-        ss:    Segment_Selector;
+        ss:    Segment_Selector #align 8;
     }
 
     using arch: Architectural_Part;
