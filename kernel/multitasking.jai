@@ -69,7 +69,7 @@ core_begin_multitasking :: () {
         lapic_timer_gate := allocate_interrupt_gate();
         register_interrupt_gate(int__local_apic_timer_interrupt, lapic_timer_gate);
 
-        write_apic_register(.TIC__TIMER_INITIAL, 0x0400_0000);
+        write_apic_register(.TIC__TIMER_INITIAL, 0x8000_0000);
 
         lvtt := << cast(*Acpi_Lvt) *read_apic_register(.LVT__TIMER);
         lvtt.vector = cast(u8) lapic_timer_gate;
@@ -126,6 +126,7 @@ yield :: (loc := #caller_location) #no_context {
             acquire(*scheduler.spinlock);
 
             if scheduler.waiting_to_run.count == 0 {
+                // Another core got there faster.
                 release(*scheduler.spinlock);
                 continue;
             }

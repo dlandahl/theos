@@ -12,6 +12,7 @@ set :: bitfield_set;
 #load "journal.jai";
 #load "pci_express.jai";
 #load "multitasking.jai";
+#load "time.jai";
 
 X64_Core :: struct {
     task_state_segment: Tss_With_Iopb #align 0x80;
@@ -52,6 +53,9 @@ Kernel_Globals :: struct {
     scheduler: Scheduler;
 
     memory_spinlock: Spinlock;
+
+    boot_time: Apollo_Time;
+    rtc_format_is_bcd: bool;
 }
 
 get_bootstrap_processor :: () -> *X64_Core {
@@ -72,14 +76,15 @@ kernel_entry :: () #no_context {
     // Init memory allocation
     pool_initted := false;
     for 0..boot_data.memory_map_entries_used-1 {
-        entry := boot_data.memory_map[it];
+        region := boot_data.memory_map[it];
+        if region.type != .FREE continue;
 
-        if entry.pages >= 1024 {
+        if region.pages >= 1024 {
             if !pool_initted {
-                init_physical_page_pool(entry);
+                init_physical_page_pool(region);
                 pool_initted = true;
             } else {
-                init_block_allocator(*kernel_globals.physical_block_allocator, xx entry.address / 4096, xx entry.pages);
+                init_block_allocator(*kernel_globals.physical_block_allocator, xx region.address / 4096, xx region.pages);
                 break;
             }
         }
@@ -93,6 +98,13 @@ kernel_entry :: () #no_context {
     main_thread_context = make_kernel_context();
 
     push_context main_thread_context {
+
+        rtc_init();
+
+        boot_calendar_time := rtc_get_calendar_time();
+        // Don't use Basic.calendar_to_apollo, because it's OS specific
+        boot_time = native_calendar_to_apollo(boot_calendar_time);
+
         using framebuffer;
 
         for y: 0..y_resolution-1 {
@@ -137,23 +149,31 @@ kernel_entry :: () #no_context {
         initialize_apic();
 
         initialize_hpet();
+        hpet_configure_timer(timer_index = 0, frequency = 10, true);
 
         initialize_scheduler();
 
-        startup_application_processors();
+        // print_physical_memory_map();
 
-        core_begin_multitasking();
+        // startup_application_processors();
+
+        // acquire(*scheduler.spinlock);
+        // for 1..4 {
+        //     new_task := create_task();
+        //     array_add(*scheduler.waiting_to_run, new_task);
+        // }
+        // release(*scheduler.spinlock);
+
+        // core_begin_multitasking();
 
         #asm { sti; }
         while true {
-            acquire(*scheduler.spinlock);
-            for 1..1 {
-                new_task := create_task();
-                array_add(*scheduler.waiting_to_run, new_task);
-            }
-            release(*scheduler.spinlock);
+            time := get_monotonic_system_time();
+            time_ms := cast(float) to_seconds(time);
+            print("Time: %\n", calendar_to_string(native_apollo_to_calendar(time)));
 
-            yield();
+            for 0..10000000 #asm { pause; }
+            // yield();
         }
     }
 }
@@ -179,16 +199,6 @@ make_kernel_context :: () -> Context #no_context {
             write_string("\n");
         }
     };
-
-    {
-        acquire(*kernel_globals.memory_spinlock);
-        ts_buffer_block := alloc_block(*kernel_globals.physical_block_allocator, 0x1000);
-        ts_buffer := cast(*void) ts_buffer_block + DIRECT_MAPPING_BASE;
-        c.temporary_storage = cast(*Temporary_Storage) ts_buffer;
-
-        set_initial_data(c.temporary_storage, 0x2_0000 - size_of(Temporary_Storage), ts_buffer + size_of(Temporary_Storage));
-        release(*kernel_globals.memory_spinlock);
-    }
 
     c.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = 2;
     c.print_style.default_format_struct.use_newlines_if_long_form = true;
@@ -249,6 +259,19 @@ make_kernel_context :: () -> Context #no_context {
 
         return null;
     };
+
+    {
+        acquire(*kernel_globals.memory_spinlock);
+        ts_buffer_block := alloc_block(*kernel_globals.physical_block_allocator, 0x1000);
+        release(*kernel_globals.memory_spinlock);
+
+        ts_buffer := cast(*void) ts_buffer_block + DIRECT_MAPPING_BASE;
+        c.temporary_storage = cast(*Temporary_Storage) ts_buffer;
+
+        set_initial_data(c.temporary_storage, 0x2_0000 - size_of(Temporary_Storage), ts_buffer + size_of(Temporary_Storage));
+
+        c.temporary_storage.overflow_allocator = c.allocator;
+    }
 
     return c;
 }
@@ -628,6 +651,22 @@ free_block :: (allocator: *Block_Allocator, address: u64) -> bool {
 
 
 
+// No one on earth seems to know if and when these are needed.
+
+load_fence :: () #expand {
+    #asm { lfence; }
+}
+
+store_fence :: () #expand {
+    #asm { sfence; }
+}
+
+memory_fence :: () #expand {
+    #asm { mfence; }
+}
+
+
+
 Spinlock :: #type,distinct u32;
 
 acquire :: (lock: *Spinlock) #no_context {
@@ -643,9 +682,13 @@ acquire :: (lock: *Spinlock) #no_context {
             setc carry;
         }
     }
+
+    memory_fence();
 }
 
 release :: (lock: *Spinlock) #no_context {
+    memory_fence();
+
     if !lock.* bluescreen();
     lock.* = 0;
 }
@@ -653,6 +696,40 @@ release :: (lock: *Spinlock) #no_context {
 Scoped_Acquire :: (lock: *Spinlock) #expand {
     acquire(lock);
     `defer release(lock);
+}
+
+
+
+Sequence_Lock :: u32;
+
+sequence_read :: (lock: *Sequence_Lock, body: Code) #expand {
+    while true {
+        sequence: u32;
+
+        while true {
+            sequence = lock.*;
+
+            if (sequence & 1) == 0 break;
+
+            #asm { pause; pause; pause; pause; }
+        }
+        load_fence();
+
+        #insert body;
+
+        load_fence();
+        if lock.* == sequence break;
+    }
+}
+
+sequence_write :: (lock: *Sequence_Lock, body: Code) #expand {
+    lock.* += 1;
+    store_fence();
+
+    #insert body;
+
+    store_fence();
+    lock.* += 1;
 }
 
 
@@ -669,4 +746,43 @@ allocate_interrupt_gate :: () -> int {
     result := next_free_interrupt_gate;
     next_free_interrupt_gate += 1;
     return result;
+}
+
+
+
+
+
+
+
+
+print_physical_memory_map :: () {
+    using kernel_globals;
+    context.print_style.default_format_float.trailing_width = 2;
+
+    total_by_type: [4] float;
+    for 0..boot_data.memory_map_entries_used-1 {
+
+        region := boot_data.memory_map[it];
+        mb := cast(float) region.pages / 32;
+        // print("Region (%) at % (% MB)\n", region.type, formatInt(region.address, base=16), mb);
+
+        total_by_type[region.type] += cast(int) region.pages;
+
+        for 0..cast(int) mb-1 {
+            if region.type == {
+                case .FREE; print("-");
+                case .RESERVED_BY_THE_BOOTLOADER; print("+");
+                case .RESERVED_BY_FIRMWARE; print("=");
+                case .DONT_KNOW; print("?");
+            }
+        }
+    }
+
+    print("\n\n\n");
+
+    context.print_style.default_format_float.trailing_width = 2;
+    for total_by_type {
+        print("Total (%) % MB\n=======\n", cast(type_of(Memory_Region.type)) it_index, it / 256);
+    }
+
 }

@@ -417,11 +417,19 @@ Hpet_Timer_Flags :: enum_flags u64 {
 HPET :: struct {
     base_address: *void;
     base_period_femtoseconds: u64;
-
     counters_are_64_bit: bool;
-    counters: [2] u64;
 
-    spinlock: Spinlock;
+    Timer :: struct {
+        counter: u64;
+        counter_is_64_bit: bool;
+
+        ticks_per_interrupt: u64;
+        ticks_at_last_interrupt: u64;
+    }
+
+    timers: [3] Timer;
+
+    seq_lock: Sequence_Lock;
 }
 
 initialize_hpet :: () {
@@ -475,33 +483,36 @@ initialize_hpet :: () {
 
 hpet_configure_timer :: (timer_index: int, frequency: u64, periodic: bool) {
     hpet := *kernel_globals.high_precision_timer;
-    Scoped_Acquire(*hpet.spinlock);
 
     register_offset := cast(Hpet_Register) (0x20 * timer_index);
 
-    timer := cast(Hpet_Timer_Flags) read(register_offset + .TIMER0);
+    timer_flags := cast(Hpet_Timer_Flags) read(register_offset + .TIMER0);
 
-    if !(timer & .PERIODIC_CAPABLE) log("HPET timer % is not periodic capable", timer_index);
+    if !(timer_flags & .PERIODIC_CAPABLE)
+        log("HPET timer % is not periodic capable", timer_index);
 
-    timer |=  (.INTERRUPT_ENABLE | .WRITE_ACCUMULATOR_ENABLE);
-    timer &= ~ .INTERRUPT_TYPE;
+    if !(timer_flags & .SIXTYFOUR_BIT_CAPABLE)
+        log("HPET timer % is not 64bit capable", timer_index);
 
-    if periodic  timer |=  .PERIODIC_ENABLE;
-    else         timer &= ~.PERIODIC_ENABLE;
+    timer_flags |=  (.INTERRUPT_ENABLE | .WRITE_ACCUMULATOR_ENABLE);
+    timer_flags &= ~ .INTERRUPT_TYPE;
 
-    write(register_offset + .TIMER0, cast(u64) timer);
+    if periodic  timer_flags |=  .PERIODIC_ENABLE;
+    else         timer_flags &= ~.PERIODIC_ENABLE;
 
-    ticks_per_second    := cast(u64) 1_000_000_000_000_000 / hpet.base_period_femtoseconds;
-    ticks_per_interrupt := ticks_per_second / frequency;
+    write(register_offset + .TIMER0, cast(u64) timer_flags);
 
-    write(register_offset + .TIMER0_COMP, ticks_per_interrupt);
+    timer := *hpet.timers[timer_index];
 
-    hpet.counters[timer_index] = 0;
+    ticks_per_second := cast(u64) 1_000_000_000_000_000 / hpet.base_period_femtoseconds;
+    timer.ticks_per_interrupt = ticks_per_second / frequency;
+
+    write(register_offset + .TIMER0_COMP, timer.ticks_per_interrupt);
+
+    timer.counter = 0;
 }
 
 hpet_restart :: () {
-    Scoped_Acquire(*kernel_globals.high_precision_timer.spinlock);
-
     config := read(Hpet_Register.CONFIG);
 
     ENABLE_BIT :: cast(u64) Hpet_Config_Flags.ENABLE;
@@ -520,7 +531,7 @@ calibrate_apic :: () {
         write_apic_register(.TIC__TIMER_INITIAL, 0xffff_ffff);
         write_apic_register(.DV__TIMER_DIVIDE, 0b011);
 
-        while kernel_globals.high_precision_timer.counters[1] == 0 {
+        while kernel_globals.high_precision_timer.timers[0].counter == 0 {
             #asm { hlt; }
         }
 
@@ -530,12 +541,19 @@ calibrate_apic :: () {
 }
 
 #program_export hpet_timer0_interrupt :: (data: *Interrupt_Stack()) #c_call {
-    kernel_globals.high_precision_timer.counters[0] += 1;
+    using kernel_globals.high_precision_timer;
+
+    sequence_write(*seq_lock, #code {
+        timers[0].counter += 1;
+        timers[0].ticks_at_last_interrupt = read(.COUNTER);
+    });
+
     write_apic_register(.EOI__END_OF_INTERRUPT, 0);
 } @InterruptRoutine
 
 #program_export hpet_timer1_interrupt :: (data: *Interrupt_Stack()) #c_call {
-    kernel_globals.high_precision_timer.counters[1] += 1;
+    using kernel_globals.high_precision_timer;
+    timers[0].counter += 1;
     write_apic_register(.EOI__END_OF_INTERRUPT, 0);
 } @InterruptRoutine
 

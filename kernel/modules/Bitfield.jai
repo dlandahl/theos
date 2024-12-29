@@ -45,6 +45,15 @@ bitfield_set :: (bitfield: *$B, flag: B, value: s64, $loc := #caller_location, $
     bitfield.* |= cast,no_check(B) ((value << bit_offset) & bit_mask);
 }
 
+bitfield_get :: (bitfield: $B, flag: B, $loc := #caller_location, $call := #caller_code) -> s64 {
+    bit_mask, bit_offset := #run calculate_mask_and_offset(B, loc, call);
+
+    value := cast(u64) bitfield;
+    value &= bit_mask;
+    value >>= bit_offset;
+    return cast(s64) value;
+}
+
 #scope_module
 
 #import "Compiler";

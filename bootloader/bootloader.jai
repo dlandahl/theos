@@ -6,6 +6,8 @@
 
 #add_context system_table: *EFI_SYSTEM_TABLE;
 
+VIRTUALBOX_COMPATIBILITY :: true;
+
 #program_export
 EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UINTN #c_call {
 
@@ -18,7 +20,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         // Memory type for allocations that should keep the memory reserved in the kernel's physical memory management.
         // This is supposed to be a custom memory type, so that EfiLoaderData memory can be reused by the kernel, but there seems to be a bug in the UEFI implementation VBox uses that makes custom memory types hang the firmware.
-        UserReservedMemoryType : EFI_MEMORY_TYPE : .EfiLoaderData; // 0x8000_0000;
+        UserReservedMemoryType : EFI_MEMORY_TYPE : #ifx VIRTUALBOX_COMPATIBILITY then EFI_MEMORY_TYPE.EfiLoaderData else 0x8000_0000;
 
         boot_data_address: u64 = Boot_Data.BASE_ADDRESS;
         EFI_CHECK(boot_services.AllocatePages(.AllocateAddress, UserReservedMemoryType, size_of(Boot_Data) / 4096 + 1, *boot_data_address));
@@ -253,32 +255,54 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
             memory_type := cast(EFI_MEMORY_TYPE) desc.Type;
 
+            #if VIRTUALBOX_COMPATIBILITY {
+                // Cannot distinguish EfiLoaderData from memory that the kernel needs, due to EDK II bug about custom memory types.
+                if memory_type == .EfiLoaderData memory_type = UserReservedMemoryType;
+            } else {
+                if memory_type == .EfiLoaderData memory_type = .EfiConventionalMemory;
+            }
+
             if memory_type == {
-              case .EfiLoaderCode; #through;
-              // case .EfiLoaderData; #through; // Cannot distinguish EfiLoaderData from memory that the kernel needs, due to EDK II bug about custom memory types.
-              case .EfiBootServicesCode; #through;
-              case .EfiBootServicesData; #through;
+              case UserReservedMemoryType;
+                region.type = .RESERVED_BY_THE_BOOTLOADER;
+              case .EfiACPIReclaimMemory;       #through;
+              case .EfiACPIMemoryNVS;           #through;
+              case .EfiUnusableMemory;          #through;
+              case .EfiMemoryMappedIO;          #through;
+              case .EfiMemoryMappedIOPortSpace; #through;
+              case .EfiRuntimeServicesCode;     #through;
+              case .EfiRuntimeServicesData;
+                region.type = .RESERVED_BY_FIRMWARE;
+              case .EfiLoaderCode;              #through;
+              case .EfiBootServicesCode;        #through;
+              case .EfiBootServicesData;        #through;
               case .EfiConventionalMemory;
+                region.type = .FREE;
+              case;
+                region.type = .DONT_KNOW;
+            }
 
-                bd := boot_data;
+            bd := boot_data;
 
-                if bd.memory_map_entries_used != 0 {
-                    // If two available regions are contiguous, just grow the previous one.
-                    // Won't always coalesce perfectly because the firmware doesn't guarantee that memory map entries are sorted by address.
-                    last_region := *bd.memory_map[bd.memory_map_entries_used-1];
+            if bd.memory_map_entries_used != 0 {
+                // If two available regions are contiguous, just grow the previous one.
+                // Won't always coalesce perfectly because the firmware doesn't guarantee that memory map entries are sorted by address.
+                last_region := *bd.memory_map[bd.memory_map_entries_used-1];
 
-                    if limit(last_region.*) == region.address {
-                        last_region.pages += region.pages;
-                        continue;
-                    }
-                }                
+                types_match := last_region.type == region.type;
+                contiguous  := limit(last_region.*) == region.address;
 
-                bd.memory_map[bd.memory_map_entries_used] = region;
-                bd.memory_map_entries_used += 1;
-
-                if bd.memory_map_entries_used == bd.memory_map.count {
-                    break;
+                if types_match && contiguous {
+                    last_region.pages += region.pages;
+                    continue;
                 }
+            }                
+
+            bd.memory_map[bd.memory_map_entries_used] = region;
+            bd.memory_map_entries_used += 1;
+
+            if bd.memory_map_entries_used == bd.memory_map.count {
+                break;
             }
         }
 

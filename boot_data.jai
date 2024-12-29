@@ -39,15 +39,19 @@ Boot_Data :: struct {
 
     acpi_rsdp: *void;
 
-    // For now we don't report memory that the OS can't immediately use
-    Usable_Memory_Region :: struct {
+    Memory_Region :: struct {
         address: u64;
         pages: u64;
+
+        type: enum {
+            FREE;
+            RESERVED_BY_THE_BOOTLOADER;
+            RESERVED_BY_FIRMWARE;
+            DONT_KNOW;
+        }
     };
 
-    Memory_Region :: Usable_Memory_Region;
-
-    memory_map: [100] Usable_Memory_Region;
+    memory_map: [100] Memory_Region;
     memory_map_entries_used: int;
 
     page_frames: [] Page_Frame_Desc;
