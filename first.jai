@@ -280,6 +280,7 @@ format_disk :: () -> success: bool {
         result := run_command(.. command);
 
         if result.exit_code != 0 {
+            log_error("mtools disk formatting command failed. Please make sure mtools is installed.");
             return false;
         }
     }

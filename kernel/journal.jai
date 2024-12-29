@@ -1,11 +1,11 @@
 
 Journal_Entry_Type :: enum u8 {
-    transaction_begin;
-    transaction_end;
-    patch_bytes;
-    allocate_block;
-    free_block;
-    wrap;
+    TRANSACTION_BEGIN;
+    TRANSACTION_END;
+    PATCH_BYTES;
+    ALLOCATE_BLOCK;
+    FREE_BLOCK;
+    WRAP;
 }
 
 Journal_Entry_Header :: struct {
@@ -30,7 +30,7 @@ Journal_Entry_Payload__Patch_Bytes :: struct {
 
 Journal_Entry_Payload__Allocate_Block :: struct {
     block: u64;
-    flags: enum_flags u8 { zero_on_replay; };
+    flags: enum_flags u8 { ZERO_ON_REPLAY; };
 
     hole: [7] u8;
 }

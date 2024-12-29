@@ -5,22 +5,22 @@ Task_Info :: struct {
 
     // These fields are volatile, because they get dereferenced in the
     // context switch routine implemented in assembly in first.jai
-    // ============
     rsp: *void;
     cr3: u64;
     xsave_area: Xsave_Area;
-    // ============
 
     user_stack:   *void;
     kernel_stack: *void;
 
     id: int;
+
+    sleeping: bool;
+    sleeping_until: Apollo_Time;
 }
 
 TASK_SWITCH_GATE :: 64;
 
 Scheduler :: struct {
-    main_task: *Task_Info;
     current_task: [..] *Task_Info;
 
     sleeping:       [..] *Task_Info;
@@ -47,6 +47,7 @@ initialize_scheduler :: () {
     array_resize(*scheduler.current_task, processor_cores.count);
 
     array_reserve(*scheduler.waiting_to_run, 256);
+    array_reserve(*scheduler.sleeping, 256);
 }
 
 core_begin_multitasking :: () {
@@ -69,7 +70,7 @@ core_begin_multitasking :: () {
         lapic_timer_gate := allocate_interrupt_gate();
         register_interrupt_gate(int__local_apic_timer_interrupt, lapic_timer_gate);
 
-        write_apic_register(.TIC__TIMER_INITIAL, 0x8000_0000);
+        write_apic_register(.TIC__TIMER_INITIAL, 0x0100_0000);
 
         lvtt := << cast(*Acpi_Lvt) *read_apic_register(.LVT__TIMER);
         lvtt.vector = cast(u8) lapic_timer_gate;
@@ -107,20 +108,64 @@ create_task :: () -> *Task_Info {
     return new_task;
 }
 
-yield :: (loc := #caller_location) #no_context {
+sleep_until :: (time: Apollo_Time) {
     using kernel_globals;
 
-    c: Context;
-
-    next: *Task_Info;
     core := get_current_core();
+    task := scheduler.current_task[core.id];
 
+    task.sleeping = true;
+    task.sleeping_until = time;
+
+    {
+        Scoped_Acquire(*scheduler.spinlock);
+        array_add(*scheduler.sleeping, task);
+    }
+
+    yield();
+}
+
+wake_sleeping_task :: () -> bool {
+    using kernel_globals;
+
+    // Is it better to program an interrupt to do this?
+    if !scheduler.sleeping.count return false;
+
+    time := get_monotonic_system_time();
+
+    Scoped_Acquire(*scheduler.spinlock);
+    for scheduler.sleeping {
+        // If we keep these ordered by time then we wouldn't have to iterate.
+        if it.sleeping_until < time {
+            it.sleeping = false;
+
+            // Todo: ensure this is not an allocation. For now we reserved 256 slots, preventing it from allocating for current practical purposes.
+            array_add(*scheduler.waiting_to_run, it);
+
+            array_unordered_remove_by_index(*scheduler.sleeping, it_index);
+            break;
+        }
+    }
+
+    return true;
+}
+
+yield :: (loc := #caller_location) #no_context {
+    using kernel_globals;
+    next: *Task_Info;
+
+    core := get_current_core();
     current_task := scheduler.current_task[core.id];
 
+    c: Context;
     push_context c {
+        wake_sleeping_task();
+
         while true {
             while scheduler.waiting_to_run.count == 0 {
-                #asm { hlt; }
+                if !wake_sleeping_task() {
+                    #asm { hlt; }
+                }
             }
 
             acquire(*scheduler.spinlock);
@@ -136,13 +181,21 @@ yield :: (loc := #caller_location) #no_context {
             // Ordered remove to prevent starvation.
             array_ordered_remove_by_index(*scheduler.waiting_to_run, 0);
 
-            // This should never be an allocation since we just removed.
-            array_add(*scheduler.waiting_to_run, current_task);
+            if next == current_task {
+                release(*scheduler.spinlock);
+                return;
+            }
+
+            if !current_task.sleeping {
+                // This should never be an allocation since we just removed.
+                array_add(*scheduler.waiting_to_run, current_task);
+            }
 
             break;
         }
     }
 
+    if next.sleeping write_string("Next.sleeping\n");
     current := *scheduler.current_task[core.id];
     core.task_state_segment.rsp[0] = next.kernel_stack;
 
@@ -211,8 +264,8 @@ task_do_work :: () #c_call {
 }
 
 task_do_work_in_ring_3 :: () #c_call {
+    c := make_kernel_context();
 
-    c := make_kernel_context();;
     push_context c {
 
         while true {
@@ -234,7 +287,7 @@ local_apic_timer_interrupt :: (stack: *Interrupt_Stack()) #c_call {
     write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 
     if stack.cs == .RING0_CODE {
-        // Don't preempt the kernel for now. Otherwise we might get preempted while holding a spinlock.
+        // Don't preempt the kernel for now.
         return;
     }
 

@@ -13,7 +13,12 @@ get_monotonic_system_time :: () -> Apollo_Time {
     ticks := cast(u64) read(.COUNTER);
 
     if ticks < ticks_at_last_interrupt {
-        ticks += 0xffff_ffff_ffff_ffff;
+        counter_max: u64 = 0xffff_ffff;
+        if high_precision_timer.timers[0].counter_is_64_bit {
+            counter_max = 0xffff_ffff_ffff_ffff;
+        }
+
+        ticks += counter_max - ticks_at_last_interrupt;
     } else {
         ticks -= ticks_at_last_interrupt;
     }
@@ -31,21 +36,20 @@ get_monotonic_system_time :: () -> Apollo_Time {
 }
 
 native_calendar_to_apollo :: (ct: Calendar_Time) -> Apollo_Time {
-    leap_year_count := leap_years_before(cast(s64) ct.year - 1) - leap_years_before(1970);
+    leap_year_count := leap_years_before(cast(s64) ct.year - 1) - #run leap_years_before(1970);
     year_difference := cast(s64) ct.year - 1970;
 
     seconds := 31536000 * (year_difference - leap_year_count);
     seconds += 31622400 * leap_year_count;
 
-    for 0..ct.month_starting_at_0 - 1 {
-        // Todo: preprocess this array to get rid of the loop
-        days :: int.[
-            31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+    if ct.month_starting_at_0 > 0 {
+        cumulative_days :: int.[
+            31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365
         ];
 
-        if it == days.count break;
-        seconds += 86400 * days[it];
+        seconds += cumulative_days[ct.month_starting_at_0-1] * 86400;
     }
+
     is_leap_year := (ct.year % 4 == 0) && (!(ct.year % 100 == 0) || (ct.year % 400 == 0));
     if ct.month_starting_at_0 > 1 && is_leap_year {
         seconds += 86400;

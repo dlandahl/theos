@@ -458,7 +458,6 @@ initialize_hpet :: () {
         bluescreen();
     }
 
-    // Todo: might have to check this per-counter
     hpet.counters_are_64_bit = capabilities & .SIXTYFOUR_BIT_COUNTER > 0;
     hpet.base_period_femtoseconds = cast(u64) (capabilities >> 32);
 

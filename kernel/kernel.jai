@@ -46,9 +46,6 @@ Kernel_Globals :: struct {
 
     high_precision_timer: HPET;
 
-    temporary_storage: Temporary_Storage;
-    temporary_storage_buffer: [TEMPORARY_STORAGE_SIZE] u8 #align 64;
-
     main_thread_context: Context;
     scheduler: Scheduler;
 
@@ -101,6 +98,7 @@ kernel_entry :: () #no_context {
 
         rtc_init();
 
+        // Get the time at the most recent second. Maybe use an interrupt to detect a more accurate boot time.
         boot_calendar_time := rtc_get_calendar_time();
         // Don't use Basic.calendar_to_apollo, because it's OS specific
         boot_time = native_calendar_to_apollo(boot_calendar_time);
@@ -155,32 +153,30 @@ kernel_entry :: () #no_context {
 
         // print_physical_memory_map();
 
-        // startup_application_processors();
+        startup_application_processors();
 
-        // acquire(*scheduler.spinlock);
-        // for 1..4 {
-        //     new_task := create_task();
-        //     array_add(*scheduler.waiting_to_run, new_task);
-        // }
-        // release(*scheduler.spinlock);
+        acquire(*scheduler.spinlock);
+        for 1..4 {
+            new_task := create_task();
+            array_add(*scheduler.waiting_to_run, new_task);
+        }
+        release(*scheduler.spinlock);
 
-        // core_begin_multitasking();
+        core_begin_multitasking();
 
         #asm { sti; }
         while true {
             time := get_monotonic_system_time();
-            time_ms := cast(float) to_seconds(time);
             print("Time: %\n", calendar_to_string(native_apollo_to_calendar(time)));
 
-            for 0..10000000 #asm { pause; }
-            // yield();
+            sleep_until(time + milliseconds_to_apollo(1000));
         }
     }
 }
 
 make_kernel_context :: () -> Context #no_context {
     c: Context;
-    
+
     c.assertion_failed = (location: Source_Code_Location, message: string) -> bool {
         write_string("Assertion failure");
         if message.count {
@@ -260,7 +256,7 @@ make_kernel_context :: () -> Context #no_context {
         return null;
     };
 
-    {
+    if true {
         acquire(*kernel_globals.memory_spinlock);
         ts_buffer_block := alloc_block(*kernel_globals.physical_block_allocator, 0x1000);
         release(*kernel_globals.memory_spinlock);
@@ -650,8 +646,6 @@ free_block :: (allocator: *Block_Allocator, address: u64) -> bool {
 // serial_out :: (data: string)
 
 
-
-// No one on earth seems to know if and when these are needed.
 
 load_fence :: () #expand {
     #asm { lfence; }

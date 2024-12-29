@@ -72,6 +72,12 @@ write_number :: (n: s64, base := 10, to_standard_error := false) #no_context #no
 }
 
 runtime_support_assertion_failed :: (loc: Source_Code_Location, message: string) -> bool {
+    write_string("Default assertion failure...\n");
+    write_string(message);
+    write_string("\n");
+    write_loc(loc);
+
+    while true #asm { cli; hlt; }
     return false;
 }
 
