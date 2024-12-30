@@ -1,63 +1,5 @@
 
-Acpi_RSDP__Root_System_Description_Pointer :: struct {
-    signature: [8] u8;
-    checksum: u8;
-    oem_id: [6] u8;
-    revision: u8;
-    rsdt_address: u32;
-
-    length: u32;
-    xsdt_address: u64 #align 4;
-    checksum_2: u8;
-    reserved: [3] u8;
-}
-
-Acpi_Table_Header :: struct {
-    signature: [4] u8;
-    length: u32;
-    revision: u8;
-    checksum: u8;
-    oem_id: [6] u8;
-    oem_table_id: [8] u8;
-    oem_revision: u32;
-    creator_id: u32;
-    creator_revision: u32;
-
-    // Note that this is only aligned to 4 bytes, so if you put this in a struct followed by a u64, it will be wrong.
-} #no_padding
-
-find_acpi_table :: (signature: string) -> *Acpi_Table_Header {
-    table_size := kernel_globals.root_acpi_table.length - size_of(Acpi_Table_Header);
-
-    pointer_size := cast(u64) (ifx kernel_globals.acpi_version then 8 else 4);
-    pointer_count := table_size / pointer_size;
-
-    table_base := cast(u64) (kernel_globals.root_acpi_table + 1);
-
-    for table_index: 0..pointer_count - 1 {
-        offset := table_index * pointer_size + table_base;
-
-        phys := ifx kernel_globals.acpi_version {
-            << cast(*u64) offset;
-        } else {
-            cast(u64) << cast(*u32) offset;
-        }
-
-        header := cast(*Acpi_Table_Header) (phys + DIRECT_MAPPING_BASE);
-
-        for 0..3 if header.signature[it] != signature[it] {
-            continue table_index;
-        }
-
-        return header;
-    }
-
-    return null;
-}
-
-
-
-Acpi_MADT :: struct {
+Acpi_Madt :: struct {
     using #as header: Acpi_Table_Header;
 
     local_apic_address: u32;
@@ -115,7 +57,7 @@ Acpi_MADT :: struct {
     }
 }
 
-APIC_Register :: enum {
+Apic_Register :: enum {
     APIC_ID                   :: 0x20;
     APIC_VERSION              :: 0x30;
     TPR__TASK_PRIORITY        :: 0x80;
@@ -132,7 +74,7 @@ APIC_Register :: enum {
     EXTENDED_FEATURE          :: 0x400;
 }
 
-read_apic_register :: (register: APIC_Register, loc := #caller_location) -> u32 #no_context {
+read_apic_register :: (register: Apic_Register, loc := #caller_location) -> u32 #no_context {
     if kernel_globals.apic == null {
         bluescreen(loc);
     }
@@ -140,7 +82,7 @@ read_apic_register :: (register: APIC_Register, loc := #caller_location) -> u32 
     return << cast(*u32) (kernel_globals.apic + cast(u64) register);
 }
 
-write_apic_register :: (register: APIC_Register, value: u32) #no_context {
+write_apic_register :: (register: Apic_Register, value: u32) #no_context {
     if kernel_globals.apic == null {
         bluescreen();
     }
@@ -148,7 +90,7 @@ write_apic_register :: (register: APIC_Register, value: u32) #no_context {
     << cast(*u32) (kernel_globals.apic + cast(u64) register) = value;
 }
 
-Acpi_Lvt :: struct {
+Apic_Local_Vector_Table_Entry :: struct {
     vector: u8;
 
 #place vector;
@@ -184,7 +126,7 @@ initialize_apic :: () {
     register_interrupt_gate(int__fault_14, 14, true);
     register_interrupt_gate(int__simd_floating_point_exception, 19, true);
 
-    acpi_header := cast(*Acpi_MADT) find_acpi_table("APIC");
+    acpi_header := cast(*Acpi_Madt) find_acpi_table("APIC");
 
     Apic_Base_Flags :: enum_flags {
         BSC__Boot_Strap_Core :: 1 << 8;
@@ -218,15 +160,15 @@ initialize_apic :: () {
     bootstrap_processor := get_bootstrap_processor();
     bootstrap_processor.local_apic_id = read_apic_register(.APIC_ID) >> 24;
 
-    cursor := cast(u64) acpi_header + size_of(Acpi_MADT);
+    cursor := cast(u64) acpi_header + size_of(Acpi_Madt);
 
     while cursor < cast(u64) acpi_header + acpi_header.length {
-        ics := cast(*Acpi_MADT.Interrupt_Controller_Structure) cursor;
+        ics := cast(*Acpi_Madt.Interrupt_Controller_Structure) cursor;
         defer cursor += ics.length;
 
         if ics.type == {
           case .LOCAL_APIC;
-            lapic_ics := cast(*Acpi_MADT.Ics_Local_Apic) ics;
+            lapic_ics := cast(*Acpi_Madt.Ics_Local_Apic) ics;
 
             if lapic_ics.apic_id == bootstrap_processor.local_apic_id {
                 continue;
@@ -243,7 +185,7 @@ initialize_apic :: () {
           case .IO_APIC;
             assert(kernel_globals.io_apic == null);
 
-            ioapic_ics := cast(*Acpi_MADT.Ics_Io_Apic) ics;
+            ioapic_ics := cast(*Acpi_Madt.Ics_Io_Apic) ics;
 
             virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096);
             map_page(virtual, ioapic_ics.address, Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE);
@@ -253,7 +195,7 @@ initialize_apic :: () {
             assert(ioapic_ics.address == 0xfec0_0000);
 
           case .INTERRUPT_SOURCE_OVERRIDE;
-            iso := cast(*Acpi_MADT.Ics_Source_Override) ics;
+            iso := cast(*Acpi_Madt.Ics_Source_Override) ics;
             // Todo
         }
     }
@@ -294,6 +236,7 @@ startup_application_processors :: () {
 
         write_apic_register(.DES__INTERRUPT_DEST, it.local_apic_id << 24);
 
+        // Todo: People online are saying these need to be executed multiple times per core
         command: u32;
         command = (0b101 << 8) | (1 << 14); // INIT IPI
         write_apic_register(.ICR__INTERRUPT_COMMAND, command);
@@ -363,201 +306,6 @@ ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, gate_nu
 }
 
 
-
-// HPET (High precision timer)
-
-Hpet_Acpi_Table :: struct {
-    #as header: Acpi_Table_Header;
-    hardware_revision: u8;
-    flags: u8;
-    vendor: u16;
-    address_space: enum u8 { MAIN_MEMORY :: 0; IO :: 1; };
-    stuff: [3] u8;
-    base_address: u64 #align 1;
-}
-
-Hpet_Register :: enum u64 {
-    CAPABILITIES :: 0x0;
-    CONFIG       :: 0x10;
-    STATUS       :: 0x20;
-    COUNTER      :: 0xf0;
-
-    TIMER0       :: 0x100;
-    TIMER0_COMP  :: 0x108;
-    TIMER1       :: 0x120;
-    TIMER1_COMP  :: 0x128;
-    TIMER2       :: 0x140;
-    TIMER2_COMP  :: 0x148;
-}
-
-write :: (reg: Hpet_Register, value: u64) #no_context {
-    << cast(*u64) (kernel_globals.high_precision_timer.base_address + cast(u64) reg) = value;
-}
-
-read :: (reg: Hpet_Register) -> u64 #no_context {
-    return << cast(*u64) (kernel_globals.high_precision_timer.base_address + cast(u64) reg);
-}
-
-Hpet_Config_Flags :: enum_flags u64 {
-    ENABLE         :: 0x1;
-    LEGACY_ROUTING :: 0x2;
-}
-
-Hpet_Capability_Flags :: enum_flags u64 {
-    SIXTYFOUR_BIT_COUNTER :: 0x2000;
-    LEGACY_ROUTING        :: 0x8000;
-}
-
-Hpet_Timer_Flags :: enum_flags u64 {
-    INTERRUPT_TYPE           :: 0x2;  // (0=edge  1=level)
-    INTERRUPT_ENABLE         :: 0x4;
-    PERIODIC_ENABLE          :: 0x8;
-    PERIODIC_CAPABLE         :: 0x10;
-    SIXTYFOUR_BIT_CAPABLE    :: 0x20;
-    WRITE_ACCUMULATOR_ENABLE :: 0x40;
-}
-
-HPET :: struct {
-    base_address: *void;
-    base_period_femtoseconds: u64;
-    counters_are_64_bit: bool;
-
-    Timer :: struct {
-        counter: u64;
-        counter_is_64_bit: bool;
-
-        ticks_per_interrupt: u64;
-        ticks_at_last_interrupt: u64;
-    }
-
-    timers: [3] Timer;
-
-    seq_lock: Sequence_Lock;
-}
-
-initialize_hpet :: () {
-    hpet := *kernel_globals.high_precision_timer;
-
-    acpi_header := find_acpi_table("HPET");
-
-    if acpi_header == null {
-        log_error("HPET is not available");
-        bluescreen();
-    }
-
-    acpi_table := cast(*Hpet_Acpi_Table) acpi_header;
-    assert(acpi_table.address_space == .MAIN_MEMORY);
-
-    virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096); // Allocating an individual page using the block allocator because we don't have anything better for virtual memory yet
-    map_page(virtual, acpi_table.base_address, Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE);
-
-    offset_in_page := acpi_table.base_address % 0x1000;
-    hpet.base_address = xx (virtual + offset_in_page);
-
-    capabilities := cast(Hpet_Capability_Flags) read(Hpet_Register.CAPABILITIES);
-
-    if !(capabilities & .LEGACY_ROUTING) {
-        log_error("HPET does not support legacy replacement route");
-        bluescreen();
-    }
-
-    hpet.counters_are_64_bit = capabilities & .SIXTYFOUR_BIT_COUNTER > 0;
-    hpet.base_period_femtoseconds = cast(u64) (capabilities >> 32);
-
-    write(.CONFIG, read(.CONFIG) | cast(u64) Hpet_Config_Flags.LEGACY_ROUTING);
-
-    hpet_restart();
-
-
-    // Interrupt routing
-
-    t0_gate := cast(u32) allocate_interrupt_gate();
-    t1_gate := cast(u32) allocate_interrupt_gate();
-
-    register_interrupt_gate(int__hpet_timer0_interrupt, t0_gate);
-    register_interrupt_gate(int__hpet_timer1_interrupt, t1_gate);
-
-    // Get INTI2/8 redirection entry. The numbers 2 and 8 come from the legacy replacement routing.
-    // Todo: need to detect if there is an interrupt source override in the MADT.
-    ioapic_add_interrupt_redirection_table_entry(2, t0_gate);
-    ioapic_add_interrupt_redirection_table_entry(8, t1_gate);
-}
-
-hpet_configure_timer :: (timer_index: int, frequency: u64, periodic: bool) {
-    hpet := *kernel_globals.high_precision_timer;
-
-    register_offset := cast(Hpet_Register) (0x20 * timer_index);
-
-    timer_flags := cast(Hpet_Timer_Flags) read(register_offset + .TIMER0);
-
-    if !(timer_flags & .PERIODIC_CAPABLE)
-        log("HPET timer % is not periodic capable", timer_index);
-
-    if !(timer_flags & .SIXTYFOUR_BIT_CAPABLE)
-        log("HPET timer % is not 64bit capable", timer_index);
-
-    timer_flags |=  (.INTERRUPT_ENABLE | .WRITE_ACCUMULATOR_ENABLE);
-    timer_flags &= ~ .INTERRUPT_TYPE;
-
-    if periodic  timer_flags |=  .PERIODIC_ENABLE;
-    else         timer_flags &= ~.PERIODIC_ENABLE;
-
-    write(register_offset + .TIMER0, cast(u64) timer_flags);
-
-    timer := *hpet.timers[timer_index];
-
-    ticks_per_second := cast(u64) 1_000_000_000_000_000 / hpet.base_period_femtoseconds;
-    timer.ticks_per_interrupt = ticks_per_second / frequency;
-
-    write(register_offset + .TIMER0_COMP, timer.ticks_per_interrupt);
-
-    timer.counter = 0;
-}
-
-hpet_restart :: () {
-    config := read(Hpet_Register.CONFIG);
-
-    ENABLE_BIT :: cast(u64) Hpet_Config_Flags.ENABLE;
-
-    write(.CONFIG, config & ~ENABLE_BIT);
-    write(Hpet_Register.COUNTER, 0);
-    write(.CONFIG, config | ENABLE_BIT);
-}
-
-calibrate_apic :: () {
-    for 1..10 {
-        // Calibrate Local APIC timer using HPET
-        hpet_configure_timer(timer_index = 1, frequency = 10, periodic = false);
-        hpet_restart();
-
-        write_apic_register(.TIC__TIMER_INITIAL, 0xffff_ffff);
-        write_apic_register(.DV__TIMER_DIVIDE, 0b011);
-
-        while kernel_globals.high_precision_timer.timers[0].counter == 0 {
-            #asm { hlt; }
-        }
-
-        apic_ticks_elapsed := 0xffff_ffff - read_apic_register(.TCC__TIMER_CURRENT);
-        print("APIC ticks in 100ms: %\n", apic_ticks_elapsed);
-    }
-}
-
-#program_export hpet_timer0_interrupt :: (data: *Interrupt_Stack()) #c_call {
-    using kernel_globals.high_precision_timer;
-
-    sequence_write(*seq_lock, #code {
-        timers[0].counter += 1;
-        timers[0].ticks_at_last_interrupt = read(.COUNTER);
-    });
-
-    write_apic_register(.EOI__END_OF_INTERRUPT, 0);
-} @InterruptRoutine
-
-#program_export hpet_timer1_interrupt :: (data: *Interrupt_Stack()) #c_call {
-    using kernel_globals.high_precision_timer;
-    timers[0].counter += 1;
-    write_apic_register(.EOI__END_OF_INTERRUPT, 0);
-} @InterruptRoutine
 
 
 
@@ -723,9 +471,6 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
     write_number(core.id);
     write_string("\n");
 
-    push_context kernel_globals.main_thread_context {
-        print_stack_trace(kernel_globals.main_thread_context.stack_trace);
-    }
     bluescreen();
 } @InterruptRoutine
 

@@ -3,11 +3,12 @@
 
 Task_Info :: struct {
 
-    // These fields are volatile, because they get dereferenced in the
-    // context switch routine implemented in assembly in first.jai
-    rsp: *void;
-    cr3: u64;
-    xsave_area: Xsave_Area;
+    using cpu_context: struct {
+        // These fields must match the task switch assembly routine
+        rsp: *void;
+        cr3: u64;
+        xsave: Xsave_Area;
+    };
 
     user_stack:   *void;
     kernel_stack: *void;
@@ -24,7 +25,7 @@ Scheduler :: struct {
     current_task: [..] *Task_Info;
 
     sleeping:       [..] *Task_Info;
-    waiting_to_run: [..] *Task_Info;
+    waiting_to_run: Queue(*Task_Info);
 
     tasks: Bucket_Array(Task_Info, 256, always_iterate_by_pointer=true);
     next_id: int;
@@ -36,7 +37,7 @@ Xsave_Area :: struct {
     // Warning: this struct requires 16-byte alignment to be accessed by fxsave64 etc.
     fpu: [512] u8;
 
-    #place fpu;
+#place fpu;
     pad: [24] u8;
     mxcsr: Mxcsr;
 }
@@ -52,8 +53,8 @@ initialize_scheduler :: () {
     scheduler.next_id = 1;
     array_resize(*scheduler.current_task, processor_cores.count);
 
-    array_reserve(*scheduler.waiting_to_run, 256);
     array_reserve(*scheduler.sleeping, 256);
+    queue_reserve(*scheduler.waiting_to_run, 256);
 }
 
 core_begin_multitasking :: () {
@@ -81,7 +82,7 @@ core_begin_multitasking :: () {
 
         write_apic_register(.TIC__TIMER_INITIAL, 0x0400_0000);
 
-        lvtt: Acpi_Lvt;
+        lvtt: Apic_Local_Vector_Table_Entry;
         lvtt.vector = cast(u8) lapic_timer_gate;
         lvtt.flags &= ~.M__mask;
         lvtt.flags |= .TMM__timer_mode;
@@ -112,7 +113,7 @@ create_task :: () -> *Task_Info {
     scheduler.next_id += 1;
 
     // For now, copy FP exception settings from the parent thread
-    mxcsr := *new_task.xsave_area.mxcsr;
+    mxcsr := *new_task.xsave.mxcsr;
     #asm { stmxcsr [mxcsr]; }
 
     return new_task;
@@ -152,7 +153,7 @@ wake_sleeping_task :: () -> bool {
             it.sleeping = false;
 
             // Todo: ensure this is not an allocation. For now we reserved 256 slots, preventing it from allocating for current practical purposes.
-            array_add(*scheduler.waiting_to_run, it);
+            queue_push(*scheduler.waiting_to_run, it);
 
             array_unordered_remove_by_index(*scheduler.sleeping, it_index);
             break;
@@ -175,7 +176,7 @@ yield :: (loc := #caller_location) #no_context {
         wake_sleeping_task();
 
         while true {
-            while scheduler.waiting_to_run.count == 0 {
+            while queue_is_empty(scheduler.waiting_to_run) {
                 if !wake_sleeping_task() {
                     #asm { hlt; }
                 }
@@ -183,16 +184,13 @@ yield :: (loc := #caller_location) #no_context {
 
             acquire(*scheduler.spinlock);
 
-            if scheduler.waiting_to_run.count == 0 {
+            if queue_is_empty(scheduler.waiting_to_run) {
                 // Another core got there faster.
                 release(*scheduler.spinlock);
                 continue;
             }
 
-            next = scheduler.waiting_to_run[0];
-
-            // Ordered remove to prevent starvation.
-            array_ordered_remove_by_index(*scheduler.waiting_to_run, 0);
+            next = queue_pop(*scheduler.waiting_to_run);
 
             if next == current_task {
                 release(*scheduler.spinlock);
@@ -201,7 +199,7 @@ yield :: (loc := #caller_location) #no_context {
 
             if !current_task.sleeping {
                 // This should never be an allocation since we just removed.
-                array_add(*scheduler.waiting_to_run, current_task);
+                queue_push(*scheduler.waiting_to_run, current_task);
             }
 
             break;
@@ -286,7 +284,7 @@ task_do_work_in_ring_3 :: () #c_call {
 
             print("Thread % doing some work in user mode, on core %.\n", thread.id, core.id);
 
-            for 1..10_000_000 {
+            for 1..5_000_000 {
                 #asm { pause; }
             }
         }
@@ -305,3 +303,70 @@ local_apic_timer_interrupt :: (stack: *Interrupt_Stack()) #c_call {
 
     yield();
 } @InterruptRoutine
+
+
+
+Queue :: struct (Item_Type: Type) {
+    items: [..] Item_Type; // Using a resizeable array to hold the underlying data  to get the resizing logic from Basic/Array.jai. It means we need to keep saying items.count = items.allocated.
+    head: int;
+    tail: int;
+}
+
+queue_push :: (using queue: *Queue) -> *queue.Item_Type {
+
+    item := *items[head];
+    head += 1;
+
+    if head >= items.count {
+        head = 0;
+    }
+
+    if head == tail {
+        old_count := items.allocated;
+
+        items.count += 1;
+        maybe_grow(*queue.items);
+        items.count = items.allocated;
+
+        memcpy(items.data + items.count - tail - 1, items.data + tail, (old_count - tail + 1) * size_of(Item_Type));
+
+        head = old_count;
+        if head == items.count head = 0;
+
+        item = *items[head-1];
+    }
+
+    return item;
+}
+
+queue_pop :: (using queue: *Queue) -> queue.Item_Type {
+    assert(head != tail);
+
+    item := items[tail];
+    tail += 1;
+
+    if tail >= items.count {
+        tail = 0;
+    }
+
+    return item;
+}
+
+queue_push :: (using queue: *Queue, item: queue.Item_Type) {
+    queue_push(queue).* = item;
+}
+
+queue_reserve :: (using queue: *Queue, capacity: int) {
+    array_reserve(*queue.items, capacity);
+    queue.items.count = queue.items.allocated;
+}
+
+queue_length :: (using queue: Queue) -> int {
+    if head > tail return head - tail;
+
+    return head + items.count - tail;
+}
+
+queue_is_empty :: (using queue: Queue) -> bool {
+    return head == tail;
+}

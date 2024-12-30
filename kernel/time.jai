@@ -217,3 +217,200 @@ rtc_get_calendar_time :: () -> Calendar_Time {
 
     return cal;
 }
+
+
+
+// HPET (High precision timer)
+
+Hpet_Acpi_Table :: struct {
+    #as header: Acpi_Table_Header;
+    hardware_revision: u8;
+    flags: u8;
+    vendor: u16;
+    address_space: enum u8 { MAIN_MEMORY :: 0; IO :: 1; };
+    stuff: [3] u8;
+    base_address: u64 #align 1;
+}
+
+Hpet_Register :: enum u64 {
+    CAPABILITIES :: 0x0;
+    CONFIG       :: 0x10;
+    STATUS       :: 0x20;
+    COUNTER      :: 0xf0;
+
+    TIMER0       :: 0x100;
+    TIMER0_COMP  :: 0x108;
+    TIMER1       :: 0x120;
+    TIMER1_COMP  :: 0x128;
+    TIMER2       :: 0x140;
+    TIMER2_COMP  :: 0x148;
+}
+
+write :: (reg: Hpet_Register, value: u64) #no_context {
+    << cast(*u64) (kernel_globals.high_precision_timer.base_address + cast(u64) reg) = value;
+}
+
+read :: (reg: Hpet_Register) -> u64 #no_context {
+    return << cast(*u64) (kernel_globals.high_precision_timer.base_address + cast(u64) reg);
+}
+
+Hpet_Config_Flags :: enum_flags u64 {
+    ENABLE         :: 0x1;
+    LEGACY_ROUTING :: 0x2;
+}
+
+Hpet_Capability_Flags :: enum_flags u64 {
+    SIXTYFOUR_BIT_COUNTER :: 0x2000;
+    LEGACY_ROUTING        :: 0x8000;
+}
+
+Hpet_Timer_Flags :: enum_flags u64 {
+    INTERRUPT_TYPE           :: 0x2;  // (0=edge  1=level)
+    INTERRUPT_ENABLE         :: 0x4;
+    PERIODIC_ENABLE          :: 0x8;
+    PERIODIC_CAPABLE         :: 0x10;
+    SIXTYFOUR_BIT_CAPABLE    :: 0x20;
+    WRITE_ACCUMULATOR_ENABLE :: 0x40;
+}
+
+HPET :: struct {
+    base_address: *void;
+    base_period_femtoseconds: u64;
+    counters_are_64_bit: bool;
+
+    Timer :: struct {
+        counter: u64;
+        counter_is_64_bit: bool;
+
+        ticks_per_interrupt: u64;
+        ticks_at_last_interrupt: u64;
+    }
+
+    timers: [3] Timer;
+
+    seq_lock: Sequence_Lock;
+}
+
+initialize_hpet :: () {
+    hpet := *kernel_globals.high_precision_timer;
+
+    acpi_header := find_acpi_table("HPET");
+
+    if acpi_header == null {
+        log_error("HPET is not available");
+        bluescreen();
+    }
+
+    acpi_table := cast(*Hpet_Acpi_Table) acpi_header;
+    assert(acpi_table.address_space == .MAIN_MEMORY);
+
+    virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096); // Allocating an individual page using the block allocator because we don't have anything better for virtual memory yet
+    map_page(virtual, acpi_table.base_address, Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE);
+
+    offset_in_page := acpi_table.base_address % 0x1000;
+    hpet.base_address = xx (virtual + offset_in_page);
+
+    capabilities := cast(Hpet_Capability_Flags) read(Hpet_Register.CAPABILITIES);
+
+    if !(capabilities & .LEGACY_ROUTING) {
+        log_error("HPET does not support legacy replacement route");
+        bluescreen();
+    }
+
+    hpet.counters_are_64_bit = capabilities & .SIXTYFOUR_BIT_COUNTER > 0;
+    hpet.base_period_femtoseconds = cast(u64) (capabilities >> 32);
+
+    write(.CONFIG, read(.CONFIG) | cast(u64) Hpet_Config_Flags.LEGACY_ROUTING);
+
+    hpet_restart();
+
+
+    // Interrupt routing
+
+    t0_gate := cast(u32) allocate_interrupt_gate();
+    t1_gate := cast(u32) allocate_interrupt_gate();
+
+    register_interrupt_gate(int__hpet_timer0_interrupt, t0_gate);
+    register_interrupt_gate(int__hpet_timer1_interrupt, t1_gate);
+
+    // Get INTI2/8 redirection entry. The numbers 2 and 8 come from the legacy replacement routing.
+    // Todo: need to detect if there is an interrupt source override in the MADT.
+    ioapic_add_interrupt_redirection_table_entry(2, t0_gate);
+    ioapic_add_interrupt_redirection_table_entry(8, t1_gate);
+}
+
+hpet_configure_timer :: (timer_index: int, frequency: u64, periodic: bool) {
+    hpet := *kernel_globals.high_precision_timer;
+
+    register_offset := cast(Hpet_Register) (0x20 * timer_index);
+
+    timer_flags := cast(Hpet_Timer_Flags) read(register_offset + .TIMER0);
+
+    if !(timer_flags & .PERIODIC_CAPABLE)
+        log("HPET timer % is not periodic capable", timer_index);
+
+    if !(timer_flags & .SIXTYFOUR_BIT_CAPABLE)
+        log("HPET timer % is not 64bit capable", timer_index);
+
+    timer_flags |=  (.INTERRUPT_ENABLE | .WRITE_ACCUMULATOR_ENABLE);
+    timer_flags &= ~ .INTERRUPT_TYPE;
+
+    if periodic  timer_flags |=  .PERIODIC_ENABLE;
+    else         timer_flags &= ~.PERIODIC_ENABLE;
+
+    write(register_offset + .TIMER0, cast(u64) timer_flags);
+
+    timer := *hpet.timers[timer_index];
+
+    ticks_per_second := cast(u64) 1_000_000_000_000_000 / hpet.base_period_femtoseconds;
+    timer.ticks_per_interrupt = ticks_per_second / frequency;
+
+    write(register_offset + .TIMER0_COMP, timer.ticks_per_interrupt);
+
+    timer.counter = 0;
+}
+
+hpet_restart :: () {
+    config := read(Hpet_Register.CONFIG);
+
+    ENABLE_BIT :: cast(u64) Hpet_Config_Flags.ENABLE;
+
+    write(.CONFIG, config & ~ENABLE_BIT);
+    write(Hpet_Register.COUNTER, 0);
+    write(.CONFIG, config | ENABLE_BIT);
+}
+
+calibrate_apic :: () {
+    for 1..10 {
+        // Calibrate Local APIC timer using HPET
+        hpet_configure_timer(timer_index = 1, frequency = 10, periodic = false);
+        hpet_restart();
+
+        write_apic_register(.TIC__TIMER_INITIAL, 0xffff_ffff);
+        write_apic_register(.DV__TIMER_DIVIDE, 0b011);
+
+        while kernel_globals.high_precision_timer.timers[0].counter == 0 {
+            #asm { hlt; }
+        }
+
+        apic_ticks_elapsed := 0xffff_ffff - read_apic_register(.TCC__TIMER_CURRENT);
+        print("APIC ticks in 100ms: %\n", apic_ticks_elapsed);
+    }
+}
+
+#program_export hpet_timer0_interrupt :: (data: *Interrupt_Stack()) #c_call {
+    using kernel_globals.high_precision_timer;
+
+    sequence_write(*seq_lock, #code {
+        timers[0].counter += 1;
+        timers[0].ticks_at_last_interrupt = read(.COUNTER);
+    });
+
+    write_apic_register(.EOI__END_OF_INTERRUPT, 0);
+} @InterruptRoutine
+
+#program_export hpet_timer1_interrupt :: (data: *Interrupt_Stack()) #c_call {
+    using kernel_globals.high_precision_timer;
+    timers[0].counter += 1;
+    write_apic_register(.EOI__END_OF_INTERRUPT, 0);
+} @InterruptRoutine

@@ -7,7 +7,7 @@ set :: bitfield_set;
 
 #load "../boot_data.jai";
 
-#load "acpi.jai";
+#load "apic.jai";
 #load "x64.jai";
 #load "journal.jai";
 #load "pci_express.jai";
@@ -160,9 +160,9 @@ kernel_entry :: () #no_context {
         startup_application_processors();
 
         acquire(*scheduler.spinlock);
-        for 1..5 {
+        for 1..15 {
             new_task := create_task();
-            array_add(*scheduler.waiting_to_run, new_task);
+            queue_push(*scheduler.waiting_to_run, new_task);
         }
         release(*scheduler.spinlock);
 
@@ -240,10 +240,10 @@ make_kernel_context :: () -> Context #no_context {
 
             new := cast(*void) physical + DIRECT_MAPPING_BASE;
 
-            if old_size {
-                memcpy(new, old_memory, old_size);
-                #this(.FREE, old_size, 0, old_memory, null);
-            }
+            // if old_size && old_memory && mode == .RESIZE {
+            //     memcpy(new, old_memory, old_size);
+            //     #this(.FREE, old_size, 0, old_memory, null);
+            // }
 
             page := *kernel_globals.page_frames[physical / 4096];
             page.flags |= ifx use_block_allocator then .ALLOCATOR_TAG_BLOCK else .ALLOCATOR_TAG_SINGLE_PAGE;
@@ -665,6 +665,64 @@ free_block :: (allocator: *Block_Allocator, address: u64) -> bool {
 
 
 
+Acpi_RSDP__Root_System_Description_Pointer :: struct {
+    signature: [8] u8;
+    checksum: u8;
+    oem_id: [6] u8;
+    revision: u8;
+    rsdt_address: u32;
+
+    length: u32;
+    xsdt_address: u64 #align 4;
+    checksum_2: u8;
+    reserved: [3] u8;
+}
+
+Acpi_Table_Header :: struct {
+    signature: [4] u8;
+    length: u32;
+    revision: u8;
+    checksum: u8;
+    oem_id: [6] u8;
+    oem_table_id: [8] u8;
+    oem_revision: u32;
+    creator_id: u32;
+    creator_revision: u32;
+
+    // Note that this is only aligned to 4 bytes, so if you put this in a struct followed by a u64, it will be wrong.
+} #no_padding
+
+find_acpi_table :: (signature: string) -> *Acpi_Table_Header {
+    table_size := kernel_globals.root_acpi_table.length - size_of(Acpi_Table_Header);
+
+    pointer_size := cast(u64) (ifx kernel_globals.acpi_version then 8 else 4);
+    pointer_count := table_size / pointer_size;
+
+    table_base := cast(u64) (kernel_globals.root_acpi_table + 1);
+
+    for table_index: 0..pointer_count - 1 {
+        offset := table_index * pointer_size + table_base;
+
+        phys := ifx kernel_globals.acpi_version {
+            << cast(*u64) offset;
+        } else {
+            cast(u64) << cast(*u32) offset;
+        }
+
+        header := cast(*Acpi_Table_Header) (phys + DIRECT_MAPPING_BASE);
+
+        for 0..3 if header.signature[it] != signature[it] {
+            continue table_index;
+        }
+
+        return header;
+    }
+
+    return null;
+}
+
+
+
 // This is implemented in Runtime_Support, so that write_string can go to serial
 // serial_out :: (data: string)
 
@@ -764,10 +822,6 @@ allocate_interrupt_gate :: () -> int {
     next_free_interrupt_gate += 1;
     return result;
 }
-
-
-
-
 
 
 
