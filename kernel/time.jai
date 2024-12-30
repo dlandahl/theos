@@ -167,11 +167,9 @@ rtc_init :: () {
     BCD_MODE   : u8 : 0x4;
 
     status := rtc_read(.STATUS_B);
-    status |= BCD_MODE;
     status |= _24H_CLOCK;
     rtc_write(.STATUS_B, status);
 
-    status = rtc_read(.STATUS_B);
     kernel_globals.rtc_format_is_bcd = status & BCD_MODE == 0;
 }
 

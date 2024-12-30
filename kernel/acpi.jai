@@ -182,7 +182,7 @@ initialize_apic :: () {
     register_interrupt_gate(int__fault_12, 12, true);
     register_interrupt_gate(int__general_protection_fault, 13, true);
     register_interrupt_gate(int__fault_14, 14, true);
-    register_interrupt_gate(int__fault_15, 15, true);
+    register_interrupt_gate(int__simd_floating_point_exception, 19, true);
 
     acpi_header := cast(*Acpi_MADT) find_acpi_table("APIC");
 
@@ -322,6 +322,9 @@ ap_entry_point :: () #c_call {
 
     push_context c {
         init_processor_core();
+
+        core := get_current_core();
+        print("Starting core %\n", core.id);
 
         core_begin_multitasking();
 
@@ -699,7 +702,8 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
 
     push_context c {
         core := get_current_core();
-        print("General Protection Fault    (On core %)\n", core.id);
+        task := kernel_globals.scheduler.current_task[core.id];
+        print("General Protection Fault    (On core %, running thread %)\n", core.id, task.id);
         print("RIP: 0x%\n", stack.ip);
         print("RSP: 0x%\n", stack.sp);
         print("SS: %\n", stack.ss);
@@ -708,13 +712,6 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
 
         print("Stack trace of the main thread:\n");
         print_stack_trace(kernel_globals.main_thread_context.stack_trace);
-
-        print("Outer stack:\n");
-        outer := cast(*Interrupt_Stack().Architectural_Part) stack.sp + 1;
-        print("RIP: 0x%\n", outer.ip);
-        print("RSP: 0x%\n", outer.sp);
-        print("SS: %\n", outer.ss);
-        print("CS: %\n", outer.cs);
         bluescreen();
     }
 } @InterruptRoutine

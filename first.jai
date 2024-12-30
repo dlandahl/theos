@@ -436,12 +436,12 @@ global int__%1
 align 0x8
 int__%1:
     cli
-
     push_all
+
     mov rdi, rsp
     call %1
-    pop_all
 
+    pop_all
     iretq
 
 END;

@@ -238,5 +238,41 @@ enable_cpu_features :: () #no_context {
                 set_cr4 cr4;
             }
         }
+
+        // Mask out all the FP exceptions for now
+        using mxcsr: Mxcsr;
+        pmxcsr := *mxcsr;
+
+        mask := IM__invalid_operation_mask
+              | DM__denormal_operation_mask
+              | ZM__divide_by_zero_mask
+              | OM__overflow_mask
+              | UM__underflow_mask
+              | PM__precision_mask;
+
+        #asm {
+            stmxcsr [pmxcsr];
+            or.q [pmxcsr], mask;
+            ldmxcsr [pmxcsr];
+        }
     }
+}
+
+Mxcsr :: enum_flags u64 {
+    IE__invalid_operation;
+    DE__denormal;
+    ZE__divide_by_zero;
+    OE__overflow;
+    UE__underflow;
+    PE__precision;
+    DAZ__denormals_are_zeros;
+    IM__invalid_operation_mask;
+    DM__denormal_operation_mask;
+    ZM__divide_by_zero_mask;
+    OM__overflow_mask;
+    UM__underflow_mask;
+    PM__precision_mask;
+    RC__rounding_control0;
+    RC__rounding_control1;
+    FTZ__flush_to_zero;
 }

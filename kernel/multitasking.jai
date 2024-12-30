@@ -33,7 +33,12 @@ Scheduler :: struct {
 }
 
 Xsave_Area :: struct {
-    fpu: [512] u8 #align 16;
+    // Warning: this struct requires 16-byte alignment to be accessed by fxsave64 etc.
+    fpu: [512] u8;
+
+    #place fpu;
+    pad: [24] u8;
+    mxcsr: Mxcsr;
 }
 
 initialize_scheduler :: () {
@@ -41,6 +46,7 @@ initialize_scheduler :: () {
     register_interrupt_gate(task_switch, TASK_SWITCH_GATE);
 
     using kernel_globals;
+    scheduler = .{};
 
     scheduler.tasks.allocator = context.allocator;
     scheduler.next_id = 1;
@@ -70,16 +76,16 @@ core_begin_multitasking :: () {
         lapic_timer_gate := allocate_interrupt_gate();
         register_interrupt_gate(int__local_apic_timer_interrupt, lapic_timer_gate);
 
-        write_apic_register(.TIC__TIMER_INITIAL, 0x0100_0000);
+        spurious := read_apic_register(.SPURIOUS_INTERRUPT);
+        write_apic_register(.SPURIOUS_INTERRUPT, spurious | 0x1ff);
 
-        lvtt := << cast(*Acpi_Lvt) *read_apic_register(.LVT__TIMER);
+        write_apic_register(.TIC__TIMER_INITIAL, 0x0400_0000);
+
+        lvtt: Acpi_Lvt;
         lvtt.vector = cast(u8) lapic_timer_gate;
         lvtt.flags &= ~.M__mask;
         lvtt.flags |= .TMM__timer_mode;
         write_apic_register(.LVT__TIMER, << cast(*u32) *lvtt);
-
-        spurious := read_apic_register(.SPURIOUS_INTERRUPT);
-        write_apic_register(.SPURIOUS_INTERRUPT, spurious | 0x100);
     }
 }
 
@@ -91,8 +97,8 @@ create_task :: () -> *Task_Info {
     locator, new_task := bucket_array_add(*scheduler.tasks, .{});
     new_task.cr3 = cast(u64) *page_tables.pml4 - DIRECT_MAPPING_BASE;
 
-    new_task.user_stack   = alloc(0x10_0000) + 0x10_0000;
-    new_task.kernel_stack = alloc(0x2000) + 0x2000;
+    new_task.user_stack   = alloc(0x1_0000) + 0x1_0000;
+    new_task.kernel_stack = alloc(0x1_0000) + 0x1_0000;
 
     stack := cast(*Interrupt_Stack) new_task.kernel_stack - 1;
     stack.flags = .IF__interrupt;
@@ -105,6 +111,10 @@ create_task :: () -> *Task_Info {
     new_task.id = scheduler.next_id;
     scheduler.next_id += 1;
 
+    // For now, copy FP exception settings from the parent thread
+    mxcsr := *new_task.xsave_area.mxcsr;
+    #asm { stmxcsr [mxcsr]; }
+
     return new_task;
 }
 
@@ -114,11 +124,12 @@ sleep_until :: (time: Apollo_Time) {
     core := get_current_core();
     task := scheduler.current_task[core.id];
 
-    task.sleeping = true;
-    task.sleeping_until = time;
-
     {
         Scoped_Acquire(*scheduler.spinlock);
+
+        task.sleeping = true;
+        task.sleeping_until = time;
+
         array_add(*scheduler.sleeping, task);
     }
 
@@ -135,6 +146,7 @@ wake_sleeping_task :: () -> bool {
 
     Scoped_Acquire(*scheduler.spinlock);
     for scheduler.sleeping {
+
         // If we keep these ordered by time then we wouldn't have to iterate.
         if it.sleeping_until < time {
             it.sleeping = false;
@@ -159,6 +171,7 @@ yield :: (loc := #caller_location) #no_context {
 
     c: Context;
     push_context c {
+
         wake_sleeping_task();
 
         while true {
@@ -195,7 +208,6 @@ yield :: (loc := #caller_location) #no_context {
         }
     }
 
-    if next.sleeping write_string("Next.sleeping\n");
     current := *scheduler.current_task[core.id];
     core.task_state_segment.rsp[0] = next.kernel_stack;
 
@@ -274,7 +286,7 @@ task_do_work_in_ring_3 :: () #c_call {
 
             print("Thread % doing some work in user mode, on core %.\n", thread.id, core.id);
 
-            for 1..1_000_000 {
+            for 1..10_000_000 {
                 #asm { pause; }
             }
         }

@@ -103,6 +103,7 @@ kernel_entry :: () #no_context {
         // Don't use Basic.calendar_to_apollo, because it's OS specific
         boot_time = native_calendar_to_apollo(boot_calendar_time);
 
+
         using framebuffer;
 
         for y: 0..y_resolution-1 {
@@ -126,6 +127,7 @@ kernel_entry :: () #no_context {
 
 
         // Sequentially allocating interrupt gates, starting after the ISA exceptions
+        memset(interrupt_descriptor_table.data, 0, size_of(type_of(interrupt_descriptor_table)));
         next_free_interrupt_gate = 32;
 
 
@@ -153,26 +155,47 @@ kernel_entry :: () #no_context {
 
         // print_physical_memory_map();
 
+        core_begin_multitasking();
+
         startup_application_processors();
 
         acquire(*scheduler.spinlock);
-        for 1..4 {
+        for 1..5 {
             new_task := create_task();
             array_add(*scheduler.waiting_to_run, new_task);
         }
         release(*scheduler.spinlock);
 
-        core_begin_multitasking();
-
         #asm { sti; }
+
         while true {
             time := get_monotonic_system_time();
             print("Time: %\n", calendar_to_string(native_apollo_to_calendar(time)));
 
+            core := get_current_core();
+            print("This is thread % running on core %\n", scheduler.current_task[core.id].id, core.id);
             sleep_until(time + milliseconds_to_apollo(1000));
         }
     }
 }
+
+
+#program_export
+simd_floating_point_exception :: (stack: *Interrupt_Stack()) #c_call {
+
+    mxcsr: Mxcsr;
+    pmxcsr := *mxcsr;
+
+    #asm {
+        stmxcsr [pmxcsr];
+    }
+
+    c: Context;
+    push_context c {
+        print("Floating point exception: %\n", mxcsr);
+    }
+} @InterruptRoutine
+
 
 make_kernel_context :: () -> Context #no_context {
     c: Context;
@@ -309,7 +332,7 @@ init_processor_core :: (using core: *X64_Core = null) #no_context {
             base: *Global_Descriptor_Table #align 2;
         }
 
-        gdt_desc.limit = size_of(Global_Descriptor_Table)-1;
+        gdt_desc.limit = size_of(Global_Descriptor_Table);
         gdt_desc.base = *global_descriptor_table;
         pointer := *gdt_desc;
         #asm { lgdt [pointer]; }
@@ -330,7 +353,7 @@ init_processor_core :: (using core: *X64_Core = null) #no_context {
             base: *Interrupt_Gate_Descriptor #align 2;
         }
 
-        idt_desc.limit = size_of(type_of(kernel_globals.interrupt_descriptor_table))-1;
+        idt_desc.limit = size_of(type_of(kernel_globals.interrupt_descriptor_table));
         idt_desc.base = kernel_globals.interrupt_descriptor_table.data;
 
         pointer := *idt_desc;
@@ -694,11 +717,11 @@ Scoped_Acquire :: (lock: *Spinlock) #expand {
 
 
 
-Sequence_Lock :: u32;
+Sequence_Lock :: #type,distinct u32;
 
 sequence_read :: (lock: *Sequence_Lock, body: Code) #expand {
     while true {
-        sequence: u32;
+        sequence: Sequence_Lock;
 
         while true {
             sequence = lock.*;
