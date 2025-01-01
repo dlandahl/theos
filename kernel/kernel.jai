@@ -167,7 +167,6 @@ kernel_entry :: () #no_context {
         startup_application_processors();
 
         core := get_current_core();
-        scheduler := *core.scheduler;
 
         for 1..4 {
             new_task := create_task();
@@ -180,7 +179,7 @@ kernel_entry :: () #no_context {
             time := get_monotonic_system_time();
             print("Time: %\n", calendar_to_string(native_apollo_to_calendar(time)));
 
-            print("This is thread % running on core %\n", scheduler.current_task.id, core.id);
+            print("This is thread % running on core %\n", core.scheduler.current_task.id, core.id);
             sleep_until(time + milliseconds_to_apollo(1000));
         }
     }
@@ -386,10 +385,11 @@ init_processor_core :: () #no_context {
     {
         // Enable syscalls
 
-        star := (cast(u64) Segment_Selector.RING0_DATA) << 48;
-        star |= (cast(u64) Segment_Selector.RING0_CODE) << 32;
+        // According to https://www.felixcloutier.com/x86/sysret, sysret sets the privilege bits in the stack segment selector automatically, but this does not seem to happen in VirtualBox.
+        star := (cast(u64) Segment_Selector.RING0_DATA | 3) << 48;
+        star |= (cast(u64) Segment_Selector.RING0_CODE)     << 32;
         write_msr(.STAR__syscall_segment, star);
-        write_msr(.SFMASK__syscall_flags, ~0);
+        write_msr(.SFMASK__syscall_flags, 0);
 
         syscall_entry :: () #foreign Interrupts;
         write_msr(.LSTAR__syscall_address, cast(u64) cast(*void) syscall_entry);

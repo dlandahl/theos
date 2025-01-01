@@ -464,21 +464,40 @@ ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, gate_nu
 #program_export
 general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c_call {
     c: Context;
-    c.print_style.default_format_int.base = 16;
 
     push_context c {
         core := get_current_core();
         task := core.scheduler.current_task;
 
         print("General Protection Fault    (On core %, running thread %)\n", core.id, task.id);
+
+        c.print_style.default_format_int.base = 16;
         print("RIP: 0x%\n", stack.ip);
         print("RSP: 0x%\n", stack.sp);
         print("SS: %\n", stack.ss);
         print("CS: %\n", stack.cs);
-        print("Error Code: 0x%\n", stack.error_code);
 
-        print("Stack trace of the main thread:\n");
-        print_stack_trace(kernel_globals.main_thread_context.stack_trace);
+        Selector_Error_Code :: enum u32 {
+            external              :: 1;
+            descriptor_table_kind :: 2;
+            selector_index        :: 13;
+            reserved              :: 16;
+        } @Bitfield
+
+        Table_Kind :: enum {
+            GDT  :: 0b00;
+            IDT  :: 0b01;
+            LDT  :: 0b10;
+            IDT_ :: 0b11;
+        }
+
+        selector_error := cast(Selector_Error_Code) stack.error_code;
+
+        is_external := cast(bool)       bitfield_get(selector_error, .external);
+        table       := cast(Table_Kind) bitfield_get(selector_error, .descriptor_table_kind);
+        index       :=                  bitfield_get(selector_error, .selector_index);
+
+        print("Error code: external=%, table=%, index=% (0x%)\n", is_external, table, formatInt(index, base=10), index);
         bluescreen();
     }
 } @InterruptRoutine

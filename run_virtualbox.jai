@@ -10,7 +10,7 @@
     file_delete("disk_image.vdi");
 
     path := get_absolute_path(".");
-    set_logfile := "VBoxManage modifyvm new_os --uartmode1 file %/logs/vbox_serial_log.txt";
+    set_logfile := "VBoxManage modifyvm new_os --uartmode1 file \"%/logs/vbox_serial_log.txt\"";
     set_logfile = tprint(set_logfile, path);
 
     commands := string.[

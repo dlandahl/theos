@@ -165,7 +165,7 @@ Ia32_Model_Specific_Register :: enum {
     GS_BASE__gs_base          :: 0xc000_0101;
 }
 
-write_msr :: (msr: Ia32_Model_Specific_Register, value: u64) #no_context {
+write_msr :: (msr: Ia32_Model_Specific_Register, value: u64, loc := #caller_location) #no_context {
     high := value >> 32;
     low := value & 0xffff_ffff;
 

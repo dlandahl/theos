@@ -14,7 +14,7 @@ Task_Info :: struct {
     id: int;
 
     sleeping: bool;
-    sleeping_until: Apollo_Time;
+    sleep_until: Apollo_Time;
     next_sleeping: *Task_Info;
 
     on_core: int;
@@ -25,7 +25,7 @@ TASK_SWITCH_GATE :: 64;
 Scheduler :: struct {
     current_task: *Task_Info;
 
-    sleeping_queue: *Task_Info;
+    sleep_queue: *Task_Info;
 
     waiting_to_run: Queue(*Task_Info);
 
@@ -127,19 +127,19 @@ sleep_until :: (time: Apollo_Time) {
         Scoped_Acquire(*scheduler.spinlock);
 
         task.sleeping = true;
-        task.sleeping_until = time;
+        task.sleep_until = time;
 
-        queue := scheduler.sleeping_queue;
+        queue := scheduler.sleep_queue;
         previous: *Task_Info;
 
         if !queue {
-            scheduler.sleeping_queue = task;
+            scheduler.sleep_queue = task;
             task.next_sleeping = null;
         } else while (true) {
-            if !queue || queue.sleeping_until > time {
+            if !queue || queue.sleep_until > time {
 
-                if queue == scheduler.sleeping_queue {
-                    scheduler.sleeping_queue = task;
+                if queue == scheduler.sleep_queue {
+                    scheduler.sleep_queue = task;
                 }
 
                 if previous previous.next_sleeping = task;
@@ -164,18 +164,16 @@ wake_sleeping_task :: () -> bool {
 
     Scoped_Acquire(*scheduler.spinlock);
 
-    queue := scheduler.sleeping_queue;
+    queue := scheduler.sleep_queue;
 
-    if queue {
-        if queue.sleeping_until < time {
-            scheduler.sleeping_queue = queue.next_sleeping;
+    if queue && queue.sleep_until < time {
+        scheduler.sleep_queue = queue.next_sleeping;
 
-            queue_push(*scheduler.waiting_to_run, queue);
-            queue.sleeping = false;
-            queue.next_sleeping = null;
+        queue_push(*scheduler.waiting_to_run, queue);
+        queue.sleeping = false;
+        queue.next_sleeping = null;
 
-            return true;
-        }
+        return true;
     }
 
     return false;
@@ -271,13 +269,42 @@ sleep_from_user_mode :: (time: Apollo_Time) #no_context {
     }
 }
 
+print_from_user_mode :: (format: string, args: .. Any) {
+    syscall_number := 4;
+
+    builder: String_Builder;
+    print(*builder, format, ..args);
+
+    buffer := get_base_buffer(*builder);
+    while buffer {
+        data  := get_buffer_data(buffer);
+        count := buffer.count;
+
+        #asm SYSCALL_SYSRET {
+            syscall_number === a;
+            count === b;
+            data === d;
+
+            syscall c:, _11:, count, data, syscall_number;
+        }
+
+        buffer = buffer.next;
+    }
+
+    reset(*builder);
+}
+
 #program_export
 syscall_handler :: (data: *Syscall_Stack) #c_call {
-    if data.rax == 1 {
+
+    if data.rax == {
+      case 1;
         yield();
-    } else if data.rax == 2 {
+
+      case 2;
         data.rax = cast(u64) get_current_core();
-    } else if data.rax == 3 {
+
+      case 3;
         t: Apollo_Time;
         t.low  = data.rbx;
         t.high = cast(s64) data.rdx;
@@ -287,7 +314,14 @@ syscall_handler :: (data: *Syscall_Stack) #c_call {
             time := get_monotonic_system_time();
             sleep_until(time + t);
         }
-    } else {
+
+      case 4;
+        s: string;
+        s.count = cast(s64) data.rbx;
+        s.data =  cast(*u8) data.rdx;
+        write_string(s);
+
+      case;
         write_string("Invalid syscall parameter.\n");
         bluescreen();
     }
@@ -321,7 +355,7 @@ task_do_work_in_ring_3 :: () #c_call {
         thread := core.scheduler.current_task;
 
         while true {
-            print("Thread % doing some work in user mode, on core %.\n", thread.id, core.id);
+            print_from_user_mode("Thread % doing some work in user mode, on core %.\n", thread.id, core.id);
 
             for 1..5_000_000 {
                 #asm { pause; mov d: gpr === di, it; }
@@ -329,7 +363,7 @@ task_do_work_in_ring_3 :: () #c_call {
 
             ms := rdtsc() % 2000;
 
-            print("Sleeping for % ms\n", ms);
+            print_from_user_mode("Sleeping for % ms\n", ms);
             sleep_from_user_mode(milliseconds_to_apollo(xx ms));
         }
     }
@@ -354,8 +388,6 @@ spurious_interrupt :: (stack: Interrupt_Stack()) #c_call {
 } @InterruptRoutine
 
 
-// For the "sleeping" and "waiting for mutex" queues I need to be able to insert and
-// remove from the middle. Using a linked list would be better for that.
 
 Queue :: struct (Item_Type: Type) {
     // Using a resizeable array to hold the underlying data  to get the resizing logic from Basic/Array.jai. It means we need to keep saying items.count = items.allocated.
