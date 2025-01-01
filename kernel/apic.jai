@@ -110,29 +110,12 @@ Apic_Local_Vector_Table_Entry :: struct {
 
 initialize_apic :: () {
 
-    // Disable the older interrupt controller. Sort of assume UEFI does this anyway.
+    // Disable the older interrupt controller. I sort of assume UEFI does this anyway.
     #asm {
         mov.b ax: gpr === a, 0xff;
         out.b 0x21, ax;
         out.b 0xa1, ax;
     }
-
-    register_interrupt_gate(int__fault_0, 0, true);
-    register_interrupt_gate(int__fault_1, 1, true);
-    register_interrupt_gate(int__fault_2, 2, true);
-    register_interrupt_gate(int__fault_3, 3, true);
-    register_interrupt_gate(int__fault_4, 4, true);
-    register_interrupt_gate(int__fault_5, 5, true);
-    register_interrupt_gate(int__fault_6, 6, true);
-    register_interrupt_gate(int__fault_7, 7, true);
-    register_interrupt_gate(int__fault_8, 8, true);
-    register_interrupt_gate(int__fault_9, 9, true);
-    register_interrupt_gate(int__fault_10, 10, true);
-    register_interrupt_gate(int__fault_11, 11, true);
-    register_interrupt_gate(int__fault_12, 12, true);
-    register_interrupt_gate(int__general_protection_fault, 13, true);
-    register_interrupt_gate(int__fault_14, 14, true);
-    register_interrupt_gate(int__simd_floating_point_exception, 19, true);
 
     acpi_header := cast(*Acpi_Madt) find_acpi_table("APIC");
 
@@ -161,12 +144,30 @@ initialize_apic :: () {
         kernel_globals.apic = cast(*void) virtual;
     }
 
+    bootstrap_core := array_add(*kernel_globals.processor_cores);
+    bootstrap_core.local_apic_id = read_apic_register(.APIC_ID) >> 24;
+    init_processor_core();
+
+    register_interrupt_gate(int__fault_0, 0, true);
+    register_interrupt_gate(int__fault_1, 1, true);
+    register_interrupt_gate(int__fault_2, 2, true);
+    register_interrupt_gate(int__fault_3, 3, true);
+    register_interrupt_gate(int__fault_4, 4, true);
+    register_interrupt_gate(int__fault_5, 5, true);
+    register_interrupt_gate(int__fault_6, 6, true);
+    register_interrupt_gate(int__fault_7, 7, true);
+    register_interrupt_gate(int__fault_8, 8, true);
+    register_interrupt_gate(int__fault_9, 9, true);
+    register_interrupt_gate(int__fault_10, 10, true);
+    register_interrupt_gate(int__fault_11, 11, true);
+    register_interrupt_gate(int__fault_12, 12, true);
+    register_interrupt_gate(int__general_protection_fault, 13, true);
+    register_interrupt_gate(int__fault_14, 14, true);
+    register_interrupt_gate(int__simd_floating_point_exception, 19, true);
+
     //
     // Iterate interrupt controller structures
     //
-
-    bootstrap_processor := get_bootstrap_processor();
-    bootstrap_processor.local_apic_id = read_apic_register(.APIC_ID) >> 24;
 
     cursor := cast(u64) acpi_header + size_of(Acpi_Madt);
 
@@ -178,7 +179,7 @@ initialize_apic :: () {
           case .LOCAL_APIC;
             lapic_ics := cast(*Acpi_Madt.Ics_Local_Apic) ics;
 
-            if lapic_ics.apic_id == bootstrap_processor.local_apic_id {
+            if lapic_ics.apic_id == bootstrap_core.local_apic_id {
                 continue;
             }
 
@@ -207,6 +208,11 @@ initialize_apic :: () {
             // Todo
         }
     }
+
+    timer_gate := allocate_interrupt_gate();
+    register_interrupt_gate(int__local_apic_timer_interrupt, timer_gate);
+
+    kernel_globals.local_apic_timer_interrupt_gate = timer_gate;
 }
 
 startup_application_processors :: () {
@@ -225,7 +231,7 @@ startup_application_processors :: () {
     ap_startup_data.entry_point = cast(*void) ap_entry_point;
     ap_startup_data.pml4 = cast(u32) kernel_globals.boot_data.page_tables.pml4.data;
 
-    bsp := get_bootstrap_processor();
+    bsp := get_current_core();
 
     for* kernel_globals.processor_cores {
         if it == bsp {
@@ -265,37 +271,41 @@ ap_startup_bin :: #run,host -> [] u8 {
 ap_startup_spinlock: Spinlock;
 
 ap_entry_point :: () #c_call {
-    using kernel_globals;
-
     release(*ap_startup_spinlock);
 
-    c: Context;
-
+    c := make_kernel_context();
     push_context c {
         init_processor_core();
 
         core := get_current_core();
-        print("Starting core %\n", core.id);
 
         core_begin_multitasking();
 
+        for 1..4 {
+            new_task := create_task();
+            put_task_on_core(new_task, core);
+        }
+
         #asm { sti; }
 
-        while true yield();
+        while true {
+            time := get_monotonic_system_time();
+            sleep_until(time + milliseconds_to_apollo(2000));
+            print("Whatever.\n");
+        }
     }
 }
 
 get_current_core :: (loc := #caller_location) -> *X64_Core #no_context {
-    my_local_apic_id := read_apic_register(.APIC_ID) >> 24;
+    // Depending on FSGSBASE because for some reason I could not get GS_BASE MSR to work.
 
-    for* kernel_globals.processor_cores {
-        if it.local_apic_id == my_local_apic_id {
-            return it;
-        }
+    core: *X64_Core;
+    #asm FSGSBASE {
+        rdgsbase core;
     }
 
-    bluescreen(loc);
-    return null;
+    if !core bluescreen(loc);
+    return core;
 }
 
 
@@ -458,7 +468,8 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
 
     push_context c {
         core := get_current_core();
-        task := kernel_globals.scheduler.current_task[core.id];
+        task := core.scheduler.current_task;
+
         print("General Protection Fault    (On core %, running thread %)\n", core.id, task.id);
         print("RIP: 0x%\n", stack.ip);
         print("RSP: 0x%\n", stack.sp);

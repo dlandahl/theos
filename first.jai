@@ -410,7 +410,7 @@ enter_user_mode:
 
 
 global init_segment_registers
-align 0x8
+align 0x10
 init_segment_registers:
     push 0x8
     lea rax, [rel .reload_cs]
@@ -420,9 +420,12 @@ init_segment_registers:
     mov ax, 0x10
     mov ds, ax
     mov ss, ax
-    mov es, ax
-    mov gs, ax
-    mov fs, ax
+    ret
+
+global get_cpu_local_data
+align 0x10
+get_cpu_local_data:
+    mov rax, gs:0
     ret
 
 END;

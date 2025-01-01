@@ -16,19 +16,18 @@ Task_Info :: struct {
     sleeping: bool;
     sleeping_until: Apollo_Time;
     next_sleeping: *Task_Info;
+
+    on_core: int;
 }
 
 TASK_SWITCH_GATE :: 64;
 
 Scheduler :: struct {
-    current_task: [..] *Task_Info;
+    current_task: *Task_Info;
 
     sleeping_queue: *Task_Info;
 
     waiting_to_run: Queue(*Task_Info);
-
-    tasks: Bucket_Array(Task_Info, 256, always_iterate_by_pointer=true);
-    next_id: int;
 
     spinlock: Spinlock;
 }
@@ -42,64 +41,63 @@ Xsave_Area :: struct {
     mxcsr: Mxcsr;
 }
 
-initialize_scheduler :: () {
-    task_switch :: () #foreign Interrupts;
-    register_interrupt_gate(task_switch, TASK_SWITCH_GATE);
-
+allocate_task_info_struct :: () -> *Task_Info {
     using kernel_globals;
-    scheduler = .{};
 
-    scheduler.tasks.allocator = context.allocator;
-    scheduler.next_id = 1;
-    array_resize(*scheduler.current_task, processor_cores.count);
+    Scoped_Acquire(*add_task_info_struct_spinlock);
 
-    queue_reserve(*scheduler.waiting_to_run, 256);
+    locator, task := bucket_array_add(*tasks, .{});
+    task.id = next_task_id;
+    next_task_id += 1;
+
+    print("Created task id %\n", task.id);
+
+    return task;
 }
 
 core_begin_multitasking :: () {
-    using kernel_globals;
 
-    Scoped_Acquire(*scheduler.spinlock);
+    core := get_current_core();
+    scheduler := *core.scheduler;
 
-    locator, main_task := bucket_array_add(*scheduler.tasks, .{});
+    queue_reserve(*scheduler.waiting_to_run, 256);
 
-    main_task.cr3 = cast(u64) *page_tables.pml4 - DIRECT_MAPPING_BASE;
-    main_task.id  = scheduler.next_id;
+    main_task := allocate_task_info_struct();
+    main_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
 
     mxcsr := *main_task.xsave.mxcsr;
     #asm { stmxcsr [mxcsr]; }
 
-    scheduler.next_id += 1;
-
-    core := get_current_core();
-    scheduler.current_task[core.id] = main_task;
+    scheduler.current_task = main_task;
 
     {
         // Enable Local APIC timer interrupts
-        lapic_timer_gate := allocate_interrupt_gate();
-        register_interrupt_gate(int__local_apic_timer_interrupt, lapic_timer_gate);
 
+        register_interrupt_gate(int__spurious_interrupt, 0xff);
         spurious := read_apic_register(.SPURIOUS_INTERRUPT);
         write_apic_register(.SPURIOUS_INTERRUPT, spurious | 0x1ff);
-        register_interrupt_gate(int__spurious_interrupt, 0xff);
 
         write_apic_register(.TIC__TIMER_INITIAL, 0x0400_0000);
 
         lvtt: Apic_Local_Vector_Table_Entry;
-        lvtt.vector = cast(u8) lapic_timer_gate;
+        lvtt.vector = cast(u8) kernel_globals.local_apic_timer_interrupt_gate;
         lvtt.flags &= ~.M__mask;
         lvtt.flags |= .TMM__timer_mode;
         write_apic_register(.LVT__TIMER, << cast(*u32) *lvtt);
     }
 }
 
+put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
+    scheduler := *core.scheduler;
+    Scoped_Acquire(*scheduler.spinlock);
+
+    task.on_core = core.id;
+    queue_push(*scheduler.waiting_to_run, task);
+}
+
 create_task :: () -> *Task_Info {
-    using kernel_globals;
-
-    // Scoped_Acquire(*scheduler.spinlock);
-
-    locator, new_task := bucket_array_add(*scheduler.tasks, .{});
-    new_task.cr3 = cast(u64) *page_tables.pml4 - DIRECT_MAPPING_BASE;
+    new_task := allocate_task_info_struct();
+    new_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
 
     new_task.user_stack   = alloc(0x1_0000) + 0x1_0000;
     new_task.kernel_stack = alloc(0x1_0000) + 0x1_0000;
@@ -112,8 +110,6 @@ create_task :: () -> *Task_Info {
     stack.sp = new_task.kernel_stack;
 
     new_task.rsp = cast(*void) stack;
-    new_task.id = scheduler.next_id;
-    scheduler.next_id += 1;
 
     // For now, copy FP exception settings from the parent thread
     mxcsr := *new_task.xsave.mxcsr;
@@ -123,10 +119,9 @@ create_task :: () -> *Task_Info {
 }
 
 sleep_until :: (time: Apollo_Time) {
-    using kernel_globals;
 
-    core := get_current_core();
-    task := scheduler.current_task[core.id];
+    scheduler := *get_current_core().scheduler;
+    task := scheduler.current_task;
 
     {
         Scoped_Acquire(*scheduler.spinlock);
@@ -162,7 +157,8 @@ sleep_until :: (time: Apollo_Time) {
 }
 
 wake_sleeping_task :: () -> bool {
-    using kernel_globals;
+    core := get_current_core();
+    scheduler := *core.scheduler;
 
     time := get_monotonic_system_time();
 
@@ -186,11 +182,10 @@ wake_sleeping_task :: () -> bool {
 }
 
 yield :: (loc := #caller_location) #no_context {
-    using kernel_globals;
-    next: *Task_Info;
-
     core := get_current_core();
-    current_task := scheduler.current_task[core.id];
+    scheduler := *core.scheduler;
+
+    next: *Task_Info;
 
     c: Context;
     push_context c {
@@ -213,6 +208,8 @@ yield :: (loc := #caller_location) #no_context {
 
             next = queue_pop(*scheduler.waiting_to_run);
 
+            current_task := scheduler.current_task;
+
             if next == current_task {
                 release(*scheduler.spinlock);
                 return;
@@ -227,7 +224,7 @@ yield :: (loc := #caller_location) #no_context {
         }
     }
 
-    current := *scheduler.current_task[core.id];
+    current := *scheduler.current_task;
     core.task_state_segment.rsp[0] = next.kernel_stack;
 
     #asm {
@@ -299,7 +296,7 @@ syscall_handler :: (data: *Syscall_Stack) #c_call {
 #program_export
 get_kernel_stack :: () -> *void #c_call {
     core := get_current_core();
-    return kernel_globals.scheduler.current_task[core.id].kernel_stack;
+    return core.scheduler.current_task.kernel_stack;
 }
 
 enter_user_mode :: (entry_point: () #c_call, flags: X64_Flags, user_stack: *void) #foreign Interrupts;
@@ -307,20 +304,11 @@ enter_user_mode :: (entry_point: () #c_call, flags: X64_Flags, user_stack: *void
 
 
 task_do_work :: () #c_call {
-    release(*kernel_globals.scheduler.spinlock);
-
     core := get_current_core();
-    user_stack := kernel_globals.scheduler.current_task[core.id].user_stack;
-    entry_point := task_do_work_in_ring_3;
+    release(*core.scheduler.spinlock);
 
-    // c: Context;
-    // push_context c {
-    //     while true {
-    //         time := get_monotonic_system_time();
-    //         print("Kernel mode thread going to sleep on core %\n", core.id);
-    //         sleep_until(time + milliseconds_to_apollo(1500));
-    //     }
-    // }
+    user_stack := core.scheduler.current_task.user_stack;
+    entry_point := task_do_work_in_ring_3;
 
     enter_user_mode(entry_point, .IF__interrupt, user_stack);
 }
@@ -329,15 +317,20 @@ task_do_work_in_ring_3 :: () #c_call {
     c := make_kernel_context();
 
     push_context c {
-        while true {
-            core := get_current_core_from_user_mode();
-            thread := kernel_globals.scheduler.current_task[core.id];
+        core := get_current_core_from_user_mode();
+        thread := core.scheduler.current_task;
 
+        while true {
             print("Thread % doing some work in user mode, on core %.\n", thread.id, core.id);
 
             for 1..5_000_000 {
-                #asm { pause; }
+                #asm { pause; mov d: gpr === di, it; }
             }
+
+            ms := rdtsc() % 2000;
+
+            print("Sleeping for % ms\n", ms);
+            sleep_from_user_mode(milliseconds_to_apollo(xx ms));
         }
     }
 }

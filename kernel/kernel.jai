@@ -15,6 +15,8 @@ set :: bitfield_set;
 #load "time.jai";
 
 X64_Core :: struct {
+    // It might make sense to #add_context this because there's one per core, but many procedures are called from interrupt routines so you would have to always manually set it.
+
     task_state_segment: Tss_With_Iopb #align 0x80;
 
     // Align to cache block so no extra memory accesses are required on context switch
@@ -22,6 +24,8 @@ X64_Core :: struct {
 
     local_apic_id: u32;
     id: int;
+
+    scheduler: Scheduler;
 }
 
 Kernel_Globals :: struct {
@@ -43,20 +47,20 @@ Kernel_Globals :: struct {
 
     apic: *void;
     io_apic: *u32;
+    local_apic_timer_interrupt_gate: int;
 
     high_precision_timer: HPET;
 
     main_thread_context: Context;
-    scheduler: Scheduler;
 
     memory_spinlock: Spinlock;
 
+    tasks: Bucket_Array(Task_Info, 256, always_iterate_by_pointer=true);
+    next_task_id: int;
+    add_task_info_struct_spinlock: Spinlock;
+
     boot_time: Apollo_Time;
     rtc_format_is_bcd: bool;
-}
-
-get_bootstrap_processor :: () -> *X64_Core #no_context {
-    return *kernel_globals.processor_cores[0];
 }
 
 kernel_globals: Kernel_Globals;
@@ -143,15 +147,18 @@ kernel_entry :: () #no_context {
         }
 
 
-        array_add(*processor_cores, .{});
-        init_processor_core(*processor_cores[0]);
-
         initialize_apic();
+
+
+        task_switch :: () #foreign Interrupts;
+        register_interrupt_gate(task_switch, TASK_SWITCH_GATE);
+
+        tasks.allocator = context.allocator;
+        next_task_id = 1;
+
 
         initialize_hpet();
         hpet_configure_timer(timer_index = 0, frequency = 10, true);
-
-        initialize_scheduler();
 
         // print_physical_memory_map();
 
@@ -159,12 +166,13 @@ kernel_entry :: () #no_context {
 
         startup_application_processors();
 
-        acquire(*scheduler.spinlock);
-        for 1..1 {
+        core := get_current_core();
+        scheduler := *core.scheduler;
+
+        for 1..4 {
             new_task := create_task();
-            queue_push(*scheduler.waiting_to_run, new_task);
+            put_task_on_core(new_task, core);
         }
-        release(*scheduler.spinlock);
 
         #asm { sti; }
 
@@ -172,8 +180,7 @@ kernel_entry :: () #no_context {
             time := get_monotonic_system_time();
             print("Time: %\n", calendar_to_string(native_apollo_to_calendar(time)));
 
-            core := get_current_core();
-            print("This is thread % running on core %\n", scheduler.current_task[core.id].id, core.id);
+            print("This is thread % running on core %\n", scheduler.current_task.id, core.id);
             sleep_until(time + milliseconds_to_apollo(1000));
         }
     }
@@ -295,18 +302,34 @@ make_kernel_context :: () -> Context #no_context {
     return c;
 }
 
-init_processor_core :: (using core: *X64_Core = null) #no_context {
-    if !core core = get_current_core();
+init_processor_core :: () #no_context {
+    core: *X64_Core;
+
+    enable_cpu_features();
+
+    {
+        my_local_apic_id := read_apic_register(.APIC_ID) >> 24;
+
+        for* kernel_globals.processor_cores {
+            if it.local_apic_id == my_local_apic_id {
+                core = it;
+                break;
+            }
+        }
+        if !core bluescreen();
+
+        #asm FSGSBASE { wrgsbase core; }
+    }
 
     {
         // Global descriptor table
 
         // Use the IO Permission Bitmap to give user mode access to all IO ports for now
-        memset(task_state_segment.bitmap.data, 0, 8192);
-        task_state_segment.iopb = size_of(Task_State_Segment);
+        memset(core.task_state_segment.bitmap.data, 0, 8192);
+        core.task_state_segment.iopb = size_of(Task_State_Segment);
 
         tss_desc: System_Segment_Descriptor;
-        tss_address := cast(u64) *task_state_segment;
+        tss_address := cast(u64) *core.task_state_segment;
 
         tss_desc.segment_limit = size_of(Tss_With_Iopb);
         tss_desc.base_address_0 = cast(u16)  tss_address;
@@ -317,7 +340,7 @@ init_processor_core :: (using core: *X64_Core = null) #no_context {
 
         using Gdt_Entry_Flags;
 
-        global_descriptor_table = Global_Descriptor_Table.{
+        core.global_descriptor_table = Global_Descriptor_Table.{
             0x0,
             READ_WRITE | PRESENT | DESCRIPTOR_TYPE | LONG_MODE_CODE | EXECUTABLE,
             READ_WRITE | PRESENT | DESCRIPTOR_TYPE,
@@ -333,7 +356,7 @@ init_processor_core :: (using core: *X64_Core = null) #no_context {
         }
 
         gdt_desc.limit = size_of(Global_Descriptor_Table);
-        gdt_desc.base = *global_descriptor_table;
+        gdt_desc.base = *core.global_descriptor_table;
         pointer := *gdt_desc;
         #asm { lgdt [pointer]; }
 
@@ -377,8 +400,6 @@ init_processor_core :: (using core: *X64_Core = null) #no_context {
         efer |= EFER_SCE__syscall_enable;
         write_msr(.EFER__extended_features, efer);
     }
-
-    enable_cpu_features();
 }
 
 bluescreen :: (loc := #caller_location) #no_context {
@@ -528,7 +549,7 @@ map_page :: (virtual_address: u64, physical_address: u64, flags := Page_Flags.PR
 }
 
 Page_Flags :: enum_flags u64 {
-    PRESENT         :: 1 << 0;
+    PRESENT         :: 1 << 0 | Page_Flags.USER_SUPERVISOR;
     READ_WRITE      :: 1 << 1;
     USER_SUPERVISOR :: 1 << 2;
     WRITE_THROUGH   :: 1 << 3;
@@ -809,7 +830,7 @@ sequence_write :: (lock: *Sequence_Lock, body: Code) #expand {
 
 
 
-allocate_interrupt_gate :: () -> int {
+allocate_interrupt_gate :: (loc := #caller_location) -> int {
     using kernel_globals;
 
     if next_free_interrupt_gate == TASK_SWITCH_GATE {

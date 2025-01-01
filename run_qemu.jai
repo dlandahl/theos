@@ -12,15 +12,16 @@
     command := break_command_into_strings(#string QEMU_CMD
         qemu-system-x86_64
             -machine q35
+            -cpu qemu64,apic,fsgsbase,rdtscp,xsave,fxsr
             -bios OVMF.fd
             -drive format=raw,file=disk_image.img
             -chardev stdio,id=char0,logfile=logs/qemu_serial.txt,signal=off
             -serial chardev:char0
             -m 256M 
-            -smp 8 
+            -smp 4 
     QEMU_CMD);
+        // -d int 
 
-        // -d int
 
     run_command(.. command);
 }
