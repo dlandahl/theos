@@ -246,12 +246,12 @@ Hpet_Register :: enum u64 {
     TIMER2_COMP  :: 0x148;
 }
 
-write :: (reg: Hpet_Register, value: u64) #no_context {
-    << cast(*u64) (kernel_globals.high_precision_timer.base_address + cast(u64) reg) = value;
-}
-
 read :: (reg: Hpet_Register) -> u64 #no_context {
     return << cast(*u64) (kernel_globals.high_precision_timer.base_address + cast(u64) reg);
+}
+
+write :: (reg: Hpet_Register, value: u64) #no_context {
+    << cast(*u64) (kernel_globals.high_precision_timer.base_address + cast(u64) reg) = value;
 }
 
 Hpet_Config_Flags :: enum_flags u64 {

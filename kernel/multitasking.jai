@@ -3,12 +3,10 @@
 
 Task_Info :: struct {
 
-    using cpu_context: struct {
-        // These fields must match the task switch assembly routine
-        rsp: *void;
-        cr3: u64;
-        xsave: Xsave_Area;
-    };
+    // These fields must match the task switch assembly routine
+    rsp: *void;
+    cr3: u64;
+    xsave: Xsave_Area #align 16;
 
     user_stack:   *void;
     kernel_stack: *void;
@@ -17,6 +15,7 @@ Task_Info :: struct {
 
     sleeping: bool;
     sleeping_until: Apollo_Time;
+    next_sleeping: *Task_Info;
 }
 
 TASK_SWITCH_GATE :: 64;
@@ -24,7 +23,8 @@ TASK_SWITCH_GATE :: 64;
 Scheduler :: struct {
     current_task: [..] *Task_Info;
 
-    sleeping:       [..] *Task_Info;
+    sleeping_queue: *Task_Info;
+
     waiting_to_run: Queue(*Task_Info);
 
     tasks: Bucket_Array(Task_Info, 256, always_iterate_by_pointer=true);
@@ -53,7 +53,6 @@ initialize_scheduler :: () {
     scheduler.next_id = 1;
     array_resize(*scheduler.current_task, processor_cores.count);
 
-    array_reserve(*scheduler.sleeping, 256);
     queue_reserve(*scheduler.waiting_to_run, 256);
 }
 
@@ -67,6 +66,9 @@ core_begin_multitasking :: () {
     main_task.cr3 = cast(u64) *page_tables.pml4 - DIRECT_MAPPING_BASE;
     main_task.id  = scheduler.next_id;
 
+    mxcsr := *main_task.xsave.mxcsr;
+    #asm { stmxcsr [mxcsr]; }
+
     scheduler.next_id += 1;
 
     core := get_current_core();
@@ -79,6 +81,7 @@ core_begin_multitasking :: () {
 
         spurious := read_apic_register(.SPURIOUS_INTERRUPT);
         write_apic_register(.SPURIOUS_INTERRUPT, spurious | 0x1ff);
+        register_interrupt_gate(int__spurious_interrupt, 0xff);
 
         write_apic_register(.TIC__TIMER_INITIAL, 0x0400_0000);
 
@@ -131,7 +134,28 @@ sleep_until :: (time: Apollo_Time) {
         task.sleeping = true;
         task.sleeping_until = time;
 
-        array_add(*scheduler.sleeping, task);
+        queue := scheduler.sleeping_queue;
+        previous: *Task_Info;
+
+        if !queue {
+            scheduler.sleeping_queue = task;
+            task.next_sleeping = null;
+        } else while (true) {
+            if !queue || queue.sleeping_until > time {
+
+                if queue == scheduler.sleeping_queue {
+                    scheduler.sleeping_queue = task;
+                }
+
+                if previous previous.next_sleeping = task;
+                task.next_sleeping = queue;
+
+                break;
+            }
+
+            previous = queue;
+            queue = queue.next_sleeping;
+        }
     }
 
     yield();
@@ -140,27 +164,25 @@ sleep_until :: (time: Apollo_Time) {
 wake_sleeping_task :: () -> bool {
     using kernel_globals;
 
-    // Is it better to program an interrupt to do this?
-    if !scheduler.sleeping.count return false;
-
     time := get_monotonic_system_time();
 
     Scoped_Acquire(*scheduler.spinlock);
-    for scheduler.sleeping {
 
-        // If we keep these ordered by time then we wouldn't have to iterate.
-        if it.sleeping_until < time {
-            it.sleeping = false;
+    queue := scheduler.sleeping_queue;
 
-            // Todo: ensure this is not an allocation. For now we reserved 256 slots, preventing it from allocating for current practical purposes.
-            queue_push(*scheduler.waiting_to_run, it);
+    if queue {
+        if queue.sleeping_until < time {
+            scheduler.sleeping_queue = queue.next_sleeping;
 
-            array_unordered_remove_by_index(*scheduler.sleeping, it_index);
-            break;
+            queue_push(*scheduler.waiting_to_run, queue);
+            queue.sleeping = false;
+            queue.next_sleeping = null;
+
+            return true;
         }
     }
 
-    return true;
+    return false;
 }
 
 yield :: (loc := #caller_location) #no_context {
@@ -172,13 +194,12 @@ yield :: (loc := #caller_location) #no_context {
 
     c: Context;
     push_context c {
-
         wake_sleeping_task();
 
         while true {
             while queue_is_empty(scheduler.waiting_to_run) {
                 if !wake_sleeping_task() {
-                    #asm { hlt; }
+                    #asm { sti; hlt; }
                 }
             }
 
@@ -241,12 +262,34 @@ get_current_core_from_user_mode :: () -> *X64_Core #no_context {
     return core;
 }
 
+sleep_from_user_mode :: (time: Apollo_Time) #no_context {
+    syscall_number := 3;
+
+    #asm SYSCALL_SYSRET {
+        syscall_number === a;
+        mov low:  gpr === b, [*time + 0];
+        mov high: gpr === d, [*time + 8];
+
+        syscall c:, _11:, low, high, syscall_number;
+    }
+}
+
 #program_export
 syscall_handler :: (data: *Syscall_Stack) #c_call {
     if data.rax == 1 {
         yield();
     } else if data.rax == 2 {
         data.rax = cast(u64) get_current_core();
+    } else if data.rax == 3 {
+        t: Apollo_Time;
+        t.low  = data.rbx;
+        t.high = cast(s64) data.rdx;
+
+        c: Context;
+        push_context c {
+            time := get_monotonic_system_time();
+            sleep_until(time + t);
+        }
     } else {
         write_string("Invalid syscall parameter.\n");
         bluescreen();
@@ -270,6 +313,15 @@ task_do_work :: () #c_call {
     user_stack := kernel_globals.scheduler.current_task[core.id].user_stack;
     entry_point := task_do_work_in_ring_3;
 
+    // c: Context;
+    // push_context c {
+    //     while true {
+    //         time := get_monotonic_system_time();
+    //         print("Kernel mode thread going to sleep on core %\n", core.id);
+    //         sleep_until(time + milliseconds_to_apollo(1500));
+    //     }
+    // }
+
     enter_user_mode(entry_point, .IF__interrupt, user_stack);
 }
 
@@ -277,7 +329,6 @@ task_do_work_in_ring_3 :: () #c_call {
     c := make_kernel_context();
 
     push_context c {
-
         while true {
             core := get_current_core_from_user_mode();
             thread := kernel_globals.scheduler.current_task[core.id];
@@ -304,49 +355,55 @@ local_apic_timer_interrupt :: (stack: *Interrupt_Stack()) #c_call {
     yield();
 } @InterruptRoutine
 
+#program_export
+spurious_interrupt :: (stack: Interrupt_Stack()) #c_call {
+    write_string("Spurious...\n");
+} @InterruptRoutine
 
+
+// For the "sleeping" and "waiting for mutex" queues I need to be able to insert and
+// remove from the middle. Using a linked list would be better for that.
 
 Queue :: struct (Item_Type: Type) {
-    items: [..] Item_Type; // Using a resizeable array to hold the underlying data  to get the resizing logic from Basic/Array.jai. It means we need to keep saying items.count = items.allocated.
+    // Using a resizeable array to hold the underlying data  to get the resizing logic from Basic/Array.jai. It means we need to keep saying items.count = items.allocated.
+    items: [..] Item_Type;
     head: int;
     tail: int;
 }
 
 queue_push :: (using queue: *Queue) -> *queue.Item_Type {
 
-    item := *items[head];
-    head += 1;
+    item := *items[tail];
+    tail += 1;
 
-    if head >= items.count {
-        head = 0;
+    if tail >= items.count {
+        tail = 0;
     }
 
-    if head == tail {
+    if tail == head {
         old_count := items.allocated;
 
         items.count += 1;
         maybe_grow(*queue.items);
         items.count = items.allocated;
 
-        memcpy(items.data + items.count - tail - 1, items.data + tail, (old_count - tail + 1) * size_of(Item_Type));
+        memcpy(items.data + items.count - head - 1, items.data + head, (old_count - head + 1) * size_of(Item_Type));
 
-        head = old_count;
-        if head == items.count head = 0;
-
-        item = *items[head-1];
+        tail = old_count;
+        item = *items[tail-1];
     }
 
     return item;
 }
 
 queue_pop :: (using queue: *Queue) -> queue.Item_Type {
-    assert(head != tail);
+    assert(tail != head);
 
-    item := items[tail];
-    tail += 1;
+    item := items[head];
+    head += 1;
 
-    if tail >= items.count {
-        tail = 0;
+    if head >= items.count {
+        head = 0;
     }
 
     return item;
@@ -362,11 +419,11 @@ queue_reserve :: (using queue: *Queue, capacity: int) {
 }
 
 queue_length :: (using queue: Queue) -> int {
-    if head > tail return head - tail;
+    if tail > head return tail - head;
 
-    return head + items.count - tail;
+    return tail + items.count - head;
 }
 
 queue_is_empty :: (using queue: Queue) -> bool {
-    return head == tail;
+    return tail == head;
 }

@@ -109,6 +109,14 @@ Apic_Local_Vector_Table_Entry :: struct {
 }
 
 initialize_apic :: () {
+
+    // Disable the older interrupt controller. Sort of assume UEFI does this anyway.
+    #asm {
+        mov.b ax: gpr === a, 0xff;
+        out.b 0x21, ax;
+        out.b 0xa1, ax;
+    }
+
     register_interrupt_gate(int__fault_0, 0, true);
     register_interrupt_gate(int__fault_1, 1, true);
     register_interrupt_gate(int__fault_2, 2, true);

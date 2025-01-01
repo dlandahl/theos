@@ -55,7 +55,7 @@ Kernel_Globals :: struct {
     rtc_format_is_bcd: bool;
 }
 
-get_bootstrap_processor :: () -> *X64_Core {
+get_bootstrap_processor :: () -> *X64_Core #no_context {
     return *kernel_globals.processor_cores[0];
 }
 
@@ -160,7 +160,7 @@ kernel_entry :: () #no_context {
         startup_application_processors();
 
         acquire(*scheduler.spinlock);
-        for 1..15 {
+        for 1..1 {
             new_task := create_task();
             queue_push(*scheduler.waiting_to_run, new_task);
         }
@@ -192,7 +192,7 @@ simd_floating_point_exception :: (stack: *Interrupt_Stack()) #c_call {
 
     c: Context;
     push_context c {
-        print("Floating point exception: %\n", mxcsr);
+        print("Floating point exception: % target: %\n", mxcsr);
     }
 } @InterruptRoutine
 
@@ -818,6 +818,8 @@ allocate_interrupt_gate :: () -> int {
         next_free_interrupt_gate += 1;
     }
 
+    assert(next_free_interrupt_gate < 0xff);
+
     result := next_free_interrupt_gate;
     next_free_interrupt_gate += 1;
     return result;
@@ -834,12 +836,12 @@ print_physical_memory_map :: () {
     for 0..boot_data.memory_map_entries_used-1 {
 
         region := boot_data.memory_map[it];
-        mb := cast(float) region.pages / 32;
-        // print("Region (%) at % (% MB)\n", region.type, formatInt(region.address, base=16), mb);
+        mb := (cast(float) region.pages * 4096) / 0x20_0000;
+        print("Region (%) at % (% blocks)\n", region.type, formatInt(region.address, base=16), mb);
 
         total_by_type[region.type] += cast(int) region.pages;
 
-        for 0..cast(int) mb-1 {
+        if false for 0..cast(int) mb-1 {
             if region.type == {
                 case .FREE; print("-");
                 case .RESERVED_BY_THE_BOOTLOADER; print("+");
