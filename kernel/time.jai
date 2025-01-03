@@ -156,7 +156,6 @@ Rtc_Register :: enum u8 {
     DAY_OF_THE_MONTH :: 0x07;
     MONTH            :: 0x08;
     YEAR             :: 0x09;
-    CENTURY          :: 0x32;
     STATUS_A         :: 0x0a;
     STATUS_B         :: 0x0b;
     STATUS_C         :: 0x0c;
@@ -210,10 +209,19 @@ rtc_get_calendar_time :: () -> Calendar_Time {
     cal.day_of_month_starting_at_0 = cast(s8) rtc_read(.DAY_OF_THE_MONTH) - 1;
     cal.day_of_week\_starting_at_0 = cast(s8) rtc_read(.WEEKDAY) - 1;
 
-    cal.year   = cast(s32) rtc_read(.YEAR) + 2000;
+    cal.year   = cast(s32) rtc_read(.YEAR);
     cal.hour   = cast(s8)  rtc_read(.HOURS);
     cal.minute = cast(s8)  rtc_read(.MINUTES);
     cal.second = cast(s8)  rtc_read(.SECONDS);
+
+    if kernel_globals.fadt.century {
+        century := cast(s32) rtc_read(cast(Rtc_Register) kernel_globals.fadt.century);
+        century = (century & 0xf) + (century / 16) * 10;
+
+        cal.year += century * 100;
+    } else {
+        cal.year += 2000;
+    }
 
     return cal;
 }

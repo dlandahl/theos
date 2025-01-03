@@ -235,12 +235,12 @@ enable_cpu_features :: () #no_context {
         }
 
         if check_feature(cpu_features, .XSAVE) {
-            // This doesn't seem to be needed to execute fxsave64 etc. Maybe UEFI enables some CPU features for us
-            // #asm {
-            //     get_cr4 cr4:;
-            //     or  cr4, CR4_OSXSAVE;
-            //     set_cr4 cr4;
-            // }
+            // This doesn't seem to be needed to execute fxsave64 etc. Maybe UEFI enables this. In fact, trying to enable this hangs qemu when running with
+            #asm {
+                get_cr4 cr4:;
+                or  cr4, CR4_OSXSAVE;
+                set_cr4 cr4;
+            }
         }
 
         // Mask out all the FP exceptions for now

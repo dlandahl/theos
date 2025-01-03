@@ -65,9 +65,6 @@ core_begin_multitasking :: () {
     main_task := allocate_task_info_struct();
     main_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
 
-    mxcsr := *main_task.xsave.mxcsr;
-    #asm { stmxcsr [mxcsr]; }
-
     scheduler.current_task = main_task;
 
     {
@@ -358,7 +355,7 @@ task_do_work_in_ring_3 :: () #c_call {
             print_from_user_mode("Thread % doing some work in user mode, on core %.\n", thread.id, core.id);
 
             for 1..5_000_000 {
-                #asm { pause; mov d: gpr === di, it; }
+                #asm { pause; }
             }
 
             ms := rdtsc() % 2000;

@@ -37,6 +37,7 @@ Kernel_Globals :: struct {
 
     root_acpi_table: *Acpi_Table_Header;
     acpi_version: int;
+    fadt: *acpi_fadt;
 
     // Hardware requires 16 byte alignment on IDT
     interrupt_descriptor_table: [256] Interrupt_Gate_Descriptor #align 16;
@@ -102,12 +103,6 @@ kernel_entry :: () #no_context {
 
         rtc_init();
 
-        // Get the time at the most recent second. Maybe use an interrupt to detect a more accurate boot time.
-        boot_calendar_time := rtc_get_calendar_time();
-        // Don't use Basic.calendar_to_apollo, because it's OS specific
-        boot_time = native_calendar_to_apollo(boot_calendar_time);
-
-
         using framebuffer;
 
         for y: 0..y_resolution-1 {
@@ -149,6 +144,9 @@ kernel_entry :: () #no_context {
 
         initialize_apic();
 
+        initialize_hpet();
+        hpet_configure_timer(timer_index = 0, frequency = 10, true);
+
 
         task_switch :: () #foreign Interrupts;
         register_interrupt_gate(task_switch, TASK_SWITCH_GATE);
@@ -156,9 +154,18 @@ kernel_entry :: () #no_context {
         tasks.allocator = context.allocator;
         next_task_id = 1;
 
+        // uacpi_context_set_log_level(.DEBUG);
 
-        initialize_hpet();
-        hpet_configure_timer(timer_index = 0, frequency = 10, true);
+        if uacpi_initialize(0) != .OK bluescreen();
+
+        fadt = New(acpi_fadt);
+        if uacpi_table_fadt(*fadt) != .OK bluescreen();
+
+
+        // Get the time at the most recent second. Maybe use an interrupt to detect a more accurate boot time.
+        boot_calendar_time := rtc_get_calendar_time();
+        // Don't use Basic.calendar_to_apollo, because it's OS specific
+        boot_time = native_calendar_to_apollo(boot_calendar_time);
 
         // print_physical_memory_map();
 
@@ -177,7 +184,8 @@ kernel_entry :: () #no_context {
 
         while true {
             time := get_monotonic_system_time();
-            print("Time: %\n", calendar_to_string(native_apollo_to_calendar(time)));
+            calendar := native_apollo_to_calendar(time);
+            print("Time: %\n", calendar_to_string(calendar));
 
             print("This is thread % running on core %\n", core.scheduler.current_task.id, core.id);
             sleep_until(time + milliseconds_to_apollo(1000));

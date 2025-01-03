@@ -546,7 +546,7 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
 }
 
 #program_export uacpi_kernel_get_rsdp :: (rsdp_address: *uacpi_phys_addr) -> uacpi_status #c_call {
-    rsdp_address.* = cast(uacpi_phys_addr) kernel_globals.acpi_rsdp + DIRECT_MAPPING_BASE;
+    rsdp_address.* = cast(uacpi_phys_addr) kernel_globals.acpi_rsdp;
     return .OK;
 }
 

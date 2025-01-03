@@ -69,7 +69,7 @@ calculate_mask_and_offset :: (bitfield: Type, loc: Source_Code_Location, call: C
     procedure_call := cast(*Code_Procedure_Call) nodes;
     expression := procedure_call.arguments_unsorted[1].expression;
 
-    // This procedure should have been called with either an unary or a binary enum dereference as the second argument.
+    // This procedure should have been called with either an identifier, or an unary or binary enum dereference as the second argument.
     operator_type: Operator_Type.loose;
 
     if expression.kind == {
