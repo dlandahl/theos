@@ -18,18 +18,23 @@ Task_Info :: struct {
     next_sleeping: *Task_Info;
 
     on_core: int;
+
+    cpu_time: Apollo_Time;
 }
 
 TASK_SWITCH_GATE :: 64;
 
 Scheduler :: struct {
     current_task: *Task_Info;
+    idle_task:    *Task_Info;
 
     sleep_queue: *Task_Info;
 
     waiting_to_run: Queue(*Task_Info);
 
     spinlock: Spinlock;
+
+    last_task_switch_timestamp: Apollo_Time;
 }
 
 Xsave_Area :: struct {
@@ -62,10 +67,20 @@ core_begin_multitasking :: () {
 
     queue_reserve(*scheduler.waiting_to_run, 256);
 
-    main_task := allocate_task_info_struct();
-    main_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
+    scheduler.current_task = allocate_task_info_struct();
+    scheduler.current_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
 
-    scheduler.current_task = main_task;
+    idle :: () #c_call {
+        core := get_current_core();
+        release(*core.scheduler.spinlock);
+
+        while true {
+            #asm { hlt; }
+            yield();
+        }
+    }
+
+    scheduler.idle_task = create_task(idle);
 
     {
         // Enable Local APIC timer interrupts
@@ -92,7 +107,7 @@ put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
     queue_push(*scheduler.waiting_to_run, task);
 }
 
-create_task :: () -> *Task_Info {
+create_task :: (entry_point := task_do_work) -> *Task_Info {
     new_task := allocate_task_info_struct();
     new_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
 
@@ -103,7 +118,7 @@ create_task :: () -> *Task_Info {
     stack.flags = .IF__interrupt;
     stack.cs = .RING0_CODE;
     stack.ss = .RING0_DATA;
-    stack.ip = cast(*void) task_do_work;
+    stack.ip = cast(*void) entry_point;
     stack.sp = new_task.kernel_stack;
 
     new_task.rsp = cast(*void) stack;
@@ -159,8 +174,6 @@ wake_sleeping_task :: () -> bool {
 
     time := get_monotonic_system_time();
 
-    Scoped_Acquire(*scheduler.spinlock);
-
     queue := scheduler.sleep_queue;
 
     if queue && queue.sleep_until < time {
@@ -176,58 +189,47 @@ wake_sleeping_task :: () -> bool {
     return false;
 }
 
-yield :: (loc := #caller_location) #no_context {
+yield :: () #no_context {
     core := get_current_core();
     scheduler := *core.scheduler;
 
+    Scoped_Acquire(*scheduler.spinlock);
+
     next: *Task_Info;
+    current := scheduler.current_task;
 
     push_context {
         wake_sleeping_task();
 
-        while true {
-            while queue_is_empty(scheduler.waiting_to_run) {
-                if !wake_sleeping_task() {
-                    #asm { sti; hlt; }
-                }
-            }
-
-            acquire(*scheduler.spinlock);
-
-            if queue_is_empty(scheduler.waiting_to_run) {
-                // Another core got there faster.
-                release(*scheduler.spinlock);
-                continue;
-            }
-
+        if queue_is_empty(scheduler.waiting_to_run) {
+            next = scheduler.idle_task;
+        } else {
             next = queue_pop(*scheduler.waiting_to_run);
-
-            current_task := scheduler.current_task;
-
-            if next == current_task {
-                release(*scheduler.spinlock);
-                return;
-            }
-
-            if !current_task.sleeping {
-                // This should never be an allocation since we just removed.
-                queue_push(*scheduler.waiting_to_run, current_task);
-            }
-
-            break;
         }
+
+        if next == current {
+            return;
+        }
+
+        if !current.sleeping && current != scheduler.idle_task {
+            // This should never be an allocation since we just removed.
+            queue_push(*scheduler.waiting_to_run, current);
+        }
+
+        time_now := get_monotonic_system_time();
+        current.cpu_time += time_now - scheduler.last_task_switch_timestamp;
+        scheduler.last_task_switch_timestamp = time_now;
     }
 
-    current := *scheduler.current_task;
+    // Todo: we don't need to write into scheduler.current_task in the interrupt routine
+    _current := *scheduler.current_task;
     core.task_state_segment.rsp[0] = next.kernel_stack;
 
     #asm {
-        mov rax: gpr === a, current;
+        mov rax: gpr === a, _current;
         mov rbx: gpr === b, next;
         int TASK_SWITCH_GATE;
     }
-
-    release(*scheduler.spinlock);
 }
 
 yield_from_user_mode :: () #no_context {

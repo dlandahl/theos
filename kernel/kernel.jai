@@ -156,11 +156,10 @@ kernel_entry :: () #no_context {
 
         // uacpi_context_set_log_level(.DEBUG);
 
-        if uacpi_initialize(0) != .OK bluescreen();
+        // if uacpi_initialize(0) != .OK bluescreen();
 
-        fadt = New(acpi_fadt);
-        if uacpi_table_fadt(*fadt) != .OK bluescreen();
-
+        // fadt = New(acpi_fadt);
+        // if uacpi_table_fadt(*fadt) != .OK bluescreen();
 
         // Get the time at the most recent second. Maybe use an interrupt to detect a more accurate boot time.
         boot_calendar_time := rtc_get_calendar_time();

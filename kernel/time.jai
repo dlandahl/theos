@@ -1,38 +1,57 @@
 
-get_monotonic_system_time :: () -> Apollo_Time {
-    using kernel_globals;
-
+Kernel_Timestamp :: struct {
     counter: u64;
-    ticks_at_last_interrupt: u64;
+    ticks:   u64;
+}
+
+get_kernel_timestamp :: () -> Kernel_Timestamp {
+    using kernel_globals;
+    ts: Kernel_Timestamp;
 
     sequence_read(*high_precision_timer.seq_lock, #code {
-        counter = high_precision_timer.timers[0].counter;
-        ticks_at_last_interrupt = high_precision_timer.timers[0].ticks_at_last_interrupt;
+        // Todo: HPET might be worse than TSC or LAPIC for system time
+        ts.counter = high_precision_timer.timers[0].counter;
+        ts.ticks   = high_precision_timer.timers[0].ticks_at_last_interrupt;
     });
 
-    ticks := cast(u64) read(.COUNTER);
+    // Todo: figure out the performace characteristics of reading this register
+    ticks_now := cast(u64) read(.COUNTER);
 
-    if ticks < ticks_at_last_interrupt {
+    if ticks_now < ts.ticks {
         counter_max: u64 = 0xffff_ffff;
         if high_precision_timer.timers[0].counter_is_64_bit {
             counter_max = 0xffff_ffff_ffff_ffff;
         }
 
-        ticks += counter_max - ticks_at_last_interrupt;
+        ts.ticks = ticks_now + (counter_max - ts.ticks);
     } else {
-        ticks -= ticks_at_last_interrupt;
+        ts.ticks = ticks_now - ts.ticks;
     }
 
+    return ts;
+}
+
+kernel_timestamp_to_apollo :: (ts: Kernel_Timestamp) -> Apollo_Time {
+    using kernel_globals;
+
     time_represented_by_ticks: Apollo_Time;
-    time_represented_by_ticks.low = cast(u64) ticks;
+    time_represented_by_ticks.low = cast(u64) ts.ticks;
     time_represented_by_ticks *= cast(s64) high_precision_timer.base_period_femtoseconds;
 
     femtoseconds_per_millisecond := 1.e12;
     time_represented_by_counter: Apollo_Time;
-    time_represented_by_counter.low = counter;
+    time_represented_by_counter.low = ts.counter;
     time_represented_by_counter *= cast(s64) (100 * femtoseconds_per_millisecond);
 
-    return boot_time + time_represented_by_counter + time_represented_by_ticks;
+    return time_represented_by_counter + time_represented_by_ticks;
+}
+
+get_monotonic_system_time :: () -> Apollo_Time {
+    using kernel_globals;
+
+    ts := get_kernel_timestamp();
+
+    return boot_time + kernel_timestamp_to_apollo(ts);
 }
 
 native_calendar_to_apollo :: (ct: Calendar_Time) -> Apollo_Time {
@@ -214,8 +233,9 @@ rtc_get_calendar_time :: () -> Calendar_Time {
     cal.minute = cast(s8)  rtc_read(.MINUTES);
     cal.second = cast(s8)  rtc_read(.SECONDS);
 
-    if kernel_globals.fadt.century {
-        century := cast(s32) rtc_read(cast(Rtc_Register) kernel_globals.fadt.century);
+    fadt := kernel_globals.fadt;
+    if fadt && fadt.century {
+        century := cast(s32) rtc_read(cast(Rtc_Register) fadt.century);
         century = (century & 0xf) + (century / 16) * 10;
 
         cal.year += century * 100;
@@ -331,7 +351,6 @@ initialize_hpet :: () {
     write(.CONFIG, read(.CONFIG) | cast(u64) Hpet_Config_Flags.LEGACY_ROUTING);
 
     hpet_restart();
-
 
     // Interrupt routing
 
