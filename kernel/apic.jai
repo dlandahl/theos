@@ -264,6 +264,8 @@ ap_startup_bin :: #run,host -> [] u8 {
     #import "Compiler";
     #import "File";
 
+    context.allocator = Context_Base.default_allocator;
+
     code := read_entire_file(".build/ap_startup.bin");
     return add_global_data(cast([] u8) code, .WRITABLE);
 }
@@ -273,7 +275,9 @@ ap_startup_spinlock: Spinlock;
 ap_entry_point :: () #c_call {
     release(*ap_startup_spinlock);
 
-    c := make_kernel_context();
+    c: #Context;
+    make_kernel_context(*c);
+
     push_context c {
         init_processor_core();
 
@@ -388,7 +392,7 @@ ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, gate_nu
 } @InterruptRoutine
 
 #program_export fault_6 :: (stack: *Interrupt_Stack(false)) #c_call {
-    c: Context;
+    c: #Context;
     c.print_style.default_format_int.base = 16;
 
     push_context c {
@@ -463,15 +467,13 @@ ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, gate_nu
 
 #program_export
 general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c_call {
-    c: Context;
-
-    push_context c {
+    push_context {
         core := get_current_core();
         task := core.scheduler.current_task;
 
         print("General Protection Fault    (On core %, running thread %)\n", core.id, task.id);
 
-        c.print_style.default_format_int.base = 16;
+        context.print_style.default_format_int.base = 16;
         print("RIP: 0x%\n", stack.ip);
         print("RSP: 0x%\n", stack.sp);
         print("SS: %\n", stack.ss);
@@ -635,8 +637,7 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
 
 #program_export uacpi_kernel_alloc :: (size: uacpi_size) -> *void #c_call {
     // Not currently thread synced, and alloc_block is not efficient for small allocations.
-    c: Context;
-    push_context c {
+    push_context {
         phys := alloc_block(*kernel_globals.physical_block_allocator, cast(s64) size);
         virt := cast(*void) phys + DIRECT_MAPPING_BASE;
 
@@ -648,8 +649,7 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
     // Comment in uacpi_kernel_alloc applies
     size_bytes := cast(s64) (size*count);
 
-    c: Context;
-    push_context c {
+    push_context {
         phys := alloc_block(*kernel_globals.physical_block_allocator, size_bytes);
         virt := cast(*void) phys + DIRECT_MAPPING_BASE;
 
@@ -662,8 +662,7 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
     // Comment in uacpi_kernel_alloc applies
     if mem == null return;
 
-    c: Context;
-    push_context c {
+    push_context {
         phys := cast(u64) mem - DIRECT_MAPPING_BASE;
         free_block(*kernel_globals.physical_block_allocator, phys);
     }

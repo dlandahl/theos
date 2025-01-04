@@ -52,7 +52,7 @@ Kernel_Globals :: struct {
 
     high_precision_timer: HPET;
 
-    main_thread_context: Context;
+    main_thread_context: #Context;
 
     memory_spinlock: Spinlock;
 
@@ -97,7 +97,7 @@ kernel_entry :: () #no_context {
         }
     }
 
-    main_thread_context = make_kernel_context();
+    make_kernel_context(*main_thread_context);
 
     push_context main_thread_context {
 
@@ -204,16 +204,13 @@ simd_floating_point_exception :: (stack: *Interrupt_Stack()) #c_call {
         stmxcsr [pmxcsr];
     }
 
-    c: Context;
-    push_context c {
+    push_context {
         print("Floating point exception: % target: %\n", mxcsr);
     }
 } @InterruptRoutine
 
 
-make_kernel_context :: () -> Context #no_context {
-    c: Context;
-
+make_kernel_context :: (c: *#Context) #no_context {
     c.assertion_failed = (location: Source_Code_Location, message: string) -> bool {
         write_string("Assertion failure");
         if message.count {
@@ -305,8 +302,6 @@ make_kernel_context :: () -> Context #no_context {
 
         c.temporary_storage.overflow_allocator = c.allocator;
     }
-
-    return c;
 }
 
 init_processor_core :: () #no_context {
@@ -624,7 +619,7 @@ alloc_block :: (using allocator: *Block_Allocator, size_bytes: int, loc := #call
                 }
 
                 blocks.count += 1;
-                for< blocks.count-1 .. it_index+2 {
+                for#v2< it_index+2 .. blocks.count-1 {
                     blocks[it] = blocks[it-1];
                 }
 

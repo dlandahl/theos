@@ -1,4 +1,3 @@
-
 //
 // Runtime_Support is less volatile than Preload and contains imports and various biggish code;
 // it is considered reasonable that you can mess around with Runtime_Support and ship your own
@@ -7,13 +6,9 @@
 
 #module_parameters(DEFINE_SYSTEM_ENTRY_POINT: bool, DEFINE_INITIALIZATION: bool, ENABLE_BACKTRACE_ON_CRASH: bool);
 
-// Not actually a Unix OS, but the File module is being imported inside a #run,host,
-// which for some reason means that that module needs to be able to compile with this
-// runtime support module, even though the parent workspace uses the default Runtime_Support
-// in jai/modules. I thought that the point of ,host is to prevent this exact issue?
-OS_IS_UNIX :: true;
-
 #scope_export
+
+OS_IS_UNIX :: OS == .MACOS || OS == .LINUX || OS == .PS5 || OS == .IOS || OS == .ANDROID;
 
 // @Cleanup: __element_duplicate should lose its c_call status, and also be faster...!
 __element_duplicate :: (start: *u8, num_elements: s64, size: s64) #c_call #no_aoc {
@@ -82,11 +77,20 @@ runtime_support_assertion_failed :: (loc: Source_Code_Location, message: string)
 }
 
 runtime_support_default_logger :: (message: string, data: *void, info: Log_Info) {
+    if !message then return;
+
+    to_standard_error := (info.common_flags & .ERROR) != 0;
+
+    if message[message.count-1] != #char "\n" {
+        write_strings(message, "\n", to_standard_error = to_standard_error);
+    } else {
+        write_string(message, to_standard_error = to_standard_error);
+    }
 }
 
 c_style_strlen :: (str: *u8) -> s64 #no_context {
     p := str;
-    while << p  { p += 1; }
+    while p.*  { p += 1; }
     return p - str;
 }
 
@@ -208,25 +212,25 @@ __arithmetic_overflow :: (left: s64, right: s64, type_code: u16, line_number: s6
 
     signed_string := ifx signed then "s" else "u";
     operator_string := " / ";
-    
+
     if      operator_index == 1 then operator_string = " + ";
     else if operator_index == 2 then operator_string = " - ";
     else if operator_index == 3 then operator_string = " * ";
-    
+
     write_string("Arithmetic overflow. We tried to compute:\n    ", to_standard_error = true);
 
     if signed  write_number(left, to_standard_error = true);
     else       write_nonnegative_number(cast,no_check(u64)left, to_standard_error = true);
 
     write_string(operator_string, to_standard_error = true);
-    
+
     if signed  write_number(right, to_standard_error = true);
     else       write_nonnegative_number(cast,no_check(u64)right, to_standard_error = true);
-    
+
     write_strings("\nThe operand type is ", signed_string, to_standard_error = true);
     write_nonnegative_number(size, to_standard_error = true);
     write_string(", but the result does not fit into this type.\n", to_standard_error = true);
-    
+
     if fatal my_panic();
 }
 
@@ -297,27 +301,53 @@ write_loc :: (loc: Source_Code_Location, to_standard_error := false) #no_context
     write_number(loc.character_number, to_standard_error = to_standard_error);
 }
 
-#scope_module
+#scope_module;
 
 my_panic :: () #no_context {
     write_string("Panic.\n", to_standard_error = true);
-    while true #asm { cli; hlt; }
+    debug_break();
 }
 
 __panic_due_to_runtime_call_of_compile_time_procedure :: (line_number: s64, filename: *u8) #no_context {
+    write_string("Error: Attempt to call a compile-time procedure at runtime. The location of the call was: ", to_standard_error = true);
+    write_string(to_string(filename), to_standard_error = true);
+    write_string(":", to_standard_error = true);
+    write_number(line_number, to_standard_error = true);
+    write_string(".\n", to_standard_error = true);
+
+    my_panic();
 }
 
 #if DEFINE_INITIALIZATION {
     // TEMPORARY_STORAGE_SIZE is defined by the compiler based on Build_Options.
 
+    first_thread_context: #Context;
+    first_thread_temporary_storage: Temporary_Storage;
+    first_thread_temporary_storage_data: [TEMPORARY_STORAGE_SIZE] u8 #align 64;
+
     #scope_export
     #program_export
-    __jai_runtime_init :: (argc: s32, argv: **u8) -> *Context #c_call {
-        return null;
+    __jai_runtime_init :: (argc: s32, argv: **u8) -> *#Context #c_call {
+        __command_line_arguments.count = argc;
+        __command_line_arguments.data  = argv;
+
+        // We don't need this initializer_of call, but we're leaving it in a comment, in case there are
+        // compiler bugs in Context init and you want to work around them by re-enabling it.
+        // @Temporary: Putting it back for a bit since there is a bug exhibiting on Mac that might
+        // also cause first_thread_context not to be fully filled out...
+        initializer_of(#Context)(*first_thread_context); 
+        
+        ts := *first_thread_temporary_storage;
+        set_initial_data(ts, TEMPORARY_STORAGE_SIZE, first_thread_temporary_storage_data.data);
+        first_thread_context.temporary_storage = ts;
+
+        return *first_thread_context;
     }
 
     #program_export
     __jai_runtime_fini :: (_context: *void) #c_call {
+        // Nothing here for now!
+        // We don't bother shutting down the default allocator. The OS frees the memory.
     }
 }
 
@@ -329,11 +359,30 @@ __instrumentation_first  :: () {
 __instrumentation_second :: () {
 }
 
-#scope_module
+#scope_module;
 
 #if DEFINE_SYSTEM_ENTRY_POINT {
     #program_export "main"
     __system_entry_point :: (argc: s32, argv: **u8) -> s32 #c_call {
+        __jai_runtime_init(argc, argv);
+
+        push_context first_thread_context {
+            #if ENABLE_BACKTRACE_ON_CRASH {
+                // It's possible we should move the init of the crash handler to after __instrumentation_*, so that
+                // plugins can set it? But, plugin inits can crash. So maybe we need some other way for a plugin
+                // to say it's taking over the crash handler.
+
+                Handler :: #import "Runtime_Support_Crash_Handler";
+                Handler.init();
+            }
+
+            __instrumentation_first ();
+            __instrumentation_second();
+
+            __program_main :: () #entry_point;
+            no_inline __program_main();
+        }
+
         return 0;
     }
 }
@@ -351,7 +400,19 @@ debug_break :: () #no_context {
         compile_time_debug_break();
     } else {
         // Break into the debugger, or stop the running process.
-        #asm { int3; }
+        #if OS == .PS5 {
+            #asm { int 0x41; }
+        } else #if CPU == .X64 {
+            #asm { int3; }
+        } else #if CPU == .ARM64 {
+            #bytes .[0x20, 0x00, 0b001_0_0000, 0b1101_0100]; // BRK 0x01: 11 bit instruction, 16 bit immediate, 5 bit unused.
+        } else #if OS == .WASM {
+            wasm_debug_break :: () #foreign; // You will need to provide this function as JS code in your WASM environment. :JaiWasm:
+            wasm_debug_break();
+        } else {
+            llvm_trap :: () #intrinsic "llvm.debugtrap"; // @ToDo: This used to be llvm.trap which supposedly doesn’t work on Android. We need to test if "debugtrap" works there or if we need a different implemenation.
+            llvm_trap();
+        }
     }
 }
 
@@ -370,12 +431,12 @@ one_time_init :: (synch_value: *s32, to_insert: Code) #expand {
         // The goal here is just to avoid the overhead of spamming the compare_and_swap.
         if synch_value.* == 2  break;
 
-        old := lock_cmpxchg(synch_value, 0, 1);
+        success, old := compare_and_swap(synch_value, 0, 1);
         if old == {
           case 0;
             #insert to_insert;
 
-            if lock_cmpxchg(synch_value, 1, 2) != 1  debug_break();  // Should not happen!
+            if !compare_and_swap(synch_value, 1, 2)  debug_break();  // Should not happen!
           case 1;
             // Maybe some exponential fall offy thing here?
             #if CPU == .X64 {
@@ -395,9 +456,7 @@ one_time_init :: (synch_value: *s32, to_insert: Code) #expand {
 // if you make an error of some kind, even a simple one like an undeclared identifier,
 // you won't get a helpful error message.
 Context_Base :: struct {
-    // @Incomplete: Initialize this to type_of(Context) to make sure it is not null when someone creates a default context!
-    // :InitContextInfo
-    context_info:  *Type_Info_Struct; // Allow libs or DLLs to see what context we are passing them.
+    context_info:  *Type_Info_Struct; // Allow libs or DLLs to see what context we are passing them. Will always be initialized to type_of(Context).
 
     thread_index   : u32;
 
@@ -410,17 +469,14 @@ Context_Base :: struct {
 
     temporary_storage: *Temporary_Storage;
 
-    // Currently, for simplicity we don't #if this out right now when _STACK_TRACE is false;
-    // initially an implementation detail prevented us from doing this, but now that's gone,
-    // but to be conservative we aren't changing this yet (but may later). It is probably
-    // convenient to let runtime code be able to check context.stack_trace to see if it is
-    // null in some cases, rather than needing all that to be #iffed as well. We will see.
+    // Currently, for simplicity we don't #if this out right now when _STACK_TRACE is false
+    // (but may later). It is probably convenient to let runtime code be able
+    // to check context.stack_trace to see if it is null in some cases,
+    // rather than needing all that to be #iffed as well. We will see.
     stack_trace: *Stack_Trace_Node;
 
     assertion_failed := runtime_support_assertion_failed;
     handling_assertion_failure := false;  // Used to avoid assert() infinite loops. Do not mess with this value.
-
-    program_print_plugin: *void;  // This is a dumb field that will go away when we have a better alternative.
 
     default_allocator :: Allocator.{runtime_support_default_allocator_proc, null};
 }
@@ -454,12 +510,179 @@ set_initial_data :: (ts: *Temporary_Storage, count: s64, data: *u8) #no_context 
     ts.original_size = count;
 }
 
-#add_context using base: Context_Base;
-
-
 #scope_module
 
 init_synchronization :: () #no_context {
+    // For now, we do not bother to destroy write_string_lock, etc
+    // on shutdown.
+    #if OS == .WINDOWS {
+        InitializeCriticalSection :: (section: *CRITICAL_SECTION_stub) #foreign kernel32;
+        InitializeCriticalSection(*write_string_lock);
+
+        STD_OUTPUT_HANDLE :: -11;
+        STD_ERROR_HANDLE  :: -12;
+        windows_standard_output = GetStdHandle(STD_OUTPUT_HANDLE);
+        windows_standard_error  = GetStdHandle(STD_ERROR_HANDLE);
+    } else #if OS == .LINUX || OS == .ANDROID {
+        // Nothing to do
+    } else #if OS_IS_UNIX { // Other Unixes
+        PTHREAD_MUTEX_RECURSIVE :: 2;
+        #if OS == .MACOS || OS == .IOS {
+            pthread_mutexattr_t_stub :: struct { memory: [2] s64; }
+        } else {
+            pthread_mutexattr_t_stub :: *void;
+        }
+        pthread_mutexattr_init    :: (attr: *pthread_mutexattr_t_stub) -> s32             #foreign pthreads;
+        pthread_mutexattr_settype :: (attr: *pthread_mutexattr_t_stub, type:  s32) -> s32 #foreign pthreads;
+        pthread_mutex_init        :: (mutex: *pthread_mutex_t_stub, attr: *pthread_mutexattr_t_stub) -> s32 #foreign pthreads;
+
+        attr: pthread_mutexattr_t_stub;
+        pthread_mutexattr_init(*attr);
+        pthread_mutexattr_settype(*attr, PTHREAD_MUTEX_RECURSIVE);
+        pthread_mutex_init(*write_string_lock, *attr);  // This had better not fail!
+    } else {
+        // Let the user fill this in, if desired.
+    }
+}
+
+#if OS == .WINDOWS {
+    kernel32     :: #library,system "kernel32";
+
+    WriteFile    :: (handle: *void, buffer: *void, buffer_length: u32, written_result: *u32, overlapped: *void) -> s32 #foreign kernel32;
+    GetStdHandle :: (handle: s32) -> *void #foreign kernel32;
+
+    EnterCriticalSection :: (lpCriticalSection: *CRITICAL_SECTION_stub) #foreign kernel32;
+    LeaveCriticalSection :: (lpCriticalSection: *CRITICAL_SECTION_stub) #foreign kernel32;
+
+    runtime_support_acquire :: EnterCriticalSection;
+    runtime_support_release :: LeaveCriticalSection;
+    write_string_lock: CRITICAL_SECTION_stub;
+
+    // Our mutex / critical sections are just dummies to hold as much memory as we need, so we don't bloat Runtime_Support.
+    CRITICAL_SECTION_stub :: struct {
+        memory: [5] u64;
+    }
+
+    windows_standard_output: *void;
+    windows_standard_error: *void;
+} else #if OS_IS_UNIX {
+    libc :: #library,system "libc";
+    write :: (fd: s32, buf: *void, count: u64) -> s64 #foreign libc;
+
+    #if OS == .LINUX || OS == .ANDROID {
+        // Use futex to avoid depending on pthread
+        write_string_lock: s32; // Zero if unlocked.
+
+        FUTEX_WAIT :: 0;
+        FUTEX_WAKE :: 1;
+        FUTEX_PRIVATE_FLAG :: 128;
+
+        runtime_support_acquire :: (futex_lock: *s32) #no_context {
+            SPIN_BUDGET :: 10;
+
+            loop_count := 0;
+
+            // Retry to acquire the lock until we got it.
+            while true {
+                if compare_and_swap(futex_lock, 0, 1) {
+                    // The mutex was free and is now acquired.
+                    return;
+                }
+
+                // Spin wait before trying to acquire the mutex again.
+                if loop_count < SPIN_BUDGET {
+                    loop_count += 1;
+
+                    for 0..(1 << loop_count) {
+                        #if CPU == .X64 {
+                            #asm { pause; pause; pause; pause; }
+                        }
+                        #if CPU == .ARM64 {
+                            #bytes .[0x3F, 0x20, 0x03, 0xD5]; // YIELD
+                        }
+                    }
+                } else {
+                    // Spinning takes too long, let's block and try re-acquire after wake up.
+                    futex(futex_lock, FUTEX_WAIT | FUTEX_PRIVATE_FLAG, 1);
+                    loop_count = 0;
+                }
+            }
+        }
+
+        runtime_support_release :: (futex_lock: *s32) #no_context {
+            compare_and_swap(futex_lock, 1, 0); // lock_xchg would be enough, but we don’t have that intrinsic
+            futex(futex_lock, FUTEX_WAKE | FUTEX_PRIVATE_FLAG, 1);
+        }
+
+        futex :: (futex_lock: *s32, op: u64, val: u64) #expand {
+            #if CPU == .X64 {
+                SYS_futex :: 202;
+                #asm SYSCALL_SYSRET {
+                    mov.q call:     gpr === a, SYS_futex;
+                    mov.q uaddr:    gpr === di, futex_lock;
+                    mov.q futex_op: gpr === si, op;
+                    mov.q value:    gpr === d, val;
+                    mov.q timeout:  gpr === 10, 0;
+
+                    syscall t1:, t2:, call;
+                }
+            } else {
+                SYS_futex :: 98;
+                syscall :: (__sysno: s64, __args: ..Any) -> s64 #foreign libc;
+                syscall(SYS_futex, futex_lock, op, val, null, null, 0);
+            }
+        }
+    } else {
+        #if OS == .MACOS || OS == .IOS {
+            pthreads :: #library,system "libc";
+        } else {
+            pthreads :: #library,system "libpthread";
+        }
+
+        pthread_mutex_lock    :: (mutex: *pthread_mutex_t_stub) -> s32 #foreign pthreads;
+        pthread_mutex_unlock  :: (mutex: *pthread_mutex_t_stub) -> s32 #foreign pthreads;
+
+        runtime_support_acquire :: pthread_mutex_lock;
+        runtime_support_release :: pthread_mutex_unlock;
+        write_string_lock: pthread_mutex_t_stub;
+
+        // Our mutex / critical sections are just dummies to hold as much memory as we need, so we don't bloat Runtime_Support.
+        // @Volatile: These types have to fit the real declarations on each platform!
+        #if OS == .MACOS || OS == .IOS {
+            pthread_mutex_t_stub :: struct {
+                memory: [64] u8;
+            }
+        } else {
+            pthread_mutex_t_stub :: *void;
+        }
+    }
+} else {
+    // Let the user fill this in, if desired.
+    write_string_lock: void;
+    runtime_support_acquire :: (lock: *$T) #no_context #expand {}
+    runtime_support_release :: (lock: *$T) #no_context #expand {}
+}
+
+#if OS == .ANDROID {
+    android_write_string_buffer_offset := 0;
+    android_write_string_buffer_is_error: bool;
+    android_write_string_buffer: [512] u8; // Android offers no bare stdio functions, only loggers – which append "\n". So we have to buffer partial lines… :AndroidWriteString
+    #scope_export
+    android_flush_write_string_buffer :: (force := false) #no_context {
+        if !force && !android_write_string_buffer_offset return;
+
+        liblog :: #library,system "liblog";
+        ANDROID_LOG_INFO:  s32 : 4;
+        ANDROID_LOG_ERROR: s32 : 6;
+        __android_log_write :: (prio: s32, tag: *u8, fmt: *u8, args: .. Any) -> s32  #foreign liblog;
+
+        level := ifx android_write_string_buffer_is_error then ANDROID_LOG_ERROR else ANDROID_LOG_INFO;
+        tag   := ifx android_write_string_buffer_is_error then "jai-stderr".data else "jai-stdout".data;
+
+        android_write_string_buffer[android_write_string_buffer_offset] = 0;
+        __android_log_write(level, tag, android_write_string_buffer.data);
+        android_write_string_buffer_offset = 0;
+    }
 }
 
 synch_initted: s32 = 0;

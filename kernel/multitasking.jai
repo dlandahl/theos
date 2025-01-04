@@ -50,7 +50,7 @@ allocate_task_info_struct :: () -> *Task_Info {
     task.id = next_task_id;
     next_task_id += 1;
 
-    print("Created task id %\n", task.id);
+    log("Created task id %\n", task.id);
 
     return task;
 }
@@ -182,8 +182,7 @@ yield :: (loc := #caller_location) #no_context {
 
     next: *Task_Info;
 
-    c: Context;
-    push_context c {
+    push_context {
         wake_sleeping_task();
 
         while true {
@@ -306,8 +305,7 @@ syscall_handler :: (data: *Syscall_Stack) #c_call {
         t.low  = data.rbx;
         t.high = cast(s64) data.rdx;
 
-        c: Context;
-        push_context c {
+        push_context {
             time := get_monotonic_system_time();
             sleep_until(time + t);
         }
@@ -345,8 +343,8 @@ task_do_work :: () #c_call {
 }
 
 task_do_work_in_ring_3 :: () #c_call {
-    c := make_kernel_context();
-
+    c: #Context;
+    make_kernel_context(*c);
     push_context c {
         core := get_current_core_from_user_mode();
         thread := core.scheduler.current_task;
@@ -406,7 +404,7 @@ queue_push :: (using queue: *Queue) -> *queue.Item_Type {
         old_count := items.allocated;
 
         items.count += 1;
-        maybe_grow(*queue.items);
+        maybe_grow(cast(*Resizable_Array) *queue.items, size_of(queue.Item_Type));
         items.count = items.allocated;
 
         memcpy(items.data + items.count - head - 1, items.data + head, (old_count - head + 1) * size_of(Item_Type));

@@ -11,11 +11,8 @@ VIRTUALBOX_COMPATIBILITY :: true;
 #program_export
 EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UINTN #c_call {
 
-    c := Context.{
-        system_table = system_table,
-    };
-
-    push_context c {
+    push_context {
+        context.system_table = system_table;
         boot_services := system_table.BootServices;
 
         // Memory type for allocations that should keep the memory reserved in the kernel's physical memory management.

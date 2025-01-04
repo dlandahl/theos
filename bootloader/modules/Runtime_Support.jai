@@ -78,43 +78,6 @@ my_panic :: () #no_context {
 __panic_due_to_runtime_call_of_compile_time_procedure :: (line_number: s64, filename: *u8) #no_context {
 }
 
-#if DEFINE_INITIALIZATION {
-    // TEMPORARY_STORAGE_SIZE is defined by the compiler based on Build_Options.
-
-    first_thread_context: Context;
-    first_thread_temporary_storage: Temporary_Storage;
-    first_thread_temporary_storage_data: [TEMPORARY_STORAGE_SIZE] u8 #align 64;
-
-    #scope_export
-    #program_export
-    __jai_runtime_init :: (argc: s32, argv: **u8) -> *Context #c_call {
-        __command_line_arguments.count = argc;
-        __command_line_arguments.data  = argv;
-
-        ts := *first_thread_temporary_storage;
-        set_initial_data(ts, TEMPORARY_STORAGE_SIZE, first_thread_temporary_storage_data.data);
-
-        first_thread_context.temporary_storage = ts;
-
-        first_thread_context.base.context_info = type_info(Context);
-
-        dummy_context: Context;
-        dummy_context.base.context_info = type_info(Context);
-        push_context dummy_context {
-            // Allocator should not rely on a good context for STARTUP. For other modes, it's fine.
-            first_thread_context.allocator.data = runtime_support_default_allocator_proc(.STARTUP, 0, 0, null, null);
-        }
-
-        return *first_thread_context;
-    }
-
-    #program_export
-    __jai_runtime_fini :: (_context: *void) #c_call {
-        // Nothing here for now!
-        // We don't bother shutting down the default allocator. The OS frees the memory.
-    }
-}
-
 __instrumentation_first  :: () {
     // These are places to insert code, from a metaprogram, if you want
     // that code to run before main().
@@ -212,15 +175,14 @@ one_time_init :: (synch_value: *s32, to_insert: Code) #expand {
     }
 }
 
+
 // @Volatile: Context_Base must match internal compiler settings in general.h
 // It must exist and be relatively easy to compile (without requiring #run of
 // procedures, for example). Context_Base is going to be annoying to edit because
 // if you make an error of some kind, even a simple one like an undeclared identifier,
 // you won't get a helpful error message.
 Context_Base :: struct {
-    // @Incomplete: Initialize this to type_of(Context) to make sure it is not null when someone creates a default context!
-    // :InitContextInfo
-    context_info:  *Type_Info_Struct; // Allow libs or DLLs to see what context we are passing them.
+    context_info:  *Type_Info_Struct; // Allow libs or DLLs to see what context we are passing them. Will always be initialized to type_of(Context).
 
     thread_index   : u32;
 
@@ -233,17 +195,14 @@ Context_Base :: struct {
 
     temporary_storage: *Temporary_Storage;
 
-    // Currently, for simplicity we don't #if this out right now when _STACK_TRACE is false;
-    // initially an implementation detail prevented us from doing this, but now that's gone,
-    // but to be conservative we aren't changing this yet (but may later). It is probably
-    // convenient to let runtime code be able to check context.stack_trace to see if it is
-    // null in some cases, rather than needing all that to be #iffed as well. We will see.
+    // Currently, for simplicity we don't #if this out right now when _STACK_TRACE is false
+    // (but may later). It is probably convenient to let runtime code be able
+    // to check context.stack_trace to see if it is null in some cases,
+    // rather than needing all that to be #iffed as well. We will see.
     stack_trace: *Stack_Trace_Node;
 
     assertion_failed := runtime_support_assertion_failed;
     handling_assertion_failure := false;  // Used to avoid assert() infinite loops. Do not mess with this value.
-
-    program_print_plugin: *void;  // This is a dumb field that will go away when we have a better alternative.
 
     default_allocator :: Allocator.{runtime_support_default_allocator_proc, null};
 }
@@ -277,7 +236,38 @@ set_initial_data :: (ts: *Temporary_Storage, count: s64, data: *u8) #no_context 
     ts.original_size = count;
 }
 
-#add_context using base: Context_Base;
+#if DEFINE_INITIALIZATION {
+    // TEMPORARY_STORAGE_SIZE is defined by the compiler based on Build_Options.
+
+    first_thread_context: #Context;
+    first_thread_temporary_storage: Temporary_Storage;
+    first_thread_temporary_storage_data: [TEMPORARY_STORAGE_SIZE] u8 #align 64;
+
+    #scope_export
+    #program_export
+    __jai_runtime_init :: (argc: s32, argv: **u8) -> *#Context #c_call {
+        __command_line_arguments.count = argc;
+        __command_line_arguments.data  = argv;
+
+        // We don't need this initializer_of call, but we're leaving it in a comment, in case there are
+        // compiler bugs in Context init and you want to work around them by re-enabling it.
+        // @Temporary: Putting it back for a bit since there is a bug exhibiting on Mac that might
+        // also cause first_thread_context not to be fully filled out...
+        initializer_of(#Context)(*first_thread_context); 
+        
+        ts := *first_thread_temporary_storage;
+        set_initial_data(ts, TEMPORARY_STORAGE_SIZE, first_thread_temporary_storage_data.data);
+        first_thread_context.temporary_storage = ts;
+
+        return *first_thread_context;
+    }
+
+    #program_export
+    __jai_runtime_fini :: (_context: *void) #c_call {
+        // Nothing here for now!
+        // We don't bother shutting down the default allocator. The OS frees the memory.
+    }
+}
 
 
 #scope_module

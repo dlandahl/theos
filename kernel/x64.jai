@@ -196,9 +196,7 @@ read_msr :: (msr: Ia32_Model_Specific_Register) -> u64 #no_context {
 
 
 enable_cpu_features :: () #no_context {
-    c: Context;
-
-    push_context c {
+    push_context {
         cpu_features := get_cpu_info().feature_leaves;
 
         CR0_MP         :=   1 << 1;
