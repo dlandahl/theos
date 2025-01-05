@@ -48,13 +48,26 @@ Boot_Data :: struct {
             RESERVED_BY_THE_BOOTLOADER;
             RESERVED_BY_FIRMWARE;
             DONT_KNOW;
+            NOT_REPORTED;
         }
-    };
+    }
 
     memory_map: [100] Memory_Region;
     memory_map_entries_used: int;
 
     page_frames: [] Page_Frame_Desc;
+    large_pages: [] Large_Page;
+}
+
+Large_Page :: struct {
+    freelist: s32;
+    FREELIST_TAIL :: -1;
+
+    type: enum u8 {
+        FREE;
+        ALLOCATED;
+        RESERVED;
+    };
 }
 
 Page_Frame_Desc :: struct {
@@ -67,7 +80,7 @@ Page_Frame_Desc :: struct {
     Flags :: enum_flags u8 {
         ALLOCATOR_TAG_SINGLE_PAGE;
         ALLOCATOR_TAG_BLOCK;
-    };
+    }
 }
 
 #program_export

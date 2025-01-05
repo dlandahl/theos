@@ -166,7 +166,7 @@ kernel_entry :: () #no_context {
         // Don't use Basic.calendar_to_apollo, because it's OS specific
         boot_time = native_calendar_to_apollo(boot_calendar_time);
 
-        // print_physical_memory_map();
+        print_physical_memory_map();
 
         core_begin_multitasking();
 
@@ -857,7 +857,7 @@ print_physical_memory_map :: () {
     using kernel_globals;
     context.print_style.default_format_float.trailing_width = 2;
 
-    total_by_type: [4] float;
+    total_by_type: [5] float;
     for 0..boot_data.memory_map_entries_used-1 {
 
         region := boot_data.memory_map[it];

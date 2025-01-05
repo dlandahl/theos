@@ -157,10 +157,19 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         {
             // Reserve physical memory for page frame descriptors
-            count := highest_address / 4096;
-            EFI_CHECK(boot_services.AllocatePool(UserReservedMemoryType, size_of(Page_Frame_Desc) * count, cast(**void) *boot_data.page_frames.data));
-            memset(boot_data.page_frames.data, 0, size_of(Page_Frame_Desc) * cast(s64) count);
-            boot_data.page_frames.count = cast(s64) count;
+            small_count  := (highest_address / 4096);
+            small_bytes  := small_count * size_of(Page_Frame_Desc);
+
+            EFI_CHECK(boot_services.AllocatePool(UserReservedMemoryType, small_bytes, cast(**void) *boot_data.page_frames.data));
+            memset(boot_data.page_frames.data, 0, xx small_bytes);
+            boot_data.page_frames.count = cast(s64) small_count;
+
+            large_count := (highest_address / 0x20_0000);
+            large_bytes := large_count * size_of(Large_Page);
+
+            EFI_CHECK(boot_services.AllocatePool(UserReservedMemoryType, large_bytes, cast(**void) *boot_data.large_pages.data));
+            memset(boot_data.large_pages.data, 0, xx large_bytes);
+            boot_data.large_pages.count = cast(s64) large_count;
         }
 
         {
@@ -282,8 +291,9 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             bd := boot_data;
 
             if bd.memory_map_entries_used != 0 {
-                // If two available regions are contiguous, just grow the previous one.
+                // If two regions are contiguous, just grow the previous one.
                 // Won't always coalesce perfectly because the firmware doesn't guarantee that memory map entries are sorted by address.
+
                 last_region := *bd.memory_map[bd.memory_map_entries_used-1];
 
                 types_match := last_region.type == region.type;
@@ -293,12 +303,31 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
                     last_region.pages += region.pages;
                     continue;
                 }
-            }                
+
+                monotonic := last_region.address < region.address;
+                if !monotonic {
+                    display("Error: Firmware memory map is not in order.\n");
+                    while true {}
+                }
+
+                if !contiguous {
+                    display("Warning: Firmware memory map is discontiguous: ", limit(last_region.*), " <-> ", region.address, "\n");
+
+                    gap_region: Boot_Data.Memory_Region;
+                    gap_region.type = .NOT_REPORTED;
+                    gap_region.address = limit(last_region.*);
+                    gap_region.pages   = (region.address - limit(last_region.*)) / 4096;
+
+                    bd.memory_map[bd.memory_map_entries_used] = gap_region;
+                    bd.memory_map_entries_used += 1;
+                }
+            }
 
             bd.memory_map[bd.memory_map_entries_used] = region;
             bd.memory_map_entries_used += 1;
 
             if bd.memory_map_entries_used == bd.memory_map.count {
+                display("Ran out of memory map entries.\n");
                 break;
             }
         }
