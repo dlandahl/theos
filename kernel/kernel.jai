@@ -210,6 +210,8 @@ simd_floating_point_exception :: (stack: *Interrupt_Stack()) #c_call {
 
 
 make_kernel_context :: (c: *#Context) #no_context {
+    initializer_of(#Context)(c); 
+
     c.assertion_failed = (location: Source_Code_Location, message: string) -> bool {
         write_string("Assertion failure");
         if message.count {
@@ -250,10 +252,10 @@ make_kernel_context :: (c: *#Context) #no_context {
 
             new := cast(*void) physical + DIRECT_MAPPING_BASE;
 
-            // if old_size && old_memory && mode == .RESIZE {
-            //     memcpy(new, old_memory, old_size);
-            //     #this(.FREE, old_size, 0, old_memory, null);
-            // }
+            if mode == .RESIZE {
+                memcpy(new, old_memory, old_size);
+                // #this(.FREE, old_size, 0, old_memory, null);
+            }
 
             page := *kernel_globals.page_frames[physical / 4096];
             page.flags |= ifx use_block_allocator then .ALLOCATOR_TAG_BLOCK else .ALLOCATOR_TAG_SINGLE_PAGE;
@@ -291,13 +293,13 @@ make_kernel_context :: (c: *#Context) #no_context {
 
     if true {
         acquire(*kernel_globals.memory_spinlock);
-        ts_buffer_block := alloc_block(*kernel_globals.physical_block_allocator, 0x1000);
+        ts_buffer_block := alloc_block(*kernel_globals.physical_block_allocator, 0x2000);
+        c.temporary_storage = cast(*Temporary_Storage) get_virtual_address(get_page_frame());
         release(*kernel_globals.memory_spinlock);
 
         ts_buffer := cast(*void) ts_buffer_block + DIRECT_MAPPING_BASE;
-        c.temporary_storage = cast(*Temporary_Storage) ts_buffer;
 
-        set_initial_data(c.temporary_storage, 0x2_0000 - size_of(Temporary_Storage), ts_buffer + size_of(Temporary_Storage));
+        set_initial_data(c.temporary_storage, 0x2000, ts_buffer);
 
         c.temporary_storage.overflow_allocator = c.allocator;
     }

@@ -275,10 +275,10 @@ ap_startup_spinlock: Spinlock;
 ap_entry_point :: () #c_call {
     release(*ap_startup_spinlock);
 
-    c: #Context;
-    make_kernel_context(*c);
 
-    push_context c {
+    push_context {
+        make_kernel_context(*context);
+
         init_processor_core();
 
         core := get_current_core();
