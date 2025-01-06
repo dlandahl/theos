@@ -201,7 +201,9 @@ rtc_read :: (register: Rtc_Register) -> u8 {
         in.b ax, DATA;
     }
 
-    if kernel_globals.rtc_format_is_bcd && register < .STATUS_A {
+    is_status_register := (register >= .STATUS_A) && (register <= .STATUS_C);
+
+    if kernel_globals.rtc_format_is_bcd && !is_status_register {
         ax = (ax & 0xf) + (ax / 16) * 10;
     }
 
@@ -236,8 +238,6 @@ rtc_get_calendar_time :: () -> Calendar_Time {
     fadt := kernel_globals.fadt;
     if fadt && fadt.century {
         century := cast(s32) rtc_read(cast(Rtc_Register) fadt.century);
-        century = (century & 0xf) + (century / 16) * 10;
-
         cal.year += century * 100;
     } else {
         cal.year += 2000;

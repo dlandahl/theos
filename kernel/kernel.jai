@@ -86,7 +86,7 @@ kernel_entry :: () #no_context {
                 init_physical_page_pool(region);
                 pool_initted = true;
             } else {
-                init_block_allocator(*kernel_globals.physical_block_allocator, xx region.address / 4096, xx region.pages);
+                init_block_allocator(*physical_block_allocator, xx region.address / 4096, xx region.pages);
                 break;
             }
         }
@@ -97,11 +97,39 @@ kernel_entry :: () #no_context {
         }
     }
 
+    memory_map_index: int;
+    for* page, page_index: large_pages {
+        base  := page_index * 0x20_0000;
+        limit := base       + 0x20_0000;
+
+        for memory_map_index..memory_map_entries_used-1 {
+
+            region_limit := memory_map[it].pages*4096 + memory_map[it].address;
+
+            if region_limit <= cast(u64) base {
+                continue;
+            }
+
+            if memory_map[it].address >= cast(u64) limit {
+                memory_map_index -= 1;
+                continue page;
+            }
+
+            if memory_map[it].type != .FREE {
+                page.type = .RESERVED;
+                continue page;
+            }
+
+            memory_map_index += 1;
+        }
+    }
+
     make_kernel_context(*main_thread_context);
 
     push_context main_thread_context {
 
         rtc_init();
+
 
         using framebuffer;
 
@@ -173,11 +201,13 @@ kernel_entry :: () #no_context {
         startup_application_processors();
 
         core := get_current_core();
-
         for 1..4 {
             new_task := create_task();
             put_task_on_core(new_task, core);
         }
+
+        size := page_frames.count * size_of(Page_Frame_Desc);
+        print("Size of large pages: % kb\n", size / 1024);
 
         #asm { sti; }
 
@@ -883,4 +913,7 @@ print_physical_memory_map :: () {
         print("Total (%) % MB\n=======\n", cast(type_of(Memory_Region.type)) it_index, it / 256);
     }
 
+    for boot_data.large_pages {
+        print("[%] %\n", it_index, it.type);
+    }
 }

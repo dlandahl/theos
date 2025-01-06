@@ -71,6 +71,8 @@ core_begin_multitasking :: () {
     scheduler.current_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
 
     idle :: () #c_call {
+        push_context,defer_pop;
+
         core := get_current_core();
         release(*core.scheduler.spinlock);
 
@@ -168,12 +170,8 @@ sleep_until :: (time: Apollo_Time) {
     yield();
 }
 
-wake_sleeping_task :: () -> bool {
-    core := get_current_core();
+wake_sleeping_tasks :: (core: *X64_Core, time: Apollo_Time) -> bool {
     scheduler := *core.scheduler;
-
-    time := get_monotonic_system_time();
-
     queue := scheduler.sleep_queue;
 
     if queue && queue.sleep_until < time {
@@ -189,7 +187,7 @@ wake_sleeping_task :: () -> bool {
     return false;
 }
 
-yield :: () #no_context {
+yield :: () {
     core := get_current_core();
     scheduler := *core.scheduler;
 
@@ -198,28 +196,26 @@ yield :: () #no_context {
     next: *Task_Info;
     current := scheduler.current_task;
 
-    push_context {
-        wake_sleeping_task();
+    time_now := get_monotonic_system_time();
+    wake_sleeping_tasks(core, time_now);
 
-        if queue_is_empty(scheduler.waiting_to_run) {
-            next = scheduler.idle_task;
-        } else {
-            next = queue_pop(*scheduler.waiting_to_run);
-        }
-
-        if next == current {
-            return;
-        }
-
-        if !current.sleeping && current != scheduler.idle_task {
-            // This should never be an allocation since we just removed.
-            queue_push(*scheduler.waiting_to_run, current);
-        }
-
-        time_now := get_monotonic_system_time();
-        current.cpu_time += time_now - scheduler.last_task_switch_timestamp;
-        scheduler.last_task_switch_timestamp = time_now;
+    if queue_is_empty(scheduler.waiting_to_run) {
+        next = scheduler.idle_task;
+    } else {
+        next = queue_pop(*scheduler.waiting_to_run);
     }
+
+    if next == current {
+        return;
+    }
+
+    if !current.sleeping && current != scheduler.idle_task {
+        // This should never be an allocation since we just removed.
+        queue_push(*scheduler.waiting_to_run, current);
+    }
+
+    current.cpu_time += time_now - scheduler.last_task_switch_timestamp;
+    scheduler.last_task_switch_timestamp = time_now;
 
     // Todo: we don't need to write into scheduler.current_task in the interrupt routine
     _current := *scheduler.current_task;
@@ -272,28 +268,23 @@ print_from_user_mode :: (format: string, args: .. Any) {
 
     builder: String_Builder;
     print(*builder, format, ..args);
+    result := builder_to_string(*builder, do_reset=true);
 
-    buffer := get_base_buffer(*builder);
-    while buffer {
-        data  := get_buffer_data(buffer);
-        count := buffer.count;
+    data  := result.data;
+    count := result.count;
 
-        #asm SYSCALL_SYSRET {
-            syscall_number === a;
-            count === b;
-            data === d;
+    #asm SYSCALL_SYSRET {
+        syscall_number === a;
+        count === b;
+        data === d;
 
-            syscall c:, _11:, count, data, syscall_number;
-        }
-
-        buffer = buffer.next;
+        syscall c:, _11:, count, data, syscall_number;
     }
-
-    reset(*builder);
 }
 
 #program_export
 syscall_handler :: (data: *Syscall_Stack) #c_call {
+    push_context,defer_pop;
 
     if data.rax == {
       case 1;
@@ -307,10 +298,8 @@ syscall_handler :: (data: *Syscall_Stack) #c_call {
         t.low  = data.rbx;
         t.high = cast(s64) data.rdx;
 
-        push_context {
-            time := get_monotonic_system_time();
-            sleep_until(time + t);
-        }
+        time := get_monotonic_system_time();
+        sleep_until(time + t);
 
       case 4;
         s: string;
@@ -347,6 +336,7 @@ task_do_work :: () #c_call {
 task_do_work_in_ring_3 :: () #c_call {
     c: #Context;
     make_kernel_context(*c);
+
     push_context c {
         core := get_current_core_from_user_mode();
         thread := core.scheduler.current_task;
@@ -376,7 +366,9 @@ local_apic_timer_interrupt :: (stack: *Interrupt_Stack()) #c_call {
         return;
     }
 
-    yield();
+    push_context {
+        yield();
+    }
 } @InterruptRoutine
 
 #program_export
@@ -387,7 +379,7 @@ spurious_interrupt :: (stack: Interrupt_Stack()) #c_call {
 
 
 Queue :: struct (Item_Type: Type) {
-    // Using a resizeable array to hold the underlying data  to get the resizing logic from Basic/Array.jai. It means we need to keep saying items.count = items.allocated.
+    // Using a resizeable array to hold the underlying data, to get the resizing logic from Basic/Array.jai. It means we need to keep saying items.count = items.allocated.
     items: [..] Item_Type;
     head: int;
     tail: int;
