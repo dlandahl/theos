@@ -113,8 +113,8 @@ create_task :: (entry_point := task_do_work) -> *Task_Info {
     new_task := allocate_task_info_struct();
     new_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
 
-    new_task.user_stack   = alloc(0x1_0000) + 0x1_0000;
-    new_task.kernel_stack = alloc(0x1_0000) + 0x1_0000;
+    new_task.user_stack   = alloc(0x8000) + 0x8000;
+    new_task.kernel_stack = alloc(0x8000) + 0x8000;
 
     stack := cast(*Interrupt_Stack) new_task.kernel_stack - 1;
     stack.flags = .IF__interrupt;

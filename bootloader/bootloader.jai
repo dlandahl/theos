@@ -23,7 +23,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         EFI_CHECK(boot_services.AllocatePages(.AllocateAddress, UserReservedMemoryType, size_of(Boot_Data) / 4096 + 1, *boot_data_address));
 
         boot_data := cast(*Boot_Data) boot_data_address;
-        memset(boot_data, 0, size_of(Boot_Data));
+        boot_data.* = .{};
 
         // Even though this mapping is not needed while boot-services are still active, we create it in the boot-services memory map anyway, so that it gets reported by GetMemoryMap, and the kernel will know the memory is not available.
         // Todo: this call fails on VirtualBox
@@ -157,19 +157,12 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         {
             // Reserve physical memory for page frame descriptors
-            small_count  := (highest_address / 4096);
-            small_bytes  := small_count * size_of(Page_Frame_Desc);
+            count := highest_address / 0x20_0000;
+            bytes := count * size_of(Large_Page);
 
-            EFI_CHECK(boot_services.AllocatePool(UserReservedMemoryType, small_bytes, cast(**void) *boot_data.page_frames.data));
-            memset(boot_data.page_frames.data, 0, xx small_bytes);
-            boot_data.page_frames.count = cast(s64) small_count;
-
-            large_count := (highest_address / 0x20_0000);
-            large_bytes := large_count * size_of(Large_Page);
-
-            EFI_CHECK(boot_services.AllocatePool(UserReservedMemoryType, large_bytes, cast(**void) *boot_data.large_pages.data));
-            memset(boot_data.large_pages.data, 0, xx large_bytes);
-            boot_data.large_pages.count = cast(s64) large_count;
+            EFI_CHECK(boot_services.AllocatePool(UserReservedMemoryType, bytes, cast(**void) *boot_data.large_pages.data));
+            memset(boot_data.large_pages.data, 0, xx bytes);
+            boot_data.large_pages.count = cast(s64) count;
         }
 
         {
@@ -194,7 +187,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             // UEFI seems to put the stack at the top of physical memory. Don't know if that's standardised. For now assume that the machine has 256Mb
             index: int = 128;
             for 0..20 {
-                boot_pd[index] = (0x1000_0000 - cast(u64) it*0x20_0000) | cast(u64) PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+                boot_pd[index] = (0x1000_0000 - cast(u64) it*0x20_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
                 index -= 1;
             }
 
@@ -223,24 +216,23 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             offset := cast(u64) boot_data.framebuffer.buffer & 0x1fffff;
 
             // Map the framebuffer. Todo: enable write combining for this memory
-            pd[4] = (cast(u64) boot_data.framebuffer.buffer - offset            ) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            pd[4] = (cast(u64) boot_data.framebuffer.buffer - offset)             | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             pd[5] = (cast(u64) boot_data.framebuffer.buffer - offset + 0x20_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
 
             // Translate framebuffer address to virtual
             boot_data.framebuffer.buffer = cast(*u32) (virtual_base + 4*0x20_0000 + offset);
 
             // Map the page frame descriptors
-            page_directories_needed := (boot_data.page_frames.count * size_of(Page_Frame_Desc)) / (0x20_0000) + 2;
-            offset = cast(u64) boot_data.page_frames.data & 0x1fffff;
+            page_directories_needed := (boot_data.large_pages.count * size_of(Large_Page)) / (0x20_0000) + 2;
+            offset = cast(u64) boot_data.large_pages.data & 0x1fffff;
 
             for 0..page_directories_needed-1 {
-                base := cast(u64) boot_data.page_frames.data - offset + cast(u64) it * 0x20_0000;
+                base := cast(u64) boot_data.large_pages.data - offset + cast(u64) it * 0x20_0000;
                 pd[6 + it] = base | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             }
 
             // Translate page frame descriptor array address to virtual
-            boot_data.page_frames.data = cast(*Page_Frame_Desc) (virtual_base + 6*0x20_0000 + offset);
-
+            boot_data.large_pages.data = cast(*Large_Page) (virtual_base + 6*0x20_0000 + offset);
             boot_data.page_directories_used = 6 + page_directories_needed;
         }
 

@@ -55,7 +55,6 @@ Boot_Data :: struct {
     memory_map: [100] Memory_Region;
     memory_map_entries_used: int;
 
-    page_frames: [] Page_Frame_Desc;
     large_pages: [] Large_Page;
 }
 
@@ -63,24 +62,11 @@ Large_Page :: struct {
     freelist: s32;
     FREELIST_TAIL :: -1;
 
-    type: enum u8 {
+    state: enum u8 {
         FREE;
         ALLOCATED;
         RESERVED;
     };
-}
-
-Page_Frame_Desc :: struct {
-    // This struct should be kept as small as possible because there's one for each physical memory page in the device
-    freelist: s32;
-    FREELIST_TAIL :: -1;
-
-    flags: Flags;
-
-    Flags :: enum_flags u8 {
-        ALLOCATOR_TAG_SINGLE_PAGE;
-        ALLOCATOR_TAG_BLOCK;
-    }
 }
 
 #program_export

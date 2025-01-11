@@ -31,7 +31,7 @@ X64_Core :: struct {
 Kernel_Globals :: struct {
     using boot_data: *Boot_Data;
 
-    physical_page_pool: Physical_Page_Pool;
+    physical_page_pool: Physical_4k_Page_Pool(1024);
     physical_block_allocator: Block_Allocator;
     virtual_block_allocator: Block_Allocator;
 
@@ -62,6 +62,8 @@ Kernel_Globals :: struct {
 
     boot_time: Apollo_Time;
     rtc_format_is_bcd: bool;
+
+    large_page_allocator: Large_Page_Allocator;
 }
 
 kernel_globals: Kernel_Globals;
@@ -75,27 +77,7 @@ kernel_entry :: () #no_context {
     // We should avoid using the UEFI identity map because we'll need to get rid of it once we run user processes in low memory.
     boot_data = cast(*Boot_Data) (Boot_Data.BASE_ADDRESS + DIRECT_MAPPING_BASE);
 
-    // Init memory allocation
-    pool_initted := false;
-    for 0..boot_data.memory_map_entries_used-1 {
-        region := boot_data.memory_map[it];
-        if region.type != .FREE continue;
-
-        if region.pages >= 1024 {
-            if !pool_initted {
-                init_physical_page_pool(region);
-                pool_initted = true;
-            } else {
-                init_block_allocator(*physical_block_allocator, xx region.address / 4096, xx region.pages);
-                break;
-            }
-        }
-
-        if it == boot_data.memory_map_entries_used-1 {
-            write_string("Not enough usable contiguous physical memory found.\n");
-            bluescreen();
-        }
-    }
+    large_pages[0].state = .RESERVED;
 
     memory_map_index: int;
     for* page, page_index: large_pages {
@@ -116,13 +98,18 @@ kernel_entry :: () #no_context {
             }
 
             if memory_map[it].type != .FREE {
-                page.type = .RESERVED;
+                page.state = .RESERVED;
                 continue page;
             }
 
             memory_map_index += 1;
         }
     }
+
+    large_page_allocator.freelist = Large_Page_Allocator.FREELIST_TAIL;
+
+    big_page := allocate_large_page();
+    init_block_allocator(*physical_block_allocator, big_page, 0x20_0000);
 
     make_kernel_context(*main_thread_context);
 
@@ -150,7 +137,7 @@ kernel_entry :: () #no_context {
         heap_base := DIRECT_MAPPING_BASE + direct_mapping_size;
         heap_size := 64 * GB;
 
-        init_block_allocator(*virtual_block_allocator, heap_base / 4096, heap_size / 4096);
+        init_block_allocator(*virtual_block_allocator, cast(u64) heap_base, cast(u64) heap_size);
 
 
         // Sequentially allocating interrupt gates, starting after the ISA exceptions
@@ -168,7 +155,6 @@ kernel_entry :: () #no_context {
         } else {
             root_acpi_table = xx (rsdp.rsdt_address + DIRECT_MAPPING_BASE);
         }
-
 
         initialize_apic();
 
@@ -194,7 +180,7 @@ kernel_entry :: () #no_context {
         // Don't use Basic.calendar_to_apollo, because it's OS specific
         boot_time = native_calendar_to_apollo(boot_calendar_time);
 
-        print_physical_memory_map();
+        // print_physical_memory_map();
 
         core_begin_multitasking();
 
@@ -205,9 +191,6 @@ kernel_entry :: () #no_context {
             new_task := create_task();
             put_task_on_core(new_task, core);
         }
-
-        size := page_frames.count * size_of(Page_Frame_Desc);
-        print("Size of large pages: % kb\n", size / 1024);
 
         #asm { sti; }
 
@@ -268,29 +251,17 @@ make_kernel_context :: (c: *#Context) #no_context {
         Scoped_Acquire(*kernel_globals.memory_spinlock);
 
         if mode == .ALLOCATE || mode == .RESIZE {
-            physical: u64;
+            // Todo: handle resize
+            physical := alloc_block(*kernel_globals.physical_block_allocator, cast(u64) size);
 
-            use_block_allocator := size > 4096;
-
-            if use_block_allocator {
-                // Todo: attempt to grow existing block in case of resize
-                physical = alloc_block(*kernel_globals.physical_block_allocator, size);
-            } else {
-                page := get_page_frame();
-                physical = get_physical_address(page);
-            }
-
-            new := cast(*void) physical + DIRECT_MAPPING_BASE;
+            virtual := cast(*void) physical + DIRECT_MAPPING_BASE;
 
             if mode == .RESIZE {
-                memcpy(new, old_memory, old_size);
+                memcpy(virtual, old_memory, old_size);
                 // #this(.FREE, old_size, 0, old_memory, null);
             }
 
-            page := *kernel_globals.page_frames[physical / 4096];
-            page.flags |= ifx use_block_allocator then .ALLOCATOR_TAG_BLOCK else .ALLOCATOR_TAG_SINGLE_PAGE;
-
-            return new;
+            return virtual;
         }
 
         if mode == .FREE {
@@ -298,20 +269,8 @@ make_kernel_context :: (c: *#Context) #no_context {
                 return null;
             }
 
-            phys := cast(u64) old_memory - DIRECT_MAPPING_BASE;
-            index := phys / 4096;
-
-            page := *kernel_globals.page_frames[index];
-
-            if page.flags & .ALLOCATOR_TAG_BLOCK {
-                free_block(*kernel_globals.physical_block_allocator, phys);
-            } else if page.flags & .ALLOCATOR_TAG_SINGLE_PAGE {
-                release_page_frame(page);
-            } else {
-                bluescreen();
-            }
-
-            page.flags &= ~(Page_Frame_Desc.Flags.ALLOCATOR_TAG_SINGLE_PAGE | .ALLOCATOR_TAG_BLOCK);
+            physical := cast(u64) old_memory - DIRECT_MAPPING_BASE;
+            free_block(*kernel_globals.physical_block_allocator, physical);
         }
 
         if mode == .CAPS {
@@ -324,7 +283,7 @@ make_kernel_context :: (c: *#Context) #no_context {
     if true {
         acquire(*kernel_globals.memory_spinlock);
         ts_buffer_block := alloc_block(*kernel_globals.physical_block_allocator, 0x2000);
-        c.temporary_storage = cast(*Temporary_Storage) get_virtual_address(get_page_frame());
+        c.temporary_storage = cast(*Temporary_Storage) get_4k_page();
         release(*kernel_globals.memory_spinlock);
 
         ts_buffer := cast(*void) ts_buffer_block + DIRECT_MAPPING_BASE;
@@ -452,84 +411,117 @@ bluescreen :: (loc := #caller_location) #no_context {
     }
 }
 
-// A physical memory allocator that finds discontiguous physical pages. Discontiguous pages are more likely to be available and it doesn't usually
-// matter that they're discontiguous. However it's slower for large allocations, not only because the pages need to be found individually, but they
-// also need to be manually mapped so that the virtual memory is contiguous. For physically contiguous memory, there's already corresponding
-// contiguous virtual memory in the direct mapping.
 
-Physical_Page_Pool :: struct {
-    start: int; // Page frame index
-    page_count: int;
-    high_watermark: int;
 
-    freelist: s32 = FREELIST_TAIL;
-    FREELIST_TAIL :: Page_Frame_Desc.FREELIST_TAIL;
+Large_Page_Allocator :: struct {
+    max_large_page_used: int;
+    freelist: int;
+    lock: Spinlock;
+
+    FREELIST_TAIL :: -1;
 }
 
-init_physical_page_pool :: (memory: Boot_Data.Memory_Region) #no_context {
-    using kernel_globals.physical_page_pool;
+allocate_large_page :: () -> u64 #no_context {
 
-    start = cast(int) (memory.address / 4096);
-    page_count = cast(int) memory.pages;
-    high_watermark = 0;
-    freelist = FREELIST_TAIL;
-}
-
-get_page_frame :: () -> *Page_Frame_Desc, int #no_context {
-    using kernel_globals.physical_page_pool;
+    using kernel_globals.large_page_allocator;
+    Scoped_Acquire(*lock);
 
     if freelist != FREELIST_TAIL {
-        page := *kernel_globals.page_frames[freelist];
-        index := freelist;
+        address := freelist * 0x20_0000;
 
-        freelist = page.freelist;
+        desc := *kernel_globals.large_pages[freelist];
+        desc.state = .ALLOCATED;
+        freelist = desc.freelist;
 
-        return page, index;
+        return cast(u64) address;
     }
 
-    if high_watermark >= page_count {
+    while true {
+        if max_large_page_used >= kernel_globals.large_pages.count {
+            bluescreen();
+        }
+
+        desc := *kernel_globals.large_pages[max_large_page_used];
+
+        address := max_large_page_used * 0x20_0000;
+        max_large_page_used += 1;
+
+        if desc.state == .RESERVED {
+            continue;
+        }
+
+        desc.state = .ALLOCATED;
+        return cast(u64) address; 
+    }
+}
+
+
+
+Physical_4k_Page_Pool :: struct(page_count: int) {
+    freelist: [page_count] s32;
+    freelist_length: s32;
+    highest_used: s32;
+
+    large_pages: [(page_count+511) / 512] struct {
+        index: s32;
+        used: s32;
+    };
+
+    large_pages_used: s32;
+
+    lock: Spinlock;
+}
+
+page_pool_index_to_address :: (pool: *Physical_4k_Page_Pool, index: s32) -> u64 #no_context {
+    using pool;
+
+    large_page_index := index / 512;
+    page_index       := index % 512;
+
+    large_page := *large_pages[large_page_index];
+
+    if large_pages_used <= large_page_index {
+        large_page.index = cast(s32) (allocate_large_page() / 0x20_0000);
+        large_pages_used += 1;
+    }
+
+    large_page.used += 1;
+
+    address := cast(u64) large_page.index * 0x20_0000;
+    address += cast(u64) page_index * 4096;
+
+    return address;
+}
+
+get_4k_page :: () -> u64 #no_context {
+    return get_4k_page(*kernel_globals.physical_page_pool);
+}
+
+get_4k_page :: (pool: *Physical_4k_Page_Pool) -> u64 #no_context {
+    using pool;
+    Scoped_Acquire(*lock);
+
+    if freelist_length != 0 {
+        freelist_length -= 1;
+
+        page_index := freelist[freelist_length];
+        address    := page_pool_index_to_address(pool, page_index);
+
+        return address;
+    }
+
+    if highest_used >= page_count {
         bluescreen();
     }
 
-    index := start + high_watermark;
-    page := *kernel_globals.page_frames[index];
+    address := page_pool_index_to_address(pool, highest_used);
+    highest_used += 1;
 
-    high_watermark += 1;
-
-    return page, index;
+    return address;
 }
 
-release_page_frame :: (address: u64) {
-    release_page_frame(cast(int) (address / 4096));
-}
+free_4k_page :: (pool: *Physical_4k_Page_Pool, address: u64) #no_context {
 
-release_page_frame :: (index: int) {
-    using kernel_globals.physical_page_pool;
-
-    page_frame := *kernel_globals.page_frames[index];
-    page_frame.freelist = freelist;
-    freelist = xx index;
-}
-
-release_page_frame :: (page_frame: *Page_Frame_Desc) {
-    using kernel_globals.physical_page_pool;
-
-    page_frame.freelist = freelist;
-    freelist = index(page_frame);
-}
-
-get_physical_address :: (page_frame: *Page_Frame_Desc) -> u64 #no_context {
-    return cast(u64) index(page_frame) * 4096;
-}
-
-get_virtual_address :: (page_frame: *Page_Frame_Desc) -> *void #no_context {
-    phys := get_physical_address(page_frame);
-    return cast(*void) phys + DIRECT_MAPPING_BASE;
-}
-
-index :: (page_frame: *Page_Frame_Desc) -> s32 #no_context {
-    index := (cast(u64) page_frame - cast(u64) kernel_globals.page_frames.data) / size_of(Page_Frame_Desc);
-    return xx index;
 }
 
 
@@ -542,8 +534,7 @@ get_or_create_page_table :: (table: *u64, entry: u64) -> *u64 {
         return cast(*u64) (physical + DIRECT_MAPPING_BASE);
     }
 
-    page := get_page_frame();
-    address := get_physical_address(page);
+    address := get_4k_page();
 
     table[entry] = address | xx PRESENT | READ_WRITE;
 
@@ -596,12 +587,12 @@ Page_Flags :: enum_flags u64 {
 
 
 
-// A block allocator that just linearly scans to find a large enough free block. A block is an integer number of pages.
+// A block allocator that just linearly scans to find a large enough free block. Does not do the job of finding a best fit region to prevent fragmentation.
 // Is being used for both virtual and physical memory.
 
 Block_Desc :: struct {
-    start_page: s64; // Relative to the start of the allocator's region
-    size_pages: s64;
+    base: u64; // Relative to the start of the allocator's region
+    size: u64;
     used: bool;
 }
 
@@ -609,41 +600,38 @@ Block_Allocator :: struct {
     blocks: [] Block_Desc;
     max_block_descriptors: int;
 
-    start_page: int;
-    total_pages: int;
+    base_address: u64;
+    max_size: u64;
 }
 
-init_block_allocator :: (allocator: *Block_Allocator, start_page: int, total_pages: int) #no_context {
+init_block_allocator :: (allocator: *Block_Allocator, base_address: u64, max_size: u64) #no_context {
     // For bootstrapping, just use a single page to store block descriptors. Todo: fix
-    page := get_page_frame();
+    page := get_4k_page();
 
-    allocator.blocks.data = cast(*void) get_physical_address(page) + DIRECT_MAPPING_BASE;
+    allocator.blocks.data = cast(*void) page + DIRECT_MAPPING_BASE;
     allocator.max_block_descriptors = 4096 / size_of(Block_Desc);
 
-    allocator.start_page = start_page;
-    allocator.total_pages = total_pages;
+    allocator.base_address = base_address;
+    allocator.max_size = max_size;
 
     allocator.blocks.count = 1;
     allocator.blocks[0] = .{
-        start_page = 0,
-        size_pages = total_pages,
+        base = 0,
+        size = max_size,
         used = false,
     };
 }
 
-alloc_block :: (using allocator: *Block_Allocator, size_bytes: int, loc := #caller_location) -> address: u64, Block_Desc #no_context {
-
-    pages_needed := size_bytes / 4096;
-    if size_bytes % 4096 pages_needed += 1;
+alloc_block :: (using allocator: *Block_Allocator, bytes_wanted: u64, loc := #caller_location) -> address: u64, Block_Desc #no_context {
 
     for* blocks {
-        if !it.used && it.size_pages >= pages_needed {
+        if !it.used && it.size >= bytes_wanted {
             it.used = true;
 
-            remaining_pages := it.size_pages - pages_needed;
-            it.size_pages = cast(s32) pages_needed;
+            remaining_bytes := it.size - bytes_wanted;
+            it.size = bytes_wanted;
 
-            if remaining_pages != 0 {
+            if remaining_bytes != 0 {
                 // We didn't use the whole block, make a new one and move the others over
                 if blocks.count >= max_block_descriptors-1 {
                     bluescreen();
@@ -654,25 +642,31 @@ alloc_block :: (using allocator: *Block_Allocator, size_bytes: int, loc := #call
                     blocks[it] = blocks[it-1];
                 }
 
-                blocks[it_index+1].start_page = it.start_page + pages_needed;
-                blocks[it_index+1].size_pages = cast(s32) remaining_pages;
+                blocks[it_index+1].base = it.base + bytes_wanted;
+                blocks[it_index+1].size = remaining_bytes;
                 blocks[it_index+1].used = false;
             }
 
-            return cast(u64) (start_page + it.start_page) * 4096, it.*;
+            return cast(u64) (base_address + it.base), it.*;
         }
     }
 
-    // If we get here then there isn't a free block large enough
+    // If we get here there isn't a large enough free block
+
+    push_context {
+        context.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = 2;
+        context.print_style.default_format_struct.use_newlines_if_long_form = true;
+
+        print("%\n", allocator.*);
+    }
     bluescreen(loc);
     return 0, .{};
 }
 
 free_block :: (allocator: *Block_Allocator, address: u64) -> bool {
     // Find the block corresponding to that address using linear search
-    // Todo hash table
 
-    start_page := cast(int) (address / 4096) - allocator.start_page;
+    looking_for := address - allocator.base_address;
 
     blocks := allocator.blocks;
     defer allocator.blocks = blocks;
@@ -680,7 +674,7 @@ free_block :: (allocator: *Block_Allocator, address: u64) -> bool {
     m := -1;
 
     for blocks {
-        if it.start_page == start_page {
+        if it.base == looking_for {
             m = it_index;
             break;
         }
@@ -697,7 +691,7 @@ free_block :: (allocator: *Block_Allocator, address: u64) -> bool {
 
     // Coalesce following block
     if blocks.count > m+1 && !blocks[m+1].used {
-        block.size_pages += blocks[m+1].size_pages;
+        block.size += blocks[m+1].size;
 
         for m+2 .. blocks.count-1 {
             blocks[it-1] = blocks[it];
@@ -707,7 +701,7 @@ free_block :: (allocator: *Block_Allocator, address: u64) -> bool {
 
     // Coalesce preceding block
     if m > 0 && !blocks[m-1].used {
-        blocks[m-1].size_pages += block.size_pages;
+        blocks[m-1].size += block.size;
 
         for m+1 .. blocks.count-1 {
             blocks[it-1] = blocks[it];
@@ -914,6 +908,6 @@ print_physical_memory_map :: () {
     }
 
     for boot_data.large_pages {
-        print("[%] %\n", it_index, it.type);
+        print("[%] %\n", it_index, it.state);
     }
 }

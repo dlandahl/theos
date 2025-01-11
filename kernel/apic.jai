@@ -138,6 +138,7 @@ initialize_apic :: () {
 
         // Allocating an individual page using the block allocator because we don't have anything better for virtual memory yet
         // Can't use the direct mapping because we want cache disabled for this page
+
         virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096);
         map_page(virtual, physical, Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE);
 
@@ -147,6 +148,7 @@ initialize_apic :: () {
     bootstrap_core := array_add(*kernel_globals.processor_cores);
     bootstrap_core.local_apic_id = read_apic_register(.APIC_ID) >> 24;
     init_processor_core();
+
 
     register_interrupt_gate(int__fault_0, 0, true);
     register_interrupt_gate(int__fault_1, 1, true);
@@ -638,7 +640,7 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
 #program_export uacpi_kernel_alloc :: (size: uacpi_size) -> *void #c_call {
     // Not currently thread synced, and alloc_block is not efficient for small allocations.
     push_context {
-        phys := alloc_block(*kernel_globals.physical_block_allocator, cast(s64) size);
+        phys := alloc_block(*kernel_globals.physical_block_allocator, size);
         virt := cast(*void) phys + DIRECT_MAPPING_BASE;
 
         return virt;
@@ -647,13 +649,13 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
 
 #program_export uacpi_kernel_calloc :: (count: uacpi_size, size: uacpi_size) -> *void #c_call {
     // Comment in uacpi_kernel_alloc applies
-    size_bytes := cast(s64) (size*count);
+    size_bytes := size*count;
 
     push_context {
         phys := alloc_block(*kernel_globals.physical_block_allocator, size_bytes);
         virt := cast(*void) phys + DIRECT_MAPPING_BASE;
 
-        memset(virt, 0, size_bytes);
+        memset(virt, 0, cast(s64) size_bytes);
         return virt;
     }
 }
