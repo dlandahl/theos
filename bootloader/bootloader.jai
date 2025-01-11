@@ -59,7 +59,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             // Find root ACPI table
             table := system_table.ConfigurationTable[it];
 
-            low :=  <<  cast(*u64) *table.VendorGuid;
+            low  := <<  cast(*u64) *table.VendorGuid;
             high := << (cast(*u64) *table.VendorGuid + 1);
 
             acpi_table_guid_low  : u64 : 0x11d3e4f18868e871;
@@ -138,8 +138,10 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             desc := cast(*EFI_MEMORY_DESCRIPTOR) (memory_map + it * descriptor_size);
 
             if cast(EFI_MEMORY_TYPE) desc.Type == {
-              case .EfiUnusableMemory; #through;
-              case .EfiMemoryMappedIO; #through;
+              case .EfiUnusableMemory;     #through;
+              case .EfiMemoryMappedIO;     #through;
+              case .EfiPalCode;            #through;
+              case .EfiReservedMemoryType; #through;
               case .EfiMemoryMappedIOPortSpace;
                 continue;
             }
@@ -303,12 +305,14 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
                 }
 
                 if !contiguous {
-                    display("Warning: Firmware memory map is discontiguous: ", limit(last_region.*), " <-> ", region.address, "\n");
+                    gap_base := limit(last_region.*);
+
+                    display("Warning: Firmware memory map is not contiguous: ", gap_base, " <-> ", region.address, "\n");
 
                     gap_region: Boot_Data.Memory_Region;
-                    gap_region.type = .NOT_REPORTED;
-                    gap_region.address = limit(last_region.*);
-                    gap_region.pages   = (region.address - limit(last_region.*)) / 4096;
+                    gap_region.type    = .NOT_REPORTED;
+                    gap_region.address = gap_base;
+                    gap_region.pages   = (region.address - gap_base) / 4096;
 
                     bd.memory_map[bd.memory_map_entries_used] = gap_region;
                     bd.memory_map_entries_used += 1;
@@ -352,8 +356,8 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
                 memcpy(
                     cast(*void) program_header.p_vaddr,
-                    elf + program_header.p_offset,
-                    cast(s32) program_header.p_filesz
+                    elf +       program_header.p_offset,
+                    cast(s32)   program_header.p_filesz
                 );
 
                 if (program_header.p_memsz > program_header.p_filesz) {

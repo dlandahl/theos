@@ -159,6 +159,8 @@ leap_years_before :: (year: s64) -> s64 {
 
 
 
+// CMOS Real Time Clock (RTC)
+
 Rtc_Port :: enum u16 {
     ADDRESS :: 0x70;
     DATA    :: 0x71;
@@ -248,7 +250,7 @@ rtc_get_calendar_time :: () -> Calendar_Time {
 
 
 
-// HPET (High precision timer)
+// High precision event timer (HPET)
 
 Hpet_Acpi_Table :: struct {
     #as header: Acpi_Table_Header;

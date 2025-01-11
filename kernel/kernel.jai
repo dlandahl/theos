@@ -81,23 +81,25 @@ kernel_entry :: () #no_context {
 
     memory_map_index: int;
     for* page, page_index: large_pages {
-        base  := page_index * 0x20_0000;
-        limit := base       + 0x20_0000;
+
+        page_base  := page_index * 0x20_0000;
+        page_limit := page_base  + 0x20_0000;
 
         for memory_map_index..memory_map_entries_used-1 {
 
-            region_limit := memory_map[it].pages*4096 + memory_map[it].address;
+            region := memory_map[it];
+            region_limit := region.pages * 4096 + region.address;
 
-            if region_limit <= cast(u64) base {
+            if region_limit <= cast(u64) page_base {
                 continue;
             }
 
-            if memory_map[it].address >= cast(u64) limit {
+            if region.address >= cast(u64) page_limit {
                 memory_map_index -= 1;
                 continue page;
             }
 
-            if memory_map[it].type != .FREE {
+            if region.type != .FREE {
                 page.state = .RESERVED;
                 continue page;
             }
@@ -251,14 +253,20 @@ make_kernel_context :: (c: *#Context) #no_context {
         Scoped_Acquire(*kernel_globals.memory_spinlock);
 
         if mode == .ALLOCATE || mode == .RESIZE {
+            if size == 0 {
+                return null;
+            }
+
             // Todo: handle resize
             physical := alloc_block(*kernel_globals.physical_block_allocator, cast(u64) size);
 
             virtual := cast(*void) physical + DIRECT_MAPPING_BASE;
 
-            if mode == .RESIZE {
+            if mode == .RESIZE && old_memory != null {
                 memcpy(virtual, old_memory, old_size);
-                // #this(.FREE, old_size, 0, old_memory, null);
+
+                physical := cast(u64) old_memory - DIRECT_MAPPING_BASE;
+                free_block(*kernel_globals.physical_block_allocator, physical);
             }
 
             return virtual;
@@ -667,6 +675,7 @@ free_block :: (allocator: *Block_Allocator, address: u64) -> bool {
     // Find the block corresponding to that address using linear search
 
     looking_for := address - allocator.base_address;
+    print("Freeing address %\n", formatInt(looking_for, base=16));
 
     blocks := allocator.blocks;
     defer allocator.blocks = blocks;

@@ -82,7 +82,11 @@ core_begin_multitasking :: () {
         }
     }
 
-    scheduler.idle_task = create_task(idle);
+    params: Create_Task_Parameters;
+    params.user_stack_size = 0;
+    params.entry_point = idle;
+
+    scheduler.idle_task = create_task(params);
 
     {
         // Enable Local APIC timer interrupts
@@ -109,24 +113,32 @@ put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
     queue_push(*scheduler.waiting_to_run, task);
 }
 
-create_task :: (entry_point := task_do_work) -> *Task_Info {
+Create_Task_Parameters :: struct {
+    entry_point: () #c_call = task_do_work;
+
+    kernel_stack_size: int = 0x8000;
+    user_stack_size:   int = 0x8000;
+
+    mxcsr: Mxcsr = .MASK_ALL;
+}
+
+create_task :: (params: Create_Task_Parameters = .{}) -> *Task_Info {
     new_task := allocate_task_info_struct();
     new_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
 
-    new_task.user_stack   = alloc(0x8000) + 0x8000;
-    new_task.kernel_stack = alloc(0x8000) + 0x8000;
+    new_task.kernel_stack = alloc(params.kernel_stack_size) + params.kernel_stack_size;
+    new_task.user_stack   = alloc(params.user_stack_size)   + params.user_stack_size;
 
     stack := cast(*Interrupt_Stack) new_task.kernel_stack - 1;
     stack.flags = .IF__interrupt;
     stack.cs = .RING0_CODE;
     stack.ss = .RING0_DATA;
-    stack.ip = cast(*void) entry_point;
+    stack.ip = cast(*void) params.entry_point;
     stack.sp = new_task.kernel_stack;
 
     new_task.rsp = cast(*void) stack;
 
-    // For now, copy FP exception settings from the parent thread
-    mxcsr := *new_task.xsave.mxcsr;
+    mxcsr := *params.mxcsr;
     #asm { stmxcsr [mxcsr]; }
 
     return new_task;
@@ -304,7 +316,7 @@ syscall_handler :: (data: *Syscall_Stack) #c_call {
       case 4;
         s: string;
         s.count = cast(s64) data.rbx;
-        s.data =  cast(*u8) data.rdx;
+        s.data  = cast(*u8) data.rdx;
         write_string(s);
 
       case;

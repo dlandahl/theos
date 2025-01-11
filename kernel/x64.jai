@@ -245,12 +245,7 @@ enable_cpu_features :: () #no_context {
         using mxcsr: Mxcsr;
         pmxcsr := *mxcsr;
 
-        mask := IM__invalid_operation_mask
-              | DM__denormal_operation_mask
-              | ZM__divide_by_zero_mask
-              | OM__overflow_mask
-              | UM__underflow_mask
-              | PM__precision_mask;
+        mask := Mxcsr.MASK_ALL;
 
         #asm {
             stmxcsr [pmxcsr];
@@ -277,4 +272,11 @@ Mxcsr :: enum_flags u64 {
     RC__rounding_control0;
     RC__rounding_control1;
     FTZ__flush_to_zero;
+
+    MASK_ALL :: IM__invalid_operation_mask
+              | DM__denormal_operation_mask
+              | ZM__divide_by_zero_mask
+              | OM__overflow_mask
+              | UM__underflow_mask
+              | PM__precision_mask;
 }
