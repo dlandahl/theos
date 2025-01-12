@@ -64,6 +64,8 @@ Kernel_Globals :: struct {
     rtc_format_is_bcd: bool;
 
     large_page_allocator: Large_Page_Allocator;
+
+    timestamp_counter_frequency: int;
 }
 
 kernel_globals: Kernel_Globals;
@@ -183,6 +185,8 @@ kernel_entry :: () #no_context {
         boot_time = native_calendar_to_apollo(boot_calendar_time);
 
         // print_physical_memory_map();
+
+        timestamp_counter_frequency = cast(int) calibrate_tsc();
 
         core_begin_multitasking();
 

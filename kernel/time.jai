@@ -1,4 +1,6 @@
 
+#import "Math";
+
 Kernel_Timestamp :: struct {
     counter: u64;
     ticks:   u64;
@@ -36,7 +38,7 @@ kernel_timestamp_to_apollo :: (ts: Kernel_Timestamp) -> Apollo_Time {
 
     time_represented_by_ticks: Apollo_Time;
     time_represented_by_ticks.low = cast(u64) ts.ticks;
-    time_represented_by_ticks *= cast(s64) high_precision_timer.base_period_femtoseconds;
+    time_represented_by_ticks *= cast(s64) high_precision_timer.tick_period_femtoseconds;
 
     femtoseconds_per_millisecond := 1.e12;
     time_represented_by_counter: Apollo_Time;
@@ -305,7 +307,7 @@ Hpet_Timer_Flags :: enum_flags u64 {
 
 HPET :: struct {
     base_address: *void;
-    base_period_femtoseconds: u64;
+    tick_period_femtoseconds: u64;
     counters_are_64_bit: bool;
 
     Timer :: struct {
@@ -348,7 +350,7 @@ initialize_hpet :: () {
     }
 
     hpet.counters_are_64_bit = capabilities & .SIXTYFOUR_BIT_COUNTER > 0;
-    hpet.base_period_femtoseconds = cast(u64) (capabilities >> 32);
+    hpet.tick_period_femtoseconds = cast(u64) (capabilities >> 32);
 
     write(.CONFIG, read(.CONFIG) | cast(u64) Hpet_Config_Flags.LEGACY_ROUTING);
 
@@ -391,7 +393,7 @@ hpet_configure_timer :: (timer_index: int, frequency: u64, periodic: bool) {
 
     timer := *hpet.timers[timer_index];
 
-    ticks_per_second := cast(u64) 1_000_000_000_000_000 / hpet.base_period_femtoseconds;
+    ticks_per_second := cast(u64) 1_000_000_000_000_000 / hpet.tick_period_femtoseconds;
     timer.ticks_per_interrupt = ticks_per_second / frequency;
 
     write(register_offset + .TIMER0_COMP, timer.ticks_per_interrupt);
@@ -407,24 +409,6 @@ hpet_restart :: () {
     write(.CONFIG, config & ~ENABLE_BIT);
     write(Hpet_Register.COUNTER, 0);
     write(.CONFIG, config | ENABLE_BIT);
-}
-
-calibrate_apic :: () {
-    for 1..10 {
-        // Calibrate Local APIC timer using HPET
-        hpet_configure_timer(timer_index = 1, frequency = 10, periodic = false);
-        hpet_restart();
-
-        write_apic_register(.TIC__TIMER_INITIAL, 0xffff_ffff);
-        write_apic_register(.DV__TIMER_DIVIDE, 0b011);
-
-        while kernel_globals.high_precision_timer.timers[0].counter == 0 {
-            #asm { hlt; }
-        }
-
-        apic_ticks_elapsed := 0xffff_ffff - read_apic_register(.TCC__TIMER_CURRENT);
-        print("APIC ticks in 100ms: %\n", apic_ticks_elapsed);
-    }
 }
 
 #program_export hpet_timer0_interrupt :: (data: *Interrupt_Stack()) #c_call {
@@ -443,3 +427,84 @@ calibrate_apic :: () {
     timers[0].counter += 1;
     write_apic_register(.EOI__END_OF_INTERRUPT, 0);
 } @InterruptRoutine
+
+
+
+calibrate_tsc :: () -> hz: u64 {
+    // Try to read TSC frequency from CPUID. Modern CPUs support it, but it's not supported on either VirtualBox nor QEMU, so fallback to manual timing using HPET.
+    eax, ebx, ecx, edx: u64;
+
+    #asm {
+        eax === a;
+        ebx === b;
+        ecx === c;
+        edx === d;
+
+        mov eax, 0x15;
+        cpuid eax, ebx, ecx, edx;
+    }
+
+    if eax != 0 {
+        return ecx * (ebx / eax);
+    }
+
+    // If TSC ratio is not provided by CPUID, it can in practice be derived from the processor base frequency.
+    #asm {
+        mov eax, 0x16;
+        cpuid eax, ebx, ecx, edx;
+    }
+
+    if eax != 0 {
+        return eax;
+    }
+
+    // Travis Downs says that manually timing TSC might be better anyway
+    // https://github.com/jdmccalpin/low-overhead-timers/issues/1
+    hpet := kernel_globals.high_precision_timer;
+
+    calibration_time_fs: u64 = 50_000_000_000; // 50ms expressed as femtoseconds
+    ticks_per_calibration_run := cast(u32) (calibration_time_fs / hpet.tick_period_femtoseconds);
+
+    // Run until we get three consecutive results within a certain error
+    max_error := 1000;
+    delta: [3] u64;
+
+    counter_register := cast(*u32) (hpet.base_address + cast(u64) Hpet_Register.COUNTER);
+
+    #asm { cli; }
+    defer #asm { sti; }
+
+    for 1..10_000 {
+
+        counter_start := counter_register.*;
+        tsc0 := rdtsc();
+
+        tsc1: type_of(tsc0);
+
+        while true {
+            counter_now := counter_register.*;
+            tsc1 = rdtsc();
+
+            if counter_now - counter_start > ticks_per_calibration_run {
+                break;
+            }
+        }
+
+        delta[2] = delta[1];
+        delta[1] = delta[0];
+        delta[0] = tsc1 - tsc0;
+
+        first_valid  := abs(cast(int) delta[0] - cast(int) delta[1]) < max_error;
+        second_valid := abs(cast(int) delta[0] - cast(int) delta[2]) < max_error;
+
+        if first_valid && second_valid {
+            #asm { sti; }
+
+            average_delta := (delta[0] + delta[1] + delta[2]) / 3;
+            return average_delta * 20; // Convert ticks per 50ms timing run to ticks per second
+        }
+    }
+
+    bluescreen();
+    return 0;
+}
