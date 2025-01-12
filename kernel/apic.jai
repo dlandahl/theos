@@ -90,23 +90,15 @@ write_apic_register :: (register: Apic_Register, value: u32) #no_context {
     << cast(*u32) (kernel_globals.apic + cast(u64) register) = value;
 }
 
-Apic_Local_Vector_Table_Entry :: struct {
-    vector: u8;
-
-#place vector;
-    flags: enum_flags u32 {
-        MT__message_type0    :: 1 << 8;
-        MT__message_type1    :: 1 << 9;
-        MT__message_type2    :: 1 << 10;
-        DM__destination_mode :: 1 << 11;
-        DS__delivery_status  :: 1 << 12;
-        RIR__remote_irr      :: 1 << 14;
-        L__level             :: RIR__remote_irr;
-        TGM__trigger_mode    :: 1 << 15;
-        M__mask              :: 1 << 16;
-        TMM__timer_mode      :: 1 << 17;
-    };
-}
+Apic_Lvt_Timer :: enum u32 {
+    gate_index      :: 8;
+    reserved_0      :: 4;
+    delivery_status :: 1;
+    reserved_1      :: 3;
+    mask            :: 1;
+    timer_mode      :: 2;
+    reserved_2      :: 13;
+} @Bitfield
 
 initialize_apic :: () {
 
@@ -125,11 +117,11 @@ initialize_apic :: () {
         AE__Apic_Enable      :: 1 << 11;
     }
 
-    apic_base := << cast(*Apic_Base_Flags) *read_msr(.APIC_BASE__apic_base);
+    apic_base := << cast(*Apic_Base_Flags) *read_msr(.APIC_BASE);
     assert(apic_base & .BSC__Boot_Strap_Core > 0);
 
     apic_base |= .AE__Apic_Enable;
-    write_msr(.APIC_BASE__apic_base, cast(u64) apic_base);
+    write_msr(.APIC_BASE, cast(u64) apic_base);
 
     {
         physical := cast(u64) apic_base & ~0xfff;
@@ -226,12 +218,12 @@ startup_application_processors :: () {
         // Layout matches the ap_startup assembly code in first.jai
         stack: u64;
         entry_point: *void;
-        pml4: u32 #align 8;
+        pml4: *u64;
     }
 
     ap_startup_data := cast(*Ap_Startup_Data) (0x8200 + DIRECT_MAPPING_BASE);
     ap_startup_data.entry_point = cast(*void) ap_entry_point;
-    ap_startup_data.pml4 = cast(u32) kernel_globals.boot_data.page_tables.pml4.data;
+    ap_startup_data.pml4 = kernel_globals.boot_data.page_tables.pml4.data;
 
     bsp := get_current_core();
 
@@ -297,6 +289,8 @@ ap_entry_point :: () #c_call {
             time := get_monotonic_system_time();
             sleep_until(time + milliseconds_to_apollo(2000));
             print("Whatever.\n");
+
+            reset_temporary_storage();
         }
     }
 }
@@ -423,7 +417,7 @@ ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, gate_nu
     write_string("\n");
 
     bluescreen();
-} @InterruptRoutine
+} @InterruptRoutineWithErrorCode
 
 #program_export fault_9 :: (stack: *void) #c_call {
     core := get_current_core();
@@ -443,7 +437,7 @@ ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, gate_nu
     write_string("\n");
 
     bluescreen();
-} @InterruptRoutine
+} @InterruptRoutineWithErrorCode
 
 #program_export fault_11 :: (stack: *void) #c_call {
     core := get_current_core();
@@ -453,7 +447,7 @@ ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, gate_nu
     write_string("\n");
 
     bluescreen();
-} @InterruptRoutine
+} @InterruptRoutineWithErrorCode
 
 #program_export fault_12 :: (stack: *void) #c_call {
     core := get_current_core();
@@ -463,7 +457,7 @@ ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, gate_nu
     write_string("\n");
 
     bluescreen();
-} @InterruptRoutine
+} @InterruptRoutineWithErrorCode
 
 #program_export
 general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c_call {
@@ -502,7 +496,7 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
         print("Error code: external=%, table=%, index=% (0x%)\n", is_external, table, formatInt(index, base=10), index);
         bluescreen();
     }
-} @InterruptRoutine
+} @InterruptRoutineWithErrorCode
 
 #program_export fault_14 :: (stack: *void) #c_call {
     core := get_current_core();
@@ -512,7 +506,7 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
     write_string("\n");
 
     bluescreen();
-} @InterruptRoutine
+} @InterruptRoutineWithErrorCode
 
 #program_export fault_15 :: (stack: *void) #c_call {
     core := get_current_core();

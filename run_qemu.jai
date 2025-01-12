@@ -12,7 +12,7 @@
     command := break_command_into_strings(#string QEMU_CMD
         qemu-system-x86_64
             -machine q35
-            -cpu qemu64,apic,fsgsbase,rdtscp,fxsr
+            -cpu qemu64,apic,fsgsbase,tsc-deadline
             -bios OVMF.fd
             -drive format=raw,file=disk_image.img
             -chardev stdio,id=char0,logfile=logs/qemu_serial.txt,signal=off

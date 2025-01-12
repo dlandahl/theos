@@ -156,13 +156,14 @@ System_Segment_Descriptor :: struct {
 
 
 Ia32_Model_Specific_Register :: enum {
-    APIC_BASE__apic_base      :: 0x0000_001b;
+    APIC_BASE                 :: 0x0000_001b;
     PAT__page_attribute_table :: 0x0000_0277;
+    TSC_DEADLINE              :: 0x0000_06e0;
     EFER__extended_features   :: 0xc000_0080;
     STAR__syscall_segment     :: 0xc000_0081;
     LSTAR__syscall_address    :: 0xc000_0082;
     SFMASK__syscall_flags     :: 0xc000_0084;
-    GS_BASE__gs_base          :: 0xc000_0101;
+    GS_BASE                   :: 0xc000_0101;
 }
 
 write_msr :: (msr: Ia32_Model_Specific_Register, value: u64, loc := #caller_location) #no_context {
@@ -239,6 +240,8 @@ enable_cpu_features :: () #no_context {
                 set_cr4 cr4;
             }
         }
+
+        // if !check_feature(cpu_features, .TSC_DEADLINE) bluescreen();
 
         // Mask out all the FP exceptions for now
         using mxcsr: Mxcsr;

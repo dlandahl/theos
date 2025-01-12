@@ -91,16 +91,20 @@ core_begin_multitasking :: () {
     {
         // Enable Local APIC timer interrupts
 
+        tsc_now := rdtsc();
+        tsc_1_second := tsc_now + kernel_globals.timestamp_counter_frequency;
+        write_msr(.TSC_DEADLINE, tsc_1_second);
+
         register_interrupt_gate(int__spurious_interrupt, 0xff);
         spurious := read_apic_register(.SPURIOUS_INTERRUPT);
         write_apic_register(.SPURIOUS_INTERRUPT, spurious | 0x1ff);
 
         write_apic_register(.TIC__TIMER_INITIAL, 0x0400_0000);
 
-        lvtt: Apic_Local_Vector_Table_Entry;
-        lvtt.vector = cast(u8) kernel_globals.local_apic_timer_interrupt_gate;
-        lvtt.flags &= ~.M__mask;
-        lvtt.flags |= .TMM__timer_mode;
+        lvtt: Apic_Lvt_Timer;
+        set(*lvtt, .gate_index, cast(u8) kernel_globals.local_apic_timer_interrupt_gate);
+        set(*lvtt, .mask, 0);
+        set(*lvtt, .timer_mode, 0b01);
         write_apic_register(.LVT__TIMER, << cast(*u32) *lvtt);
     }
 }
@@ -138,8 +142,7 @@ create_task :: (params: Create_Task_Parameters = .{}) -> *Task_Info {
 
     new_task.rsp = cast(*void) stack;
 
-    mxcsr := *params.mxcsr;
-    #asm { stmxcsr [mxcsr]; }
+    new_task.xsave.mxcsr = params.mxcsr;
 
     return new_task;
 }
@@ -162,8 +165,8 @@ sleep_until :: (time: Apollo_Time) {
             scheduler.sleep_queue = task;
             task.next_sleeping = null;
         } else while (true) {
-            if !queue || queue.sleep_until > time {
 
+            if !queue || queue.sleep_until > time {
                 if queue == scheduler.sleep_queue {
                     scheduler.sleep_queue = task;
                 }
@@ -276,7 +279,6 @@ sleep_from_user_mode :: (time: Apollo_Time) #no_context {
 }
 
 print_from_user_mode :: (format: string, args: .. Any) {
-    syscall_number := 4;
 
     builder: String_Builder;
     print(*builder, format, ..args);
@@ -284,6 +286,8 @@ print_from_user_mode :: (format: string, args: .. Any) {
 
     data  := result.data;
     count := result.count;
+
+    syscall_number := 4;
 
     #asm SYSCALL_SYSRET {
         syscall_number === a;
@@ -321,6 +325,8 @@ syscall_handler :: (data: *Syscall_Stack) #c_call {
 
       case;
         write_string("Invalid syscall parameter.\n");
+        write_nonnegative_number(data.rax);
+        write_string("\n");
         bluescreen();
     }
 }
@@ -346,10 +352,10 @@ task_do_work :: () #c_call {
 }
 
 task_do_work_in_ring_3 :: () #c_call {
-    c: #Context;
-    make_kernel_context(*c);
 
-    push_context c {
+    push_context {
+        make_kernel_context(*context);
+
         core := get_current_core_from_user_mode();
         thread := core.scheduler.current_task;
 
@@ -374,7 +380,7 @@ local_apic_timer_interrupt :: (stack: *Interrupt_Stack()) #c_call {
     write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 
     if stack.cs == .RING0_CODE {
-        // Don't preempt the kernel for now.
+        // Don't preempt the kernel.
         return;
     }
 

@@ -1,6 +1,4 @@
 
-#import "Math";
-
 Kernel_Timestamp :: struct {
     counter: u64;
     ticks:   u64;
@@ -448,6 +446,7 @@ calibrate_tsc :: () -> hz: u64 {
         return ecx * (ebx / eax);
     }
 
+
     // If TSC ratio is not provided by CPUID, it can in practice be derived from the processor base frequency.
     #asm {
         mov eax, 0x16;
@@ -457,6 +456,7 @@ calibrate_tsc :: () -> hz: u64 {
     if eax != 0 {
         return eax;
     }
+
 
     // Travis Downs says that manually timing TSC might be better anyway
     // https://github.com/jdmccalpin/low-overhead-timers/issues/1
@@ -474,7 +474,7 @@ calibrate_tsc :: () -> hz: u64 {
     #asm { cli; }
     defer #asm { sti; }
 
-    for 1..10_000 {
+    for 1..1000 {
 
         counter_start := counter_register.*;
         tsc0 := rdtsc();
@@ -493,6 +493,11 @@ calibrate_tsc :: () -> hz: u64 {
         delta[2] = delta[1];
         delta[1] = delta[0];
         delta[0] = tsc1 - tsc0;
+
+        abs :: (a: int) -> int {
+            if a < 0 return -a;
+            return a;
+        }
 
         first_valid  := abs(cast(int) delta[0] - cast(int) delta[1]) < max_error;
         second_valid := abs(cast(int) delta[0] - cast(int) delta[2]) < max_error;

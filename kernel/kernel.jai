@@ -65,7 +65,7 @@ Kernel_Globals :: struct {
 
     large_page_allocator: Large_Page_Allocator;
 
-    timestamp_counter_frequency: int;
+    timestamp_counter_frequency: u64;
 }
 
 kernel_globals: Kernel_Globals;
@@ -186,7 +186,7 @@ kernel_entry :: () #no_context {
 
         // print_physical_memory_map();
 
-        timestamp_counter_frequency = cast(int) calibrate_tsc();
+        timestamp_counter_frequency = calibrate_tsc();
 
         core_begin_multitasking();
 
@@ -207,6 +207,8 @@ kernel_entry :: () #no_context {
 
             print("This is thread % running on core %\n", core.scheduler.current_task.id, core.id);
             sleep_until(time + milliseconds_to_apollo(1000));
+
+            reset_temporary_storage();
         }
     }
 }
@@ -223,13 +225,14 @@ simd_floating_point_exception :: (stack: *Interrupt_Stack()) #c_call {
     }
 
     push_context {
-        print("Floating point exception: % target: %\n", mxcsr);
+        core := get_current_core();
+        print("Floating point exception: % (thread %)\n", mxcsr, core.scheduler.current_task.id);
     }
 } @InterruptRoutine
 
 
 make_kernel_context :: (c: *#Context) #no_context {
-    initializer_of(#Context)(c); 
+    // initializer_of(#Context)(c); 
 
     c.assertion_failed = (location: Source_Code_Location, message: string) -> bool {
         write_string("Assertion failure");
@@ -621,7 +624,7 @@ init_block_allocator :: (allocator: *Block_Allocator, base_address: u64, max_siz
     page := allocate_large_page();
 
     allocator.blocks.data = cast(*void) page + DIRECT_MAPPING_BASE;
-    allocator.max_block_descriptors = 4096 / size_of(Block_Desc);
+    allocator.max_block_descriptors = 0x20_0000 / size_of(Block_Desc);
 
     allocator.base_address = base_address;
     allocator.max_size = max_size;

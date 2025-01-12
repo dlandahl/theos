@@ -199,9 +199,16 @@ compile_kernel :: () -> success: bool {
                 proc := header.expression;
 
                 for proc.notes {
-                    if it.text != "InterruptRoutine" continue;
+                    if it.text != "InterruptRoutine" && it.text != "InterruptRoutineWithErrorCode" {
+                        continue;
+                    }
 
-                    print_to_builder(*interrupt_assembly, INTERRUPT_STUB_FORMAT, proc.name);
+                    pop_error_code := "";
+                    if it.text == "InterruptRoutineWithErrorCode" {
+                        pop_error_code := "    sub rsp, 8\n";
+                    }
+
+                    print_to_builder(*interrupt_assembly, INTERRUPT_STUB_FORMAT, proc.name, pop_error_code);
                     array_add(*found_interrupts, proc.name);
                 }
             }
@@ -445,6 +452,7 @@ int__%1:
     call %1
 
     pop_all
+    %2
     iretq
 
 END;
@@ -506,8 +514,7 @@ idt:
 times 512-($-start) db 0
 stack: dq 0
 jai:   dq 0
-pml4:  dd 0
-dd 0 ; alignment
+pml4:  dq 0
 
 serial:
     mov ax, 66
