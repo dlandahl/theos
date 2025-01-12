@@ -112,9 +112,9 @@ initialize_apic :: () {
 
     // Disable the older interrupt controller. I sort of assume UEFI does this anyway.
     #asm {
-        mov.b ax: gpr === a, 0xff;
-        out.b 0x21, ax;
-        out.b 0xa1, ax;
+        mov.8 ax: gpr === a, 0xff;
+        out.8 0x21, ax;
+        out.8 0xa1, ax;
     }
 
     acpi_header := cast(*Acpi_Madt) find_acpi_table("APIC");
@@ -277,7 +277,6 @@ ap_startup_spinlock: Spinlock;
 ap_entry_point :: () #c_call {
     release(*ap_startup_spinlock);
 
-
     push_context {
         make_kernel_context(*context);
 
@@ -394,10 +393,9 @@ ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, gate_nu
 } @InterruptRoutine
 
 #program_export fault_6 :: (stack: *Interrupt_Stack(false)) #c_call {
-    c: #Context;
-    c.print_style.default_format_int.base = 16;
+    push_context {
+        context.print_style.default_format_int.base = 16;
 
-    push_context c {
         print("Invalid Opcode.\n");
         print("RIP: 0x%\n", stack.ip);
         print("RSP: 0x%\n", stack.sp);
@@ -573,9 +571,9 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
     }
 
     if byte_width == {
-        case 1; #asm { in.b value, address; }
-        case 2; #asm { in.w value, address; }
-        case 4; #asm { in.d value, address; }
+        case 1; #asm { in.8  value, address; }
+        case 2; #asm { in.16 value, address; }
+        case 4; #asm { in.32 value, address; }
         case; bluescreen();
     }
 
@@ -590,9 +588,9 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
     }
 
     if byte_width == {
-        case 1; #asm { out.b address, value; }
-        case 2; #asm { out.w address, value; }
-        case 4; #asm { out.d address, value; }
+        case 1; #asm { out.8  address, value; }
+        case 2; #asm { out.16 address, value; }
+        case 4; #asm { out.32 address, value; }
         case; bluescreen();
     }
 

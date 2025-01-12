@@ -64,7 +64,7 @@ Interrupt_Stack :: struct (with_error_code := false) {
 
 Gate_Descriptor_Flags :: enum u8 {
     gate_type             :: 4;
-    always_zero           :: 1;
+    reserved              :: 1;
     protection_level      :: 2;
     present               :: 1;
 } @Bitfield
@@ -233,7 +233,6 @@ enable_cpu_features :: () #no_context {
         }
 
         if check_feature(cpu_features, .XSAVE) {
-            // This doesn't seem to be needed to execute fxsave64 etc. Maybe UEFI enables this. In fact, trying to enable this hangs qemu when running with
             #asm {
                 get_cr4 cr4:;
                 or  cr4, CR4_OSXSAVE;

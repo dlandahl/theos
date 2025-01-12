@@ -42,7 +42,7 @@ Xsave_Area :: struct {
     fpu: [512] u8;
 
 #place fpu;
-    pad: [24] u8;
+    offset: [24] u8;
     mxcsr: Mxcsr;
 }
 

@@ -288,7 +288,7 @@ make_kernel_context :: (c: *#Context) #no_context {
         return null;
     };
 
-    if true {
+    {
         acquire(*kernel_globals.memory_spinlock);
         ts_buffer_block := alloc_block(*kernel_globals.physical_block_allocator, 0x2000);
         c.temporary_storage = cast(*Temporary_Storage) get_4k_page();
@@ -613,8 +613,8 @@ Block_Allocator :: struct {
 }
 
 init_block_allocator :: (allocator: *Block_Allocator, base_address: u64, max_size: u64) #no_context {
-    // For bootstrapping, just use a single page to store block descriptors. Todo: fix
-    page := get_4k_page();
+    // Use a large page to hold block descriptors
+    page := allocate_large_page();
 
     allocator.blocks.data = cast(*void) page + DIRECT_MAPPING_BASE;
     allocator.max_block_descriptors = 4096 / size_of(Block_Desc);
@@ -642,7 +642,7 @@ alloc_block :: (using allocator: *Block_Allocator, bytes_wanted: u64, loc := #ca
             if remaining_bytes != 0 {
                 // We didn't use the whole block, make a new one and move the others over
                 if blocks.count >= max_block_descriptors-1 {
-                    bluescreen();
+                    bluescreen(loc);
                 }
 
                 blocks.count += 1;
@@ -660,13 +660,6 @@ alloc_block :: (using allocator: *Block_Allocator, bytes_wanted: u64, loc := #ca
     }
 
     // If we get here there isn't a large enough free block
-
-    push_context {
-        context.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = 2;
-        context.print_style.default_format_struct.use_newlines_if_long_form = true;
-
-        print("%\n", allocator.*);
-    }
     bluescreen(loc);
     return 0, .{};
 }
@@ -675,7 +668,6 @@ free_block :: (allocator: *Block_Allocator, address: u64) -> bool {
     // Find the block corresponding to that address using linear search
 
     looking_for := address - allocator.base_address;
-    print("Freeing address %\n", formatInt(looking_for, base=16));
 
     blocks := allocator.blocks;
     defer allocator.blocks = blocks;
@@ -811,7 +803,7 @@ acquire :: (lock: *Spinlock) #no_context {
         }
 
         #asm {
-            lock_bts.d [lock], 0;
+            lock_bts.32 [lock], 0;
             setc carry;
         }
     }
