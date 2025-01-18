@@ -110,7 +110,7 @@ kernel_entry :: () #no_context {
         }
     }
 
-    large_page_allocator.freelist = Large_Page_Allocator.FREELIST_TAIL;
+    large_page_allocator.freelist = FREELIST_TAIL;
 
     big_page := allocate_large_page();
     init_block_allocator(*physical_block_allocator, big_page, 0x20_0000);
@@ -189,6 +189,14 @@ kernel_entry :: () #no_context {
         timestamp_counter_frequency = calibrate_tsc();
 
         core_begin_multitasking();
+
+        find_all_pci_devices();
+        for pci_devices {
+            if it.class_code == .MASS_STORAGE && it.subclass == 0x6 {
+                print("Found SATA device.\n");
+                do_ahci_stuff(it);
+            }
+        }
 
         // startup_application_processors();
         // 
@@ -447,7 +455,8 @@ Large_Page_Allocator :: struct {
     freelist: int;
     lock: Spinlock;
 
-    FREELIST_TAIL :: -1;
+    lru_least: int;
+    lru_most: int;
 }
 
 allocate_large_page :: () -> u64 #no_context {
@@ -467,7 +476,7 @@ allocate_large_page :: () -> u64 #no_context {
 
     while true {
         if max_large_page_used >= kernel_globals.large_pages.count {
-            bluescreen();
+            break;
         }
 
         desc := *kernel_globals.large_pages[max_large_page_used];
@@ -479,9 +488,21 @@ allocate_large_page :: () -> u64 #no_context {
             continue;
         }
 
+        if desc.state == .BUFFER_CACHE {
+            continue;
+        }
+
         desc.state = .ALLOCATED;
         return cast(u64) address; 
     }
+
+    // There are no free large pages, evict one from the buffer cache.
+    if lru_least == LRU_TAIL {
+        bluescreen();
+    }
+
+    desc := *kernel_globals.large_pages[lru_least];
+    lru_least = desc.lru_more_recently_used;
 }
 
 
@@ -877,6 +898,11 @@ sequence_write :: (lock: *Sequence_Lock, body: Code) #expand {
     store_fence();
     lock.* += 1;
 }
+
+
+
+FREELIST_TAIL :: -1;
+LRU_TAIL      :: -1;
 
 
 

@@ -60,13 +60,16 @@ Boot_Data :: struct {
 
 Large_Page :: struct {
     freelist: s32;
-    FREELIST_TAIL :: -1;
 
     state: enum u8 {
         FREE;
         ALLOCATED;
+        BUFFER_CACHE;
         RESERVED;
     };
+
+    lru_more_recently_used: s32;
+    lru_less_recently_used: s32;
 }
 
 #program_export

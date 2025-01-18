@@ -30,8 +30,10 @@ find_all_pci_devices :: () {
     for ecam {
         for bus: it.start_bus..it.end_bus {
             for device: 0..255 {
-                header := read_device_configuration_space(it.base_address, bus, device, 0);
+                header := read_configuration_space(it.base_address, bus, device, 0);
                 if !header continue;
+
+                array_add(*pci_devices, .{header});
 
                 if header.header_type & 0x80 == 0 {
                     // Device is not multi-function.
@@ -39,22 +41,26 @@ find_all_pci_devices :: () {
                 }
 
                 for function: 1..7 {
-                    read_device_configuration_space(it.base_address, bus, device, function);
+                    header = read_configuration_space(it.base_address, bus, device, function);
+                    array_add(*pci_devices, .{header});
                 }
             }
         }
     }
 }
 
-pci_devices: [..] struct {
-    configuration_space: *Pci_Configuration_Space_Header;
+pci_devices: [..] Pci_Device;
+
+Pci_Device :: union {
+    using configuration_space: *Pci_Configuration_Space;
+    registers: *u32;
 };
 
-read_device_configuration_space :: (base_address: u64, bus: int, device: int, function: int) -> *Pci_Configuration_Space_Header {
+read_configuration_space :: (base_address: u64, bus: int, device: int, function: int) -> *Pci_Configuration_Space {
     device_offset := cast(u64) (bus * 256 + device * 8 + function);
     address := base_address + device_offset * PCI_CONFIGURATION_SPACE_SIZE;
 
-    header := cast(*Pci_Configuration_Space_Header) (address + DIRECT_MAPPING_BASE);
+    header := cast(*Pci_Configuration_Space) (address + DIRECT_MAPPING_BASE);
 
     if header.vendor_id == PCI_VENDOR_ID_NO_DEVICE {
         return null;
@@ -64,15 +70,85 @@ read_device_configuration_space :: (base_address: u64, bus: int, device: int, fu
         return null;
     }
 
-    array_add(*pci_devices, .{header});
-
     return header;
 }
 
 PCI_VENDOR_ID_NO_DEVICE :: 0xffff;
 PCI_CONFIGURATION_SPACE_SIZE :: 4096;
 
-Pci_Configuration_Space_Header :: struct {
+Pci_Bar :: struct {
+    base: u64;
+    limit: u32;
+}
+
+read_base_address_register :: (device: Pci_Device, bar_index: int) -> Pci_Bar {
+    bar := device.registers[0x4 + bar_index];
+
+    if bar & 0b001 {
+        log_error("IO Space base address registers are not supported. Device: %", device.configuration_space.*);
+        bluescreen();
+    }
+
+    _64bit := cast(bool) (bar & 0b100);
+
+    mask: u64 = 0xfffffff0;
+    base: u64 = bar & mask;
+
+    if _64bit {
+        bar1 := device.registers[0x4 + bar_index + 1];
+        base |= bar1 << 32;
+    }
+
+    device.registers[0x4 + bar_index] = 0xffffffff;
+    limit := device.registers[0x4 + bar_index];
+
+    device.registers[0x4 + bar_index] = bar;
+
+    limit = cast(u32) ~(limit & mask) + 1;
+    return .{base, limit};
+}
+
+map_base_address_register :: (bar: Pci_Bar) -> *void {
+    using Page_Flags;
+    uncacheable_flags := READ_WRITE | PRESENT | CACHE_DISABLE;
+
+    if bar.base & 0xfff {
+        // Doesn't currently handle bars with unaligned base addresses.
+        bluescreen();
+    }
+
+    // Map an extra 4k, since block allocations are not page aligned, and we need to align up to map the memory.
+    virtual := alloc_block(*kernel_globals.virtual_block_allocator, bar.limit + 4096);
+    virtual = (virtual + xx (4096 - 1)) & xx,no_check (-4096);
+
+    for 0..bar.limit / 4096 {
+        offset := it * 4096;
+        map_page(virtual + offset, bar.base + offset, uncacheable_flags);
+    }
+
+    return cast(*void) virtual;
+}
+
+
+
+do_ahci_stuff :: (device: Pci_Device) {
+    print("Header type is %\n", device.header_type & ~0x80);
+
+    bar := read_base_address_register(device, bar_index=5);
+    ahci := cast(*u32) map_base_address_register(bar);
+
+    ports_implemented := ahci[3];
+    print("Ports implemented: %\n", formatInt(ports_implemented, base=2));
+
+    host_capabilities := ahci[0];
+    num_ports := cast(int) (host_capabilities & 0b11111) + 1;
+
+    print("Num ports: %\n", num_ports);
+}
+
+
+
+Pci_Configuration_Space :: struct {
     vendor_id:       u16;
     device_id:       u16;
     status:          u16;
@@ -86,8 +162,6 @@ Pci_Configuration_Space_Header :: struct {
     header_type:     u8;
     bist:            u8;
 }
-
-
 
 Pci_Class_Code :: enum u8 {
     UNCLASSIFIED             :: 0x0;

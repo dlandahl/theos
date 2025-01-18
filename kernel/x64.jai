@@ -241,7 +241,23 @@ enable_cpu_features :: () #no_context {
             }
         }
 
-        // if !check_feature(cpu_features, .TSC_DEADLINE) bluescreen();
+        if check_feature(cpu_features, .TSC_DEADLINE) {
+            log("TSC_DEADLINE Supported");
+        }
+
+        // Check for constant TSC
+        edx: u64;
+        #asm {
+            edx === d;
+
+            mov eax: gpr === a, 0x80000007;
+            cpuid eax, ebx:, ecx:, edx;
+        }
+
+        if edx & 0x200 {
+            log("Invariant/Constant TSC Supported");
+        }
+
 
         // Mask out all the FP exceptions for now
         using mxcsr: Mxcsr;

@@ -10,6 +10,8 @@ get_kernel_timestamp :: () -> Kernel_Timestamp {
 
     sequence_read(*high_precision_timer.seq_lock, #code {
         // Todo: HPET might be worse than TSC or LAPIC for system time
+        // This could also just use 16-byte compare exchange instead of a seqlock
+
         ts.counter = high_precision_timer.timers[0].counter;
         ts.ticks   = high_precision_timer.timers[0].ticks_at_last_interrupt;
     });
@@ -464,11 +466,10 @@ calibrate_tsc :: () -> hz: u64 {
     ticks_per_calibration_run := cast(u32) (calibration_time_fs / hpet.tick_period_femtoseconds);
 
     // Run until we get three consecutive results within a certain error
-    max_error := 500;
+    max_error := 1000;
     delta: [3] int;
 
     counter_register := cast(*u32) (hpet.base_address + cast(u64) Hpet_Register.COUNTER);
-
 
     for 1..1000 {
         #asm { cli; }

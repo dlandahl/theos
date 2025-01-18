@@ -91,10 +91,6 @@ core_begin_multitasking :: () {
     {
         // Enable Local APIC timer interrupts
 
-        tsc_now := rdtsc();
-        tsc_1_second := tsc_now + kernel_globals.timestamp_counter_frequency;
-        write_msr(.TSC_DEADLINE, tsc_1_second);
-
         register_interrupt_gate(int__spurious_interrupt, 0xff);
         spurious := read_apic_register(.SPURIOUS_INTERRUPT);
         write_apic_register(.SPURIOUS_INTERRUPT, spurious | 0x1ff);
