@@ -190,16 +190,30 @@ kernel_entry :: () #no_context {
 
         core_begin_multitasking();
 
-        startup_application_processors();
-
-        core := get_current_core();
-        for 1..4 {
-            new_task := create_task();
-            put_task_on_core(new_task, core);
-        }
+        // startup_application_processors();
+        // 
+        // core := get_current_core();
+        // for 1..4 {
+        //     new_task := create_task();
+        //     put_task_on_core(new_task, core);
+        // }
 
         #asm { sti; }
 
+        tsc_start := rdtsc();
+        time := get_monotonic_system_time();
+
+        while true {
+            time += seconds_to_apollo(1);
+            sleep_until(time);
+
+            tsc_now := rdtsc();
+            seconds_according_to_tsc := cast(float) (tsc_now - tsc_start) / cast(float) timestamp_counter_frequency;
+
+            print("Seconds elapsed according to TSC: %\n", seconds_according_to_tsc);
+        }
+
+        core := get_current_core();
         while true {
             time := get_monotonic_system_time();
             calendar := native_apollo_to_calendar(time);

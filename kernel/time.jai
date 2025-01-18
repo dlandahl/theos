@@ -447,7 +447,7 @@ calibrate_tsc :: () -> hz: u64 {
     }
 
 
-    // If TSC ratio is not provided by CPUID, it can in practice be derived from the processor base frequency.
+    // If TSC ratio is not provided by CPUID, it can in practice be derived from the processor base frequency. It's not guaranteed by the spec, but there isn't a CPU where it doesn't work.
     #asm {
         mov eax, 0x16;
         cpuid eax, ebx, ecx, edx;
@@ -458,23 +458,20 @@ calibrate_tsc :: () -> hz: u64 {
     }
 
 
-    // Travis Downs says that manually timing TSC might be better anyway
-    // https://github.com/jdmccalpin/low-overhead-timers/issues/1
     hpet := kernel_globals.high_precision_timer;
 
-    calibration_time_fs: u64 = 50_000_000_000; // 50ms expressed as femtoseconds
+    calibration_time_fs: u64 = 50_000_000_000_000; // 50ms expressed as femtoseconds
     ticks_per_calibration_run := cast(u32) (calibration_time_fs / hpet.tick_period_femtoseconds);
 
     // Run until we get three consecutive results within a certain error
-    max_error := 1000;
-    delta: [3] u64;
+    max_error := 500;
+    delta: [3] int;
 
     counter_register := cast(*u32) (hpet.base_address + cast(u64) Hpet_Register.COUNTER);
 
-    #asm { cli; }
-    defer #asm { sti; }
 
     for 1..1000 {
+        #asm { cli; }
 
         counter_start := counter_register.*;
         tsc0 := rdtsc();
@@ -490,23 +487,26 @@ calibrate_tsc :: () -> hz: u64 {
             }
         }
 
+        #asm { sti; }
+
         delta[2] = delta[1];
         delta[1] = delta[0];
-        delta[0] = tsc1 - tsc0;
+        delta[0] = cast(int) (tsc1 - tsc0);
 
         abs :: (a: int) -> int {
             if a < 0 return -a;
             return a;
         }
 
-        first_valid  := abs(cast(int) delta[0] - cast(int) delta[1]) < max_error;
-        second_valid := abs(cast(int) delta[0] - cast(int) delta[2]) < max_error;
+        first_valid  := abs(delta[0] - delta[1]) < max_error;
+        second_valid := abs(delta[0] - delta[2]) < max_error;
 
         if first_valid && second_valid {
-            #asm { sti; }
-
             average_delta := (delta[0] + delta[1] + delta[2]) / 3;
-            return average_delta * 20; // Convert ticks per 50ms timing run to ticks per second
+            frequency := cast(u64) average_delta * 20; // Convert ticks per 50ms timing run to ticks per second
+
+            log("Calibrating TSC took % 50ms calibration runs, frequency is %", it, frequency);
+            return frequency;
         }
     }
 
