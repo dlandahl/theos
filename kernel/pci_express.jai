@@ -132,6 +132,7 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
 
 
 do_ahci_stuff :: (device: Pci_Device) {
+    print("Initializing AHCI controller.\n");
     print("Header type is %\n", device.header_type & ~0x80);
 
     bar := read_base_address_register(device, bar_index=5);

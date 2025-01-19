@@ -184,24 +184,21 @@ kernel_entry :: () #no_context {
 
         // Get the time at the most recent second. Maybe use an interrupt to detect a more accurate boot time.
         boot_calendar_time := rtc_get_calendar_time();
+
         // Don't use Basic.calendar_to_apollo, because it's OS specific
         boot_time = native_calendar_to_apollo(boot_calendar_time);
 
-        // print_physical_memory_map();
-
         timestamp_counter_frequency = calibrate_tsc();
+
 
         core_begin_multitasking();
 
         find_all_pci_devices();
         for pci_devices {
             if it.class_code == .MASS_STORAGE && it.subclass == 0x6 {
-                print("Found SATA device.\n");
                 do_ahci_stuff(it);
             }
         }
-
-        print("Page descriptor array size: %\n", large_pages.count * size_of(Large_Page));
 
         // startup_application_processors();
         // 
@@ -212,19 +209,6 @@ kernel_entry :: () #no_context {
         // }
 
         #asm { sti; }
-
-        tsc_start := rdtsc();
-        time := get_monotonic_system_time();
-
-        while true {
-            time += seconds_to_apollo(1);
-            sleep_until(time);
-
-            tsc_now := rdtsc();
-            seconds_according_to_tsc := cast(float) (tsc_now - tsc_start) / cast(float) timestamp_counter_frequency;
-
-            print("Seconds elapsed according to TSC: %\n", seconds_according_to_tsc);
-        }
 
         core := get_current_core();
         while true {
@@ -463,15 +447,13 @@ Large_Page_Allocator :: struct {
     lru_least: s32;
     lru_most:  s32;
 
-    lock: Spinlock;
+    lock: Recursive_Spinlock;
 }
 
 allocate_large_page :: () -> u64 #no_context {
 
     using kernel_globals.large_page_allocator;
-
-    // Caller should take the spinlock, since they might want to do more with the descriptor
-    // if !lock bluescreen();
+    acquire(*lock);
 
     if freelist != FREELIST_TAIL {
         address := freelist * 0x20_0000;
@@ -487,7 +469,7 @@ allocate_large_page :: () -> u64 #no_context {
 
         desc := *kernel_globals.large_pages[max_large_page_used];
 
-        address := max_large_page_used * 0x20_0000;
+        page := max_large_page_used * 0x20_0000;
         max_large_page_used += 1;
 
         if desc.state == .RESERVED {
@@ -495,15 +477,17 @@ allocate_large_page :: () -> u64 #no_context {
         }
 
         desc.state = .ALLOCATED;
-        return cast(u64) address;
+        return cast(u64) page;
     }
 
     // There are no free large pages, evict one from the disk cache.
     if lru_least != LRU_TAIL {
-
+        page := cast(u64) lru_least * 0x20_0000;
         desc := *kernel_globals.large_pages[lru_least];
-        lru_least = desc.more_recently_used;
-        evict_disk_cache_entry(desc);
+        evict_disk_cache_entry(page);
+
+        desc.state = .ALLOCATED;
+        return page;
     }
 
     // There's no free memory
@@ -527,12 +511,20 @@ find_or_add_disk_cache_entry :: (disk_address: u64) -> u64 {
         lru_entry := *large_pages[page_index];
         lru_entry.state = .DISK_CACHE;
 
-        `hash_table_entry.lru_current_block = block_index;
+        `hash_table_entry.lru_current_block = `disk_address / 0x20_0000;
         `hash_table_entry.lru_entry = page_index;
 
-        large_pages[large_page_allocator.lru_most].more_recently_used = page_index;
+        if large_page_allocator.lru_most != LRU_TAIL {
+            large_pages[large_page_allocator.lru_most].more_recently_used = page_index;
+        }
+
         lru_entry.less_recently_used = large_page_allocator.lru_most;
+        lru_entry.more_recently_used = LRU_TAIL;
         large_page_allocator.lru_most = page_index;
+
+        if large_page_allocator.lru_least == LRU_TAIL {
+            large_page_allocator.lru_least = page_index;
+        }
     }
 
     if lru_entry.state != .DISK_CACHE {
@@ -545,26 +537,42 @@ find_or_add_disk_cache_entry :: (disk_address: u64) -> u64 {
 
     if hash_table_entry.lru_current_block != block_index {
         // The cache entry is aliased to a different disk block. Evict it because we're more recent.
-        evict_disk_cache_entry(lru_entry);
-        page: u64;
-        // Cache_Page(page);
+        page := cast(u64) hash_table_entry.lru_entry * 0x20_0000;
+        evict_disk_cache_entry(page);
+        Cache_Page(page);
 
         return page;
     }
 
     // The disk block is already in the cache
-    return cast(u64) hash_table_entry.lru_entry * 0x20_0000;
+    page := cast(u64) hash_table_entry.lru_entry * 0x20_0000;
+
+    // Todo: move the page to the front of the list
+
+    return page;
 }
 
-evict_disk_cache_entry :: (lru_entry: *Large_Page) #no_context {
+evict_disk_cache_entry :: (page: u64) #no_context {
+    using kernel_globals;
 
-    more := *kernel_globals.large_pages[lru_entry.more_recently_used];
-    more.more_recently_used = lru_entry.more_recently_used;
-    more.less_recently_used = lru_entry.less_recently_used;
+    page_index := page / 0x20_0000;
+    lru_entry  := *large_pages[page_index];
 
-    less := *kernel_globals.large_pages[lru_entry.less_recently_used];
-    less.more_recently_used = lru_entry.more_recently_used;
-    less.less_recently_used = lru_entry.less_recently_used;
+    if lru_entry.more_recently_used != LRU_TAIL {
+        more := *large_pages[lru_entry.more_recently_used];
+        more.less_recently_used = lru_entry.less_recently_used;
+    }
+
+    if lru_entry.less_recently_used != LRU_TAIL {
+        less := *large_pages[lru_entry.less_recently_used];
+        less.more_recently_used = lru_entry.more_recently_used;
+    }
+
+    if page_index == cast,no_check(u64) large_page_allocator.lru_least {
+        kernel_globals.large_page_allocator.lru_least = lru_entry.more_recently_used;
+    }
+
+    // Todo: actually flush the data
 }
 
 
@@ -585,7 +593,6 @@ Physical_4k_Page_Pool :: struct(page_count: int) {
 }
 
 page_pool_index_to_address :: (pool: *Physical_4k_Page_Pool, index: s32) -> u64 #no_context {
-
     large_page_index := index / 512;
     page_index       := index % 512;
 
@@ -928,6 +935,56 @@ Scoped_Acquire :: (lock: *Spinlock) #expand {
 
 
 
+Recursive_Spinlock :: struct {
+    lock: Spinlock;
+
+    held_by_core: int;
+    recursion_count: int;
+}
+
+acquire :: (lock: *Recursive_Spinlock) #no_context {
+    if !kernel_globals.processor_cores.count {
+        // It's too early in boot for recursive spinlocks to work.
+        return;
+    }
+
+    core := get_current_core();
+
+    if lock.lock && lock.held_by_core == core.id {
+        lock.recursion_count += 1;
+        return;
+    }
+
+    acquire(*lock.lock);
+
+    lock.held_by_core = core.id;
+}
+
+release :: (lock: *Recursive_Spinlock) #no_context {
+    if !kernel_globals.processor_cores.count {
+        // It's too early in boot for recursive spinlocks to work.
+        return;
+    }
+
+    core := get_current_core();
+
+    if lock.held_by_core != core.id bluescreen();
+
+    if lock.recursion_count > 0 {
+        lock.recursion_count -= 1;
+        return;
+    }
+
+    release(*lock.lock);
+}
+
+Scoped_Acquire :: (lock: *Recursive_Spinlock) #expand {
+    acquire(lock);
+    `defer release(lock);
+}
+
+
+
 Sequence_Lock :: #type,distinct u32;
 
 sequence_read :: (lock: *Sequence_Lock, body: Code) #expand {
@@ -990,6 +1047,7 @@ print_physical_memory_map :: () {
     using kernel_globals;
     context.print_style.default_format_float.trailing_width = 2;
 
+    #if false {
     total_by_type: [5] float;
     for 0..boot_data.memory_map_entries_used-1 {
 
@@ -1015,8 +1073,11 @@ print_physical_memory_map :: () {
     for total_by_type {
         print("Total (%) % MB\n=======\n", cast(type_of(Memory_Region.type)) it_index, it / 256);
     }
+    }
+
+    print("Most recently used: %\nLeast recently used: %\n", large_page_allocator.lru_most, large_page_allocator.lru_least);
 
     for boot_data.large_pages {
-        print("[%] %\n", it_index, it.state);
+        print("[% ->%] % (%<->%)\n", it_index, it.lru_entry, it.state, it.less_recently_used, it.more_recently_used);
     }
 }

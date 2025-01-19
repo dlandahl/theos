@@ -512,3 +512,20 @@ calibrate_tsc :: () -> hz: u64 {
     bluescreen();
     return 0;
 }
+
+debug_measure_tsc_drift :: () {
+    #asm { cli; }
+
+    tsc_start := rdtsc();
+    time := get_monotonic_system_time();
+
+    for 1..1_000_000 {
+        time += seconds_to_apollo(1);
+        sleep_until(time);
+
+        tsc_now := rdtsc();
+        seconds_according_to_tsc := cast(float) (tsc_now - tsc_start) / cast(float) kernel_globals.timestamp_counter_frequency;
+
+        print("[%] Seconds elapsed according to TSC: %\n", it, seconds_according_to_tsc);
+    }
+}
