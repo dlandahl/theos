@@ -20,7 +20,7 @@ Usage example:
         set(*gate_flags, .protection_level, 3);
         set(*gate_flags, .interrupt_stack_table, 1);
 
-        print("Flags is %\n", formatInt(cast(int) gate_flags, base=2));
+        print("Flags is %\n", formatInt(cast(u16) gate_flags, base=2));
     }
 
 Todo: would like to have this syntax:

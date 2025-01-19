@@ -111,9 +111,12 @@ kernel_entry :: () #no_context {
     }
 
     large_page_allocator.freelist = FREELIST_TAIL;
+    large_page_allocator.lru_least = LRU_TAIL;
+    large_page_allocator.lru_most  = LRU_TAIL;
 
     big_page := allocate_large_page();
     init_block_allocator(*physical_block_allocator, big_page, 0x20_0000);
+
 
     make_kernel_context(*main_thread_context);
 
@@ -197,6 +200,8 @@ kernel_entry :: () #no_context {
                 do_ahci_stuff(it);
             }
         }
+
+        print("Page descriptor array size: %\n", large_pages.count * size_of(Large_Page));
 
         // startup_application_processors();
         // 
@@ -419,6 +424,7 @@ init_processor_core :: () #no_context {
         star := (cast(u64) Segment_Selector.RING0_DATA | 3) << 48;
         star |= (cast(u64) Segment_Selector.RING0_CODE)     << 32;
         write_msr(.STAR__syscall_segment, star);
+
         write_msr(.SFMASK__syscall_flags, 0);
 
         syscall_entry :: () #foreign Interrupts;
@@ -453,16 +459,19 @@ bluescreen :: (loc := #caller_location) #no_context {
 Large_Page_Allocator :: struct {
     max_large_page_used: int;
     freelist: int;
-    lock: Spinlock;
 
-    lru_least: int;
-    lru_most: int;
+    lru_least: s32;
+    lru_most:  s32;
+
+    lock: Spinlock;
 }
 
 allocate_large_page :: () -> u64 #no_context {
 
     using kernel_globals.large_page_allocator;
-    Scoped_Acquire(*lock);
+
+    // Caller should take the spinlock, since they might want to do more with the descriptor
+    // if !lock bluescreen();
 
     if freelist != FREELIST_TAIL {
         address := freelist * 0x20_0000;
@@ -474,10 +483,7 @@ allocate_large_page :: () -> u64 #no_context {
         return cast(u64) address;
     }
 
-    while true {
-        if max_large_page_used >= kernel_globals.large_pages.count {
-            break;
-        }
+    while max_large_page_used < kernel_globals.large_pages.count {
 
         desc := *kernel_globals.large_pages[max_large_page_used];
 
@@ -488,21 +494,77 @@ allocate_large_page :: () -> u64 #no_context {
             continue;
         }
 
-        if desc.state == .BUFFER_CACHE {
-            continue;
-        }
-
         desc.state = .ALLOCATED;
-        return cast(u64) address; 
+        return cast(u64) address;
     }
 
-    // There are no free large pages, evict one from the buffer cache.
-    if lru_least == LRU_TAIL {
-        bluescreen();
+    // There are no free large pages, evict one from the disk cache.
+    if lru_least != LRU_TAIL {
+
+        desc := *kernel_globals.large_pages[lru_least];
+        lru_least = desc.more_recently_used;
+        evict_disk_cache_entry(desc);
     }
 
-    desc := *kernel_globals.large_pages[lru_least];
-    lru_least = desc.lru_more_recently_used;
+    // There's no free memory
+    bluescreen();
+    return 0;
+}
+
+find_or_add_disk_cache_entry :: (disk_address: u64) -> u64 {
+    using kernel_globals;
+    Scoped_Acquire(*large_page_allocator.lock);
+
+    block_index := disk_address / 0x20_0000;
+    block_index %= cast(u64) large_pages.count;
+
+    hash_table_entry := *large_pages[block_index];
+    lru_entry        := *large_pages[hash_table_entry.lru_entry];
+
+    Cache_Page :: (page: u64) #expand {
+        page_index := cast(s32) (page / 0x20_0000);
+
+        lru_entry := *large_pages[page_index];
+        lru_entry.state = .DISK_CACHE;
+
+        `hash_table_entry.lru_current_block = block_index;
+        `hash_table_entry.lru_entry = page_index;
+
+        large_pages[large_page_allocator.lru_most].more_recently_used = page_index;
+        lru_entry.less_recently_used = large_page_allocator.lru_most;
+        large_page_allocator.lru_most = page_index;
+    }
+
+    if lru_entry.state != .DISK_CACHE {
+        // The disk block is not in the cache
+        page := allocate_large_page();
+        Cache_Page(page);
+
+        return page;
+    }
+
+    if hash_table_entry.lru_current_block != block_index {
+        // The cache entry is aliased to a different disk block. Evict it because we're more recent.
+        evict_disk_cache_entry(lru_entry);
+        page: u64;
+        // Cache_Page(page);
+
+        return page;
+    }
+
+    // The disk block is already in the cache
+    return cast(u64) hash_table_entry.lru_entry * 0x20_0000;
+}
+
+evict_disk_cache_entry :: (lru_entry: *Large_Page) #no_context {
+
+    more := *kernel_globals.large_pages[lru_entry.more_recently_used];
+    more.more_recently_used = lru_entry.more_recently_used;
+    more.less_recently_used = lru_entry.less_recently_used;
+
+    less := *kernel_globals.large_pages[lru_entry.less_recently_used];
+    less.more_recently_used = lru_entry.more_recently_used;
+    less.less_recently_used = lru_entry.less_recently_used;
 }
 
 
@@ -523,16 +585,15 @@ Physical_4k_Page_Pool :: struct(page_count: int) {
 }
 
 page_pool_index_to_address :: (pool: *Physical_4k_Page_Pool, index: s32) -> u64 #no_context {
-    using pool;
 
     large_page_index := index / 512;
     page_index       := index % 512;
 
-    large_page := *large_pages[large_page_index];
+    large_page := *pool.large_pages[large_page_index];
 
-    if large_pages_used <= large_page_index {
+    if pool.large_pages_used <= large_page_index {
         large_page.index = cast(s32) (allocate_large_page() / 0x20_0000);
-        large_pages_used += 1;
+        pool.large_pages_used += 1;
     }
 
     large_page.used += 1;

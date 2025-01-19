@@ -29,11 +29,10 @@ DIRECT_MAPPING_BASE :: 0xffff_8000_0000_0000;
 Boot_Data :: struct {
     page_tables: Page_Tables; // This should be the first field to ensure alignment of page tables to a page boundary
 
-    page_directories_used: int;
-    KERNEL_PHYS_BASE :: 0x600_0000; // Random choice, really this needs to be dynamically chosen to avoid writing over firmware stuff
-
-    // Assume physical memory at 1Mb is free to use on any firmware. Linux does this.
     BASE_ADDRESS :: 0x10_0000;
+
+    page_directories_used: int;
+    KERNEL_PHYS_BASE :: 0x600_0000;
 
     framebuffer: Framebuffer;
 
@@ -64,12 +63,23 @@ Large_Page :: struct {
     state: enum u8 {
         FREE;
         ALLOCATED;
-        BUFFER_CACHE;
+        DISK_CACHE;
         RESERVED;
     };
 
-    lru_more_recently_used: s32;
-    lru_less_recently_used: s32;
+
+    // ------- Disk cache entry -------
+    // Todo: when a block is in the disk cache, it's not in the freelist, so could union those two integers
+    more_recently_used: s32;
+    less_recently_used: s32;
+
+
+    // ------- Disk cache hash table entry -------
+    lru_entry: s32; // The 2MB disk block with the same index as this page, where is it in the cache
+
+    // At the moment, the hash function of the LRU cache is f(x)=x mod N, where N is the number of large pages.
+    // If another disk block which aliases to the same block in memory is accessed, the old block gets evicted
+    lru_current_block: u64;
 }
 
 #program_export

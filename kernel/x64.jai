@@ -260,14 +260,10 @@ enable_cpu_features :: () #no_context {
 
 
         // Mask out all the FP exceptions for now
-        using mxcsr: Mxcsr;
+        mxcsr := Mxcsr.MASK_ALL;
         pmxcsr := *mxcsr;
 
-        mask := Mxcsr.MASK_ALL;
-
         #asm {
-            stmxcsr [pmxcsr];
-            or.q [pmxcsr], mask;
             ldmxcsr [pmxcsr];
         }
     }

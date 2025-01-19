@@ -63,13 +63,11 @@ native_calendar_to_apollo :: (ct: Calendar_Time) -> Apollo_Time {
     seconds := 31536000 * (year_difference - leap_year_count);
     seconds += 31622400 * leap_year_count;
 
-    if ct.month_starting_at_0 > 0 {
-        cumulative_days :: int.[
-            31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365
-        ];
+    cumulative_days :: int.[
+        0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365
+    ];
 
-        seconds += cumulative_days[ct.month_starting_at_0-1] * 86400;
-    }
+    seconds += cumulative_days[ct.month_starting_at_0] * 86400;
 
     is_leap_year := (ct.year % 4 == 0) && (!(ct.year % 100 == 0) || (ct.year % 400 == 0));
     if ct.month_starting_at_0 > 1 && is_leap_year {

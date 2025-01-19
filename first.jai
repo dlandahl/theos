@@ -161,6 +161,7 @@ compile_kernel :: () -> success: bool {
 
     {
         options := get_build_options(workspace);
+
         options.output_executable_name = "kernel";
         options.output_path = ".build";
         options.emit_debug_info = .NONE;
