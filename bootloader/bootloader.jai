@@ -360,7 +360,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
                     cast(s32)   program_header.p_filesz
                 );
 
-                if (program_header.p_memsz > program_header.p_filesz) {
+                if program_header.p_memsz > program_header.p_filesz {
                     start := program_header.p_vaddr + program_header.p_filesz;
                     count := program_header.p_memsz - program_header.p_filesz;
                     memset(cast(*void) start, 0, cast(s64) count);

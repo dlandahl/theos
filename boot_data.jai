@@ -78,7 +78,7 @@ Large_Page :: struct {
     lru_entry: s32; // The 2MB disk block with the same index as this page, where is it in the cache
 
     // At the moment, the hash function of the LRU cache is f(x)=x mod N, where N is the number of large pages.
-    // If another disk block which aliases to the same block in memory is accessed, the old block gets evicted
+    // Collisions are resolved by evicting the old block.
     lru_current_block: u64;
 }
 

@@ -241,8 +241,9 @@ enable_cpu_features :: () #no_context {
             }
         }
 
+
         if check_feature(cpu_features, .TSC_DEADLINE) {
-            log("TSC_DEADLINE Supported");
+            write_string("TSC_DEADLINE Supported\n");
         }
 
         // Check for constant TSC
@@ -255,7 +256,7 @@ enable_cpu_features :: () #no_context {
         }
 
         if edx & 0x200 {
-            log("Invariant/Constant TSC Supported");
+            write_string("Invariant/Constant TSC Supported\n");
         }
 
 

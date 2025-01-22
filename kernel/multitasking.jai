@@ -84,6 +84,7 @@ core_begin_multitasking :: () {
 
     params: Create_Task_Parameters;
     params.user_stack_size = 0;
+    params.kernel_stack_size = 0x2000;
     params.entry_point = idle;
 
     scheduler.idle_task = create_task(params);
@@ -181,21 +182,19 @@ sleep_until :: (time: Apollo_Time) {
     yield();
 }
 
-wake_sleeping_tasks :: (core: *X64_Core, time: Apollo_Time) -> bool {
-    scheduler := *core.scheduler;
-    queue := scheduler.sleep_queue;
+wake_sleeping_tasks :: (core: *X64_Core, time: Apollo_Time) {
+    using core.scheduler;
 
-    if queue && queue.sleep_until < time {
-        scheduler.sleep_queue = queue.next_sleeping;
+    while sleep_queue && sleep_queue.sleep_until < time {
+        to_wake := sleep_queue;
 
-        queue_push(*scheduler.waiting_to_run, queue);
-        queue.sleeping = false;
-        queue.next_sleeping = null;
+        sleep_queue = sleep_queue.next_sleeping;
 
-        return true;
+        to_wake.sleeping = false;
+        to_wake.next_sleeping = null;
+        queue_push(*waiting_to_run, to_wake);
+
     }
-
-    return false;
 }
 
 yield :: () {

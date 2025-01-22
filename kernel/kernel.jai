@@ -190,7 +190,6 @@ kernel_entry :: () #no_context {
 
         timestamp_counter_frequency = calibrate_tsc();
 
-
         core_begin_multitasking();
 
         find_all_pci_devices();
@@ -200,17 +199,16 @@ kernel_entry :: () #no_context {
             }
         }
 
-        // startup_application_processors();
-        // 
-        // core := get_current_core();
-        // for 1..4 {
-        //     new_task := create_task();
-        //     put_task_on_core(new_task, core);
-        // }
+        startup_application_processors();
+
+        core := get_current_core();
+        for 1..4 {
+            new_task := create_task();
+            put_task_on_core(new_task, core);
+        }
 
         #asm { sti; }
 
-        core := get_current_core();
         while true {
             time := get_monotonic_system_time();
             calendar := native_apollo_to_calendar(time);
@@ -466,7 +464,6 @@ allocate_large_page :: () -> u64 #no_context {
     }
 
     while max_large_page_used < kernel_globals.large_pages.count {
-
         desc := *kernel_globals.large_pages[max_large_page_used];
 
         page := max_large_page_used * 0x20_0000;
@@ -484,9 +481,10 @@ allocate_large_page :: () -> u64 #no_context {
     if lru_least != LRU_TAIL {
         page := cast(u64) lru_least * 0x20_0000;
         desc := *kernel_globals.large_pages[lru_least];
+        desc.state = .ALLOCATED;
+
         evict_disk_cache_entry(page);
 
-        desc.state = .ALLOCATED;
         return page;
     }
 
@@ -500,9 +498,9 @@ find_or_add_disk_cache_entry :: (disk_address: u64) -> u64 {
     Scoped_Acquire(*large_page_allocator.lock);
 
     block_index := disk_address / 0x20_0000;
-    block_index %= cast(u64) large_pages.count;
+    block_hash  := block_index % cast(u64) large_pages.count;
 
-    hash_table_entry := *large_pages[block_index];
+    hash_table_entry := *large_pages[block_hash];
     lru_entry        := *large_pages[hash_table_entry.lru_entry];
 
     Cache_Page :: (page: u64) #expand {
@@ -511,7 +509,7 @@ find_or_add_disk_cache_entry :: (disk_address: u64) -> u64 {
         lru_entry := *large_pages[page_index];
         lru_entry.state = .DISK_CACHE;
 
-        `hash_table_entry.lru_current_block = `disk_address / 0x20_0000;
+        `hash_table_entry.lru_current_block = `block_index;
         `hash_table_entry.lru_entry = page_index;
 
         if large_page_allocator.lru_most != LRU_TAIL {
@@ -547,7 +545,20 @@ find_or_add_disk_cache_entry :: (disk_address: u64) -> u64 {
     // The disk block is already in the cache
     page := cast(u64) hash_table_entry.lru_entry * 0x20_0000;
 
-    // Todo: move the page to the front of the list
+    // Move the page to the front of the list
+    if lru_entry.more_recently_used != LRU_TAIL {
+        more := *large_pages[lru_entry.more_recently_used];
+        more.less_recently_used = lru_entry.less_recently_used;
+
+        if lru_entry.less_recently_used != LRU_TAIL {
+            less := *large_pages[lru_entry.less_recently_used];
+            less.more_recently_used = lru_entry.more_recently_used;
+        }
+
+        lru_entry.less_recently_used = large_page_allocator.lru_most;
+        lru_entry.more_recently_used = LRU_TAIL;
+        large_page_allocator.lru_most = hash_table_entry.lru_entry;
+    }
 
     return page;
 }
@@ -863,13 +874,13 @@ find_acpi_table :: (signature: string) -> *Acpi_Table_Header {
     for table_index: 0..pointer_count - 1 {
         offset := table_index * pointer_size + table_base;
 
-        phys := ifx kernel_globals.acpi_version {
-            << cast(*u64) offset;
-        } else {
-            cast(u64) << cast(*u32) offset;
+        physical_address := cast(u64) << cast(*u32) offset;
+
+        if kernel_globals.acpi_version {
+            physical_address = << cast(*u64) offset;
         }
 
-        header := cast(*Acpi_Table_Header) (phys + DIRECT_MAPPING_BASE);
+        header := cast(*Acpi_Table_Header) (physical_address + DIRECT_MAPPING_BASE);
 
         for 0..3 if header.signature[it] != signature[it] {
             continue table_index;
@@ -1043,11 +1054,11 @@ allocate_interrupt_gate :: (loc := #caller_location) -> int {
 
 
 
-print_physical_memory_map :: () {
+debug_print_physical_memory_map :: () {
     using kernel_globals;
     context.print_style.default_format_float.trailing_width = 2;
 
-    #if false {
+#if false {
     total_by_type: [5] float;
     for 0..boot_data.memory_map_entries_used-1 {
 
@@ -1073,7 +1084,7 @@ print_physical_memory_map :: () {
     for total_by_type {
         print("Total (%) % MB\n=======\n", cast(type_of(Memory_Region.type)) it_index, it / 256);
     }
-    }
+}
 
     print("Most recently used: %\nLeast recently used: %\n", large_page_allocator.lru_most, large_page_allocator.lru_least);
 

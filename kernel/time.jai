@@ -447,7 +447,7 @@ calibrate_tsc :: () -> hz: u64 {
     }
 
 
-    // If TSC ratio is not provided by CPUID, it can in practice be derived from the processor base frequency. It's not guaranteed by the spec, but there isn't a CPU where it doesn't work.
+    // If the TSC frequency is not provided by CPUID, it can in practice be derived from the processor base frequency.
     #asm {
         mov eax, 0x16;
         cpuid eax, ebx, ecx, edx;

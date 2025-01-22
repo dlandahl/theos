@@ -142,19 +142,14 @@ initialize_apic :: () {
     init_processor_core();
 
 
-    register_interrupt_gate(int__fault_0, 0, true);
-    register_interrupt_gate(int__fault_1, 1, true);
-    register_interrupt_gate(int__fault_2, 2, true);
-    register_interrupt_gate(int__fault_3, 3, true);
-    register_interrupt_gate(int__fault_4, 4, true);
-    register_interrupt_gate(int__fault_5, 5, true);
-    register_interrupt_gate(int__fault_6, 6, true);
-    register_interrupt_gate(int__fault_7, 7, true);
-    register_interrupt_gate(int__fault_8, 8, true);
-    register_interrupt_gate(int__fault_9, 9, true);
-    register_interrupt_gate(int__fault_10, 10, true);
-    register_interrupt_gate(int__fault_11, 11, true);
-    register_interrupt_gate(int__fault_12, 12, true);
+    #insert #run,host -> string {
+        builder: String_Builder;
+        for 0..12 {
+            print(*builder, "register_interrupt_gate(int__fault_%1, %1, true);\n", it);
+        }
+        return builder_to_string(*builder);
+    };
+
     register_interrupt_gate(int__general_protection_fault, 13, true);
     register_interrupt_gate(int__fault_14, 14, true);
     register_interrupt_gate(int__simd_floating_point_exception, 19, true);
@@ -306,7 +301,6 @@ get_current_core :: (loc := #caller_location) -> *X64_Core #no_context {
     if !core bluescreen(loc);
     return core;
 }
-
 
 
 ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, gate_number: int) {
