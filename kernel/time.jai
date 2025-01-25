@@ -40,10 +40,10 @@ kernel_timestamp_to_apollo :: (ts: Kernel_Timestamp) -> Apollo_Time {
     time_represented_by_ticks.low = cast(u64) ts.ticks;
     time_represented_by_ticks *= cast(s64) high_precision_timer.tick_period_femtoseconds;
 
-    femtoseconds_per_millisecond := 1.e12;
+    femtoseconds_per_millisecond := 1_000_000_000_000;
     time_represented_by_counter: Apollo_Time;
     time_represented_by_counter.low = ts.counter;
-    time_represented_by_counter *= cast(s64) (100 * femtoseconds_per_millisecond);
+    time_represented_by_counter *= 100 * femtoseconds_per_millisecond;
 
     return time_represented_by_counter + time_represented_by_ticks;
 }
@@ -203,7 +203,9 @@ rtc_read :: (register: Rtc_Register) -> u8 {
         in.b ax, DATA;
     }
 
-    is_status_register := (register >= .STATUS_A) && (register <= .STATUS_C);
+    is_status_register := (register == .STATUS_A)
+                       || (register == .STATUS_B)
+                       || (register == .STATUS_C);
 
     if kernel_globals.rtc_format_is_bcd && !is_status_register {
         ax = (ax & 0xf) + (ax / 16) * 10;

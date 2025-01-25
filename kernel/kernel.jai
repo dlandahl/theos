@@ -479,10 +479,10 @@ allocate_large_page :: () -> u64 #no_context {
 
     // There are no free large pages, evict one from the disk cache.
     if lru_least != LRU_TAIL {
-        page := cast(u64) lru_least * 0x20_0000;
         desc := *kernel_globals.large_pages[lru_least];
         desc.state = .ALLOCATED;
 
+        page := cast(u64) lru_least * 0x20_0000;
         evict_disk_cache_entry(page);
 
         return page;
@@ -543,10 +543,12 @@ find_or_add_disk_cache_entry :: (disk_address: u64) -> u64 {
     }
 
     // The disk block is already in the cache
-    page := cast(u64) hash_table_entry.lru_entry * 0x20_0000;
+    page_index := hash_table_entry.lru_entry;
+    page := cast(u64) page_index * 0x20_0000;
 
     // Move the page to the front of the list
     if lru_entry.more_recently_used != LRU_TAIL {
+
         more := *large_pages[lru_entry.more_recently_used];
         more.less_recently_used = lru_entry.less_recently_used;
 
@@ -557,7 +559,9 @@ find_or_add_disk_cache_entry :: (disk_address: u64) -> u64 {
 
         lru_entry.less_recently_used = large_page_allocator.lru_most;
         lru_entry.more_recently_used = LRU_TAIL;
-        large_page_allocator.lru_most = hash_table_entry.lru_entry;
+
+        large_pages[large_page_allocator.lru_most].more_recently_used = page_index;
+        large_page_allocator.lru_most = page_index;
     }
 
     return page;

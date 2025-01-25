@@ -6,15 +6,16 @@ Acpi_Madt :: struct {
     flags: u32;
 
     Interrupt_Controller_Structure :: struct {
-        type: Type;
+        subtype: Subtype;
         length: u8;
 
-        Type :: enum u8 {
-            LOCAL_APIC                :: 0x0;
-            IO_APIC                   :: 0x1;
-            INTERRUPT_SOURCE_OVERRIDE :: 0x2;
-            NON_MASKABLE_INTERRUPT    :: 0x4;
-            MULTIPROCESSOR_WAKEUP     :: 0x10;
+        Subtype :: enum u8 {
+            LOCAL_APIC                :: 0;
+            IO_APIC                   :: 1;
+            INTERRUPT_SOURCE_OVERRIDE :: 2;
+            NON_MASKABLE_INTERRUPT    :: 4;
+            LAPIC_ADDRESS_OVERRIDE    :: 5;
+            LOCAL_X2APIC              :: 9;
         }
     }
 
@@ -126,7 +127,6 @@ initialize_apic :: () {
     {
         physical := cast(u64) apic_base & ~0xfff;
         assert(0xfee0_0000 == physical);
-        assert(acpi_header.local_apic_address == cast(u32) physical);
 
         // Allocating an individual page using the block allocator because we don't have anything better for virtual memory yet
         // Can't use the direct mapping because we want cache disabled for this page
@@ -164,7 +164,7 @@ initialize_apic :: () {
         ics := cast(*Acpi_Madt.Interrupt_Controller_Structure) cursor;
         defer cursor += ics.length;
 
-        if ics.type == {
+        if ics.subtype == {
           case .LOCAL_APIC;
             lapic_ics := cast(*Acpi_Madt.Ics_Local_Apic) ics;
 
@@ -201,6 +201,8 @@ initialize_apic :: () {
     timer_gate := allocate_interrupt_gate();
     register_interrupt_gate(int__local_apic_timer_interrupt, timer_gate);
 
+    // Store this, to be able to configure the LAPIC of all CPUs to use the same interrupt handler.
+    // In the future we might not need LAPIC timer if we only support CPUs with the TSC deadline feature.
     kernel_globals.local_apic_timer_interrupt_gate = timer_gate;
 }
 
