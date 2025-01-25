@@ -460,6 +460,7 @@ calibrate_tsc :: () -> hz: u64 {
     }
 
 
+    log("Calibrating TSC...");
     hpet := kernel_globals.high_precision_timer;
 
     calibration_time_fs: u64 = 50_000_000_000_000; // 50ms expressed as femtoseconds
@@ -509,6 +510,10 @@ calibrate_tsc :: () -> hz: u64 {
             log("Calibrating TSC took % 50ms calibration runs, frequency is %", it, frequency);
             return frequency;
         }
+
+        if it % 3 == 0 {
+            // max_error += 1000;
+        }
     }
 
     bluescreen();
@@ -528,6 +533,6 @@ debug_measure_tsc_drift :: () {
         tsc_now := rdtsc();
         seconds_according_to_tsc := cast(float) (tsc_now - tsc_start) / cast(float) kernel_globals.timestamp_counter_frequency;
 
-        print("[%] Seconds elapsed according to TSC: %\n", it, seconds_according_to_tsc);
+        print("[%] TSC: % | Error: %\n", it, seconds_according_to_tsc, cast(float) it - seconds_according_to_tsc);
     }
 }

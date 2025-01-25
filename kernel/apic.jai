@@ -128,9 +128,6 @@ initialize_apic :: () {
         physical := cast(u64) apic_base & ~0xfff;
         assert(0xfee0_0000 == physical);
 
-        // Allocating an individual page using the block allocator because we don't have anything better for virtual memory yet
-        // Can't use the direct mapping because we want cache disabled for this page
-
         virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096);
         map_page(virtual, physical, Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE);
 

@@ -34,6 +34,7 @@ Kernel_Globals :: struct {
     physical_page_pool: Physical_4k_Page_Pool(1024);
     physical_block_allocator: Block_Allocator;
     virtual_block_allocator: Block_Allocator;
+    uncacheable_block_allocator: Block_Allocator;
 
     root_acpi_table: *Acpi_Table_Header;
     acpi_version: int;
@@ -163,6 +164,7 @@ kernel_entry :: () #no_context {
             root_acpi_table = xx (rsdp.rsdt_address + DIRECT_MAPPING_BASE);
         }
 
+
         initialize_apic();
 
         initialize_hpet();
@@ -188,16 +190,27 @@ kernel_entry :: () #no_context {
         // Don't use Basic.calendar_to_apollo, because it's OS specific
         boot_time = native_calendar_to_apollo(boot_calendar_time);
 
-        timestamp_counter_frequency = calibrate_tsc();
+        // timestamp_counter_frequency = calibrate_tsc();
 
-        core_begin_multitasking();
+        // core_begin_multitasking();
 
         find_all_pci_devices();
         for pci_devices {
             if it.class_code == .MASS_STORAGE && it.subclass == 0x6 {
-                do_ahci_stuff(it);
+                controller := init_ahci_controller(it);
+                memory := allocate_large_page();
+                ahci_transfer(*controller, .READ, memory, 512, 0);
+
+                for 0..511 {
+                    byte := cast(*u8) memory + it + DIRECT_MAPPING_BASE;
+                    print("% ", formatInt(byte.*, base=16, minimum_digits=2));
+
+                    if !((it+1) % 16) print("\n");
+                }
             }
         }
+
+        while true {}
 
         startup_application_processors();
 
@@ -424,7 +437,7 @@ bluescreen :: (loc := #caller_location) #no_context {
     using kernel_globals.framebuffer;
 
     for y: 0..y_resolution-1 for x: 0..x_resolution-1 {
-        buffer[x + y * stride] = cast(u32) (0xff0000ff);
+        buffer[x + y * stride] = cast(u32) (0xff2138e7);
     }
 
     write_string("Bluescreen!\nSource code location:\n");
@@ -1094,5 +1107,24 @@ debug_print_physical_memory_map :: () {
 
     for boot_data.large_pages {
         print("[% ->%] % (%<->%)\n", it_index, it.lru_entry, it.state, it.less_recently_used, it.more_recently_used);
+    }
+}
+
+align :: (alignment: int, value: int) -> int #no_context {
+    // if popcount(alignment) != 1 bluescreen();
+    return (value + (alignment - 1)) & -alignment;
+}
+
+Timeout :: (code: Code, message := "", time := 1000) #expand {
+    start := get_monotonic_system_time();
+
+    while true {
+        #insert code;
+        elapsed := get_monotonic_system_time() - start;
+
+        if to_milliseconds(elapsed) > time {
+            log_error(message);
+            bluescreen();
+        }
     }
 }
