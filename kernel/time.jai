@@ -75,9 +75,9 @@ native_calendar_to_apollo :: (ct: Calendar_Time) -> Apollo_Time {
     }
 
     seconds += 86400 * cast(int) ct.day_of_month_starting_at_0;
-    seconds += cast(int) ct.hour * 60 * 60 + cast(int) ct.minute * 60 + cast(int) ct.second;
-
-    APOLLO_TIME_FOR_JAN_1_1970 :: Apollo_Time.{low=0xdbd87f0edb7c8000, high=0x300};
+    seconds += cast(int) ct.hour * 60 * 60;
+    seconds += cast(int) ct.minute * 60;
+    seconds += cast(int) ct.second;
 
     apollo := seconds_to_apollo(seconds);
     apollo += milliseconds_to_apollo(ct.millisecond);
@@ -85,71 +85,89 @@ native_calendar_to_apollo :: (ct: Calendar_Time) -> Apollo_Time {
     return apollo;
 }
 
+// Ported from MUSL libc
+
 native_apollo_to_calendar :: (apollo: Apollo_Time) -> Calendar_Time {
-    // Todo: this routine doesn't work, it's sometimes off by a day.
-    APOLLO_TIME_FOR_JAN_1_1970 :: Apollo_Time.{low=0xdbd87f0edb7c8000, high=0x300};
-    milliseconds := to_milliseconds(apollo - APOLLO_TIME_FOR_JAN_1_1970);
+    LEAPOCH :: #run calendar_to_apollo(.{year=2000, month_starting_at_0=2, day_of_month_starting_at_0=0});
 
-    seconds      := milliseconds / 1000;
-    minutes      := seconds      / 60;
-    hours        := minutes      / 60;
-    total_days   := hours        / 24;
+    DAYS_PER_400Y :: 365 * 400 + 97;
+    DAYS_PER_100Y :: 365 * 100 + 24;
+    DAYS_PER_4Y   :: 365 * 4   + 1;
 
-    milliseconds -= seconds      * 1000;
-    seconds      -= minutes      * 60;
-    minutes      -= hours        * 60;
-    hours        -= total_days   * 24;
+    seconds := to_seconds(apollo - LEAPOCH);
 
-    years := total_days / 365;
-    leap_year_count := leap_years_before(years + 2);
-
-    years = (total_days - leap_year_count * 366) / 365;
-    years += leap_year_count;
-
-    days := total_days - (years - leap_year_count) * 365;
-    days -= leap_year_count * 366;
-
-    years += 1970;
-    is_leap_year := (years % 4 == 0) && (!(years % 100 == 0) || (years % 400 == 0));
-    if is_leap_year && days < 59 days += 1;
-
-    ct: Calendar_Time;
-
-    days_in_month := int.[
-        31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
-    ];
-
-    month: int;
-    for days_in_month {
-        month += 1;
-
-        if days >= it {
-            days -= it;
-        } else {
-            month = xx it_index;
-            break;
-        }
+    // Is there an easier way to do this
+    milliseconds := to_milliseconds(apollo - seconds_to_apollo(seconds) - LEAPOCH);
+    if milliseconds < 0 {
+        milliseconds += 1000;
+        seconds -= 1;
     }
 
-    ct.year = xx years;
-    // is_leap_year := (ct.year % 4 == 0) && (!(ct.year % 100 == 0) || (ct.year % 400 == 0));
-    // if is_leap_year && month < 2 month_day += 1;
+    days := seconds / 86400;
+    seconds %= 86400;
 
-    ct.day_of_week_starting_at_0 = xx ((4 + total_days) % 7);
+    if seconds < 0 {
+        seconds += 86400;
+        days -= 1;
+    }
 
-    ct.month_starting_at_0 = xx month;
-    ct.day_of_month_starting_at_0 = xx days;
+    weekday := (days + 3) % 7;
+    if weekday < 0 weekday += 7; // Is it possible for this to happen?
 
-    ct.hour = xx hours;
-    ct.minute = xx minutes;
-    ct.second = xx seconds;
-    ct.millisecond = xx milliseconds;
+    qc_cycles := days / DAYS_PER_400Y;
+    days %= DAYS_PER_400Y;
+
+    if (days < 0) {
+        days += DAYS_PER_400Y;
+        qc_cycles -= 1;
+    }
+
+    c_cycles := days / DAYS_PER_100Y;
+    if c_cycles == 4 c_cycles -= 1;
+    days -= c_cycles * DAYS_PER_100Y;
+
+    q_cycles := days / DAYS_PER_4Y;
+    if q_cycles == 25 q_cycles -= 1;
+    days -= q_cycles * DAYS_PER_4Y;
+
+    rem_years := days / 365;
+    if rem_years == 4 rem_years -= 1;
+    days -= rem_years * 365;
+
+    leap  := !rem_years && (q_cycles || !c_cycles);
+    years := rem_years + 4*q_cycles + 100*c_cycles + 400*qc_cycles;
+
+    days_in_month :: int.[ 31, 30, 31, 30, 31, 31, 30, 31, 30, 31, 31, 29 ];
+
+    months: int;
+    while true {
+        if days_in_month[months] > days break;
+        days -= days_in_month[months];
+        months += 1;
+    }
+
+    if months >= 10 {
+        months -= 12;
+        years += 1;
+    }
+
+    ct: Calendar_Time;
+    ct.month\      _starting_at_0 = cast(s8, months + 2);
+    ct.day_of_month_starting_at_0 = cast(s8, days);
+    ct.day_of_week\_starting_at_0 = cast(s8, weekday);
+
+    ct.year        = cast(s32, years + 2000);
+    ct.hour        = cast(s8,  seconds / 3600);
+    ct.minute      = cast(s8, (seconds / 60) % 60);
+    ct.second      = cast(s8,  seconds % 60);
+    ct.millisecond = cast(s16, milliseconds);
+
     return ct;
 }
 
 leap_years_before :: (year: s64) -> s64 {
     floor_div :: (dividend: int, $ divisor: int) -> int {
-        offset := cast(int) (dividend <= 0 && dividend % divisor);
+        offset := cast(int, dividend <= 0 && dividend % divisor);
         return dividend / divisor - offset;
     }
 
@@ -279,11 +297,11 @@ Hpet_Register :: enum u64 {
 }
 
 read :: (reg: Hpet_Register) -> u64 #no_context {
-    return << cast(*u64) (kernel_globals.high_precision_timer.base_address + cast(u64) reg);
+    return << cast(*u64, kernel_globals.high_precision_timer.base_address + cast(u64) reg);
 }
 
 write :: (reg: Hpet_Register, value: u64) #no_context {
-    << cast(*u64) (kernel_globals.high_precision_timer.base_address + cast(u64) reg) = value;
+    << cast(*u64, kernel_globals.high_precision_timer.base_address + cast(u64) reg) = value;
 }
 
 Hpet_Config_Flags :: enum_flags u64 {
@@ -350,7 +368,7 @@ initialize_hpet :: () {
     }
 
     hpet.counters_are_64_bit = capabilities & .SIXTYFOUR_BIT_COUNTER > 0;
-    hpet.tick_period_femtoseconds = cast(u64) (capabilities >> 32);
+    hpet.tick_period_femtoseconds = cast(u64, capabilities >> 32);
 
     write(.CONFIG, read(.CONFIG) | cast(u64) Hpet_Config_Flags.LEGACY_ROUTING);
 
@@ -373,7 +391,7 @@ initialize_hpet :: () {
 hpet_configure_timer :: (timer_index: int, frequency: u64, periodic: bool) {
     hpet := *kernel_globals.high_precision_timer;
 
-    register_offset := cast(Hpet_Register) (0x20 * timer_index);
+    register_offset := cast(Hpet_Register, 0x20 * timer_index);
 
     timer_flags := cast(Hpet_Timer_Flags) read(register_offset + .TIMER0);
 
@@ -464,13 +482,13 @@ calibrate_tsc :: () -> hz: u64 {
     hpet := kernel_globals.high_precision_timer;
 
     calibration_time_fs: u64 = 50_000_000_000_000; // 50ms expressed as femtoseconds
-    ticks_per_calibration_run := cast(u32) (calibration_time_fs / hpet.tick_period_femtoseconds);
+    ticks_per_calibration_run := cast(u32, calibration_time_fs / hpet.tick_period_femtoseconds);
 
     // Run until we get three consecutive results within a certain error
     max_error := 1000;
     delta: [3] int;
 
-    counter_register := cast(*u32) (hpet.base_address + cast(u64) Hpet_Register.COUNTER);
+    counter_register := cast(*u32, hpet.base_address + cast(u64) Hpet_Register.COUNTER);
 
     for 1..1000 {
         #asm { cli; }
@@ -493,7 +511,7 @@ calibrate_tsc :: () -> hz: u64 {
 
         delta[2] = delta[1];
         delta[1] = delta[0];
-        delta[0] = cast(int) (tsc1 - tsc0);
+        delta[0] = cast(int, tsc1 - tsc0);
 
         abs :: (a: int) -> int {
             if a < 0 return -a;
@@ -531,7 +549,7 @@ debug_measure_tsc_drift :: () {
         sleep_until(time);
 
         tsc_now := rdtsc();
-        seconds_according_to_tsc := cast(float) (tsc_now - tsc_start) / cast(float) kernel_globals.timestamp_counter_frequency;
+        seconds_according_to_tsc := cast(float, tsc_now - tsc_start) / cast(float) kernel_globals.timestamp_counter_frequency;
 
         print("[%] TSC: % | Error: %\n", it, seconds_according_to_tsc, cast(float) it - seconds_according_to_tsc);
     }

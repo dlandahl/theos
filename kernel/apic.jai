@@ -75,12 +75,12 @@ Apic_Register :: enum {
     EXTENDED_FEATURE          :: 0x400;
 }
 
-read_apic_register :: (register: Apic_Register, loc := #caller_location) -> u32 #no_context {
+read_apic_register :: (register: Apic_Register) -> u32 #no_context {
     if kernel_globals.apic == null {
-        bluescreen(loc);
+        bluescreen();
     }
 
-    return << cast(*u32) (kernel_globals.apic + cast(u64) register);
+    return cast(*u32, kernel_globals.apic + cast(u64) register).*;
 }
 
 write_apic_register :: (register: Apic_Register, value: u32) #no_context {
@@ -88,7 +88,7 @@ write_apic_register :: (register: Apic_Register, value: u32) #no_context {
         bluescreen();
     }
 
-    << cast(*u32) (kernel_globals.apic + cast(u64) register) = value;
+    cast(*u32, kernel_globals.apic + cast(u64) register).* = value;
 }
 
 Apic_Lvt_Timer :: enum u32 {
@@ -134,10 +134,10 @@ initialize_apic :: () {
         kernel_globals.apic = cast(*void) virtual;
     }
 
-    bootstrap_core := array_add(*kernel_globals.processor_cores);
+    kernel_globals.processor_cores.count = 1;
+    bootstrap_core := *kernel_globals.processor_cores[0];
     bootstrap_core.local_apic_id = read_apic_register(.APIC_ID) >> 24;
     init_processor_core();
-
 
     #insert #run,host -> string {
         builder: String_Builder;
@@ -147,8 +147,8 @@ initialize_apic :: () {
         return builder_to_string(*builder);
     };
 
-    register_interrupt_gate(int__general_protection_fault, 13, true);
-    register_interrupt_gate(int__fault_14, 14, true);
+    register_interrupt_gate(int__general_protection_fault,      13, true);
+    register_interrupt_gate(int__fault_14,                      14, true);
     register_interrupt_gate(int__simd_floating_point_exception, 19, true);
 
     //
@@ -172,10 +172,13 @@ initialize_apic :: () {
             // Apparently we should be able to use the ONLINE_CAPABLE bit in the ics flags to determine if
             // this processor core is usable, but for some reason it's always 0 in Qemu and Vbox.
 
-            new_core := array_add(*kernel_globals.processor_cores);
+            id := kernel_globals.processor_cores.count;
+            kernel_globals.processor_cores.count += 1;
+
+            new_core := *kernel_globals.processor_cores[id];
 
             new_core.local_apic_id = lapic_ics.apic_id;
-            new_core.id = kernel_globals.processor_cores.count-1;
+            new_core.id = id;
 
           case .IO_APIC;
             assert(kernel_globals.io_apic == null);
@@ -238,7 +241,8 @@ startup_application_processors :: () {
 
         write_apic_register(.DES__INTERRUPT_DEST, it.local_apic_id << 24);
 
-        // Todo: People online are saying these need to be executed multiple times per core
+        // Todo: People online are saying these sometimes need to be executed multiple times per core
+        // Todo: Magic numbers
         command: u32;
         command = (0b101 << 8) | (1 << 14); // INIT IPI
         write_apic_register(.ICR__INTERRUPT_COMMAND, command);

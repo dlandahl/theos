@@ -57,10 +57,10 @@ Pci_Device :: union {
 };
 
 read_configuration_space :: (base_address: u64, bus: int, device: int, function: int) -> *Pci_Configuration_Space {
-    device_offset := cast(u64) (bus * 256 + device * 8 + function);
+    device_offset := cast(u64, bus * 256 + device * 8 + function);
     address := base_address + device_offset * PCI_CONFIGURATION_SPACE_SIZE;
 
-    header := cast(*Pci_Configuration_Space) (address + DIRECT_MAPPING_BASE);
+    header := cast(*Pci_Configuration_Space, address + DIRECT_MAPPING_BASE);
 
     if header.vendor_id == PCI_VENDOR_ID_NO_DEVICE {
         return null;
@@ -104,7 +104,7 @@ read_base_address_register :: (device: Pci_Device, bar_index: int) -> Pci_Bar {
         bluescreen();
     }
 
-    _64bit := cast(bool) (bar & 0b100);
+    _64bit := cast(bool, bar & 0b100);
 
     mask: u64 = 0xfffffff0;
     base: u64 = bar & mask;
@@ -128,7 +128,7 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
     uncacheable_flags := READ_WRITE | PRESENT | CACHE_DISABLE;
 
     if bar.base & 0xfff {
-        // Doesn't currently handle bars with unaligned base addresses.
+        // Doesn't currently handle BARs with unaligned base addresses.
         bluescreen();
     }
 
@@ -200,12 +200,12 @@ init_ahci_controller :: (device: Pci_Device) -> Ahci_Controller {
     }
 
     // Todo bitfield
-    num_ports := cast(int) (ahci.CAP__host_capabilities & 0b11111) + 1;
-    command_slot_count := cast(int) ((ahci.CAP__host_capabilities >> 8) & 0b11111) + 1;
+    num_ports := cast(int, ahci.CAP__host_capabilities & 0b11111) + 1;
+    command_slot_count := cast(int, (ahci.CAP__host_capabilities >> 8) & 0b11111) + 1;
 
     max_ports := 32;
 
-    for 0..max_ports - 1 {
+    for 0..max_ports-1 {
         if ahci.PI__ports_implemented & (1 << it) == 0 {
             continue;
         }
@@ -226,7 +226,7 @@ init_ahci_controller :: (device: Pci_Device) -> Ahci_Controller {
     }
 
     for 0..max_ports - 1 {
-        if ahci.PI__ports_implemented & (1 << it) == 0  continue;
+        if ahci.PI__ports_implemented & (1 << it) == 0 continue;
 
         port := *ahci.ports[it];
         if port.CMD__command_status & .SUD__spin_up_device == 0 {
@@ -240,8 +240,8 @@ init_ahci_controller :: (device: Pci_Device) -> Ahci_Controller {
         detection := port.SSTS__sata_status & .DET_MASK;
         if detection != .DET_ESTABLISHED continue;
 
-        power_mgmt := port.SSTS__sata_status & .IPM_MASK;
-        if power_mgmt != .IPM_ACTIVE {
+        ipm := port.SSTS__sata_status & .IPM_MASK;
+        if ipm != .IPM_ACTIVE {
             log_error("AHCI port power management interface state is not active. See 3.3.10 (PxSSTS)");
             return .{};
         }
@@ -255,7 +255,7 @@ init_ahci_controller :: (device: Pci_Device) -> Ahci_Controller {
         list_size := align(4096, size_of(Ahci_Command_Header) * command_slot_count);
         fis_size  := align(4096, size_of(Ahci_Received_Fis));
 
-        memory_needed := cast(u64) (list_size + fis_size + command_slot_count * 4096 + 4096);
+        memory_needed := cast(u64, list_size + fis_size + command_slot_count * 4096 + 4096);
 
         using kernel_globals;
         virtual  := cast(*void) alloc_block(*virtual_block_allocator,  memory_needed);
@@ -327,6 +327,9 @@ ahci_transfer :: (controller: *Ahci_Controller, direction: Transfer_Direction, m
 
     if sector_count == 0 return;
 
+    // DMA does not support memory accesses that cross a 64k boundary. This code splits the
+    // operation into 64k blocks
+
     first_sector_count := (0x1_0000 - memory_address % 0x1_0000) / 0x200;
     if first_sector_count > sector_count first_sector_count = sector_count;
     sector_count -= first_sector_count;
@@ -353,19 +356,22 @@ ahci_transfer_sectors :: (controller: *Ahci_Controller, direction: Transfer_Dire
     fis.command = ifx direction == .READ then Ata_Command.READ_DMA_EX else .WRITE_DMA_EX;
     fis.device = 1 << 6; // Todo magic number
 
-    fis.sectors_low = cast(u8) (sector_count);
-    fis.sectors_high = cast(u8) (sector_count >> 8);
+    fis.sectors_low  = cast(u8, sector_count);
+    fis.sectors_high = cast(u8, sector_count >> 8);
 
-    fis.lba_0 = cast(u8) (lba);
-    fis.lba_1 = cast(u8) (lba >> 8);
-    fis.lba_2 = cast(u8) (lba >> 16);
-    fis.lba_3 = cast(u8) (lba >> 24);
-    fis.lba_4 = cast(u8) (lba >> 32);
-    fis.lba_5 = cast(u8) (lba >> 40);
+    fis.lba_0 = cast(u8, lba);
+    fis.lba_1 = cast(u8, lba >> 8);
+    fis.lba_2 = cast(u8, lba >> 16);
+    fis.lba_3 = cast(u8, lba >> 24);
+    fis.lba_4 = cast(u8, lba >> 32);
+    fis.lba_5 = cast(u8, lba >> 40);
 
     table := controller.command_table[0];
     table.CFIS__command_fis = fis;
 
+    // Todo: This driver uses only one physical region at a time, in one command list entry at a time, on one port.
+    // It needs to be generalised to access drives on any port, and should dynamically allocate command lists that
+    // contain more physical region descriptors, to reduce software overhead of disk access.
     controller.command_list[0].PRDTL__prd_table_length = 1;
     controller.command_list[0].PRDBC__prd_byte_count = size_of(Ahci_Physical_Region_Descriptor);
     controller.command_list[0].flags = size_of(Ahci_Command_Fis) / 4;
@@ -382,7 +388,7 @@ ahci_transfer_sectors :: (controller: *Ahci_Controller, direction: Transfer_Dire
     Timeout(#code {
         if controller.port.SACT__sata_active & 1 > 0 continue;
 
-        ata_status := cast(u32) (Ata_Status.BUSY | .TRANSFER_REQUESTED);
+        ata_status := cast(u32, Ata_Status.BUSY | .TRANSFER_REQUESTED);
 
         if controller.port.TFD__task_file_data & ata_status > 0 {
             continue;
@@ -391,11 +397,11 @@ ahci_transfer_sectors :: (controller: *Ahci_Controller, direction: Transfer_Dire
         break;
     }, "SATA busy timeout");
 
-    assert(controller.port.CI__command_issue & 0x1 == 0);
-    controller.port.CI__command_issue |= 0x1;
+    assert(controller.port.CI__command_issue & 1 == 0);
+    controller.port.CI__command_issue |= 1;
 
     Timeout(#code {
-        if !(controller.port.CI__command_issue & 0x1) break;
+        if !(controller.port.CI__command_issue & 1) break;
     }, "SATA command issue timeout");
 }
 
@@ -439,13 +445,13 @@ Fis_Type :: enum u8 {
 }
 
 Ahci_Received_Fis :: struct {
-    DSFIS__dma_setup: [0x20] u8;
-    PSFIS__pio_setup: [0x20] u8;
+    DSFIS__dma_setup: [32] u8;
+    PSFIS__pio_setup: [32] u8;
     RFIS__d2h_register: Ahci_Command_Fis = .{ fis_type = .REGISTER_D2H };
     SDBFIS__set_device_bits: u64;
     UFIS__unknown: [64] u8;
 
-    reserved: [0x60] u8;
+    reserved: [96] u8;
 }
 
 Ahci_Command_Fis :: struct {

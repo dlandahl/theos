@@ -44,8 +44,8 @@ Kernel_Globals :: struct {
     interrupt_descriptor_table: [256] Interrupt_Gate_Descriptor #align 16;
     next_free_interrupt_gate: int;
 
-    // It's not good how we're using resizable arrays in various places that get reallocated and make behavior less consistent and predictable. Better to use something like the Bucket_Array
-    processor_cores: [..] X64_Core;
+    space_for_processor_cores: [1024] X64_Core;
+    processor_cores: [] X64_Core;
 
     apic: *void;
     io_apic: *u32;
@@ -78,7 +78,7 @@ kernel_entry :: () #no_context {
     using kernel_globals;
 
     // We should avoid using the UEFI identity map because we'll need to get rid of it once we run user processes in low memory.
-    boot_data = cast(*Boot_Data) (Boot_Data.BASE_ADDRESS + DIRECT_MAPPING_BASE);
+    boot_data = cast(*Boot_Data, Boot_Data.BASE_ADDRESS + DIRECT_MAPPING_BASE);
 
     large_pages[0].state = .RESERVED;
 
@@ -118,6 +118,7 @@ kernel_entry :: () #no_context {
     big_page := allocate_large_page();
     init_block_allocator(*physical_block_allocator, big_page, 0x20_0000);
 
+    processor_cores.data = space_for_processor_cores.data;
 
     make_kernel_context(*main_thread_context);
 
@@ -130,10 +131,10 @@ kernel_entry :: () #no_context {
 
         for y: 0..y_resolution-1 {
             for x: 0..x_resolution-1 {
-                red   := cast(int) (0xff * (1.0 / y_resolution) * y);
-                green := cast(int) (0xff * (1.0 / x_resolution) * x);
+                red   := cast(int, 0xff * (1.0 / y_resolution) * y);
+                green := cast(int, 0xff * (1.0 / x_resolution) * x);
 
-                buffer[x + y * stride] = cast(u32) ((red << 16) | (green << 8));
+                buffer[x + y * stride] = cast(u32, (red << 16) | (green << 8));
             }
         }
 
@@ -190,9 +191,9 @@ kernel_entry :: () #no_context {
         // Don't use Basic.calendar_to_apollo, because it's OS specific
         boot_time = native_calendar_to_apollo(boot_calendar_time);
 
-        // timestamp_counter_frequency = calibrate_tsc();
+        timestamp_counter_frequency = calibrate_tsc();
 
-        // core_begin_multitasking();
+        core_begin_multitasking();
 
         find_all_pci_devices();
         for pci_devices {
@@ -209,8 +210,6 @@ kernel_entry :: () #no_context {
                 }
             }
         }
-
-        while true {}
 
         startup_application_processors();
 
@@ -361,10 +360,10 @@ init_processor_core :: () #no_context {
         tss_address := cast(u64) *core.task_state_segment;
 
         tss_desc.segment_limit = size_of(Tss_With_Iopb);
-        tss_desc.base_address_0 = cast(u16)  tss_address;
-        tss_desc.base_address_1 = cast(u8)  (tss_address >> 16);
-        tss_desc.base_address_2 = cast(u8)  (tss_address >> 24);
-        tss_desc.base_address_3 = cast(u32) (tss_address >> 32);
+        tss_desc.base_address_0 = cast(u16, tss_address);
+        tss_desc.base_address_1 = cast(u8,  tss_address >> 16);
+        tss_desc.base_address_2 = cast(u8,  tss_address >> 24);
+        tss_desc.base_address_3 = cast(u32, tss_address >> 32);
         tss_desc.flags_0        = 0b1_00_0_1001; // type=TSS non-busy | PRESENT
 
         using Gdt_Entry_Flags;
@@ -437,7 +436,7 @@ bluescreen :: (loc := #caller_location) #no_context {
     using kernel_globals.framebuffer;
 
     for y: 0..y_resolution-1 for x: 0..x_resolution-1 {
-        buffer[x + y * stride] = cast(u32) (0xff2138e7);
+        buffer[x + y * stride] = cast(u32) 0xff2138e7;
     }
 
     write_string("Bluescreen!\nSource code location:\n");
@@ -517,7 +516,7 @@ find_or_add_disk_cache_entry :: (disk_address: u64) -> u64 {
     lru_entry        := *large_pages[hash_table_entry.lru_entry];
 
     Cache_Page :: (page: u64) #expand {
-        page_index := cast(s32) (page / 0x20_0000);
+        page_index := cast(s32, page / 0x20_0000);
 
         lru_entry := *large_pages[page_index];
         lru_entry.state = .DISK_CACHE;
@@ -627,7 +626,7 @@ page_pool_index_to_address :: (pool: *Physical_4k_Page_Pool, index: s32) -> u64 
     large_page := *pool.large_pages[large_page_index];
 
     if pool.large_pages_used <= large_page_index {
-        large_page.index = cast(s32) (allocate_large_page() / 0x20_0000);
+        large_page.index = cast(s32, allocate_large_page() / 0x20_0000);
         pool.large_pages_used += 1;
     }
 
@@ -677,14 +676,14 @@ get_or_create_page_table :: (table: *u64, entry: u64) -> *u64 {
 
     if table[entry] & xx PRESENT {
         physical := table[entry] & (~0xfff);
-        return cast(*u64) (physical + DIRECT_MAPPING_BASE);
+        return cast(*u64, physical + DIRECT_MAPPING_BASE);
     }
 
     address := get_4k_page();
 
     table[entry] = address | xx PRESENT | READ_WRITE;
 
-    return cast(*u64) (address + DIRECT_MAPPING_BASE);
+    return cast(*u64, address + DIRECT_MAPPING_BASE);
 }
 
 map_page :: (virtual_address: *void, physical_address: u64, flags := Page_Flags.PRESENT | .READ_WRITE) {
@@ -793,7 +792,7 @@ alloc_block :: (using allocator: *Block_Allocator, bytes_wanted: u64, loc := #ca
                 blocks[it_index+1].used = false;
             }
 
-            return cast(u64) (base_address + it.base), it.*;
+            return cast(u64, base_address + it.base), it.*;
         }
     }
 
@@ -883,21 +882,21 @@ Acpi_Table_Header :: struct {
 find_acpi_table :: (signature: string) -> *Acpi_Table_Header {
     table_size := kernel_globals.root_acpi_table.length - size_of(Acpi_Table_Header);
 
-    pointer_size := cast(u64) (ifx kernel_globals.acpi_version then 8 else 4);
+    pointer_size := cast(u64, ifx kernel_globals.acpi_version then 8 else 4);
     pointer_count := table_size / pointer_size;
 
-    table_base := cast(u64) (kernel_globals.root_acpi_table + 1);
+    table_base := cast(u64, kernel_globals.root_acpi_table + 1);
 
     for table_index: 0..pointer_count - 1 {
         offset := table_index * pointer_size + table_base;
 
-        physical_address := cast(u64) << cast(*u32) offset;
+        physical_address := cast(u64) cast(*u32, offset).*;
 
         if kernel_globals.acpi_version {
-            physical_address = << cast(*u64) offset;
+            physical_address = cast(*u64, offset).*;
         }
 
-        header := cast(*Acpi_Table_Header) (physical_address + DIRECT_MAPPING_BASE);
+        header := cast(*Acpi_Table_Header, physical_address + DIRECT_MAPPING_BASE);
 
         for 0..3 if header.signature[it] != signature[it] {
             continue table_index;
