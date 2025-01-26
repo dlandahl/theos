@@ -86,13 +86,14 @@ native_calendar_to_apollo :: (ct: Calendar_Time) -> Apollo_Time {
 }
 
 // Ported from MUSL libc
+// https://git.musl-libc.org/cgit/musl/tree/src/time/__secs_to_tm.c
 
 native_apollo_to_calendar :: (apollo: Apollo_Time) -> Calendar_Time {
     LEAPOCH :: #run calendar_to_apollo(.{year=2000, month_starting_at_0=2, day_of_month_starting_at_0=0});
 
-    DAYS_PER_400Y :: 365 * 400 + 97;
-    DAYS_PER_100Y :: 365 * 100 + 24;
-    DAYS_PER_4Y   :: 365 * 4   + 1;
+    DAYS_PER_400Y :: 146097;
+    DAYS_PER_100Y :: 36524;
+    DAYS_PER_4Y   :: 1461;
 
     seconds := to_seconds(apollo - LEAPOCH);
 
@@ -112,30 +113,29 @@ native_apollo_to_calendar :: (apollo: Apollo_Time) -> Calendar_Time {
     }
 
     weekday := (days + 3) % 7;
-    if weekday < 0 weekday += 7; // Is it possible for this to happen?
+    if weekday < 0 weekday += 7;
 
-    qc_cycles := days / DAYS_PER_400Y;
+    quad_centuries := days / DAYS_PER_400Y;
     days %= DAYS_PER_400Y;
 
     if (days < 0) {
         days += DAYS_PER_400Y;
-        qc_cycles -= 1;
+        quad_centuries -= 1;
     }
 
-    c_cycles := days / DAYS_PER_100Y;
-    if c_cycles == 4 c_cycles -= 1;
-    days -= c_cycles * DAYS_PER_100Y;
+    centuries := days / DAYS_PER_100Y;
+    if centuries == 4 centuries -= 1;
+    days -= centuries * DAYS_PER_100Y;
 
-    q_cycles := days / DAYS_PER_4Y;
-    if q_cycles == 25 q_cycles -= 1;
-    days -= q_cycles * DAYS_PER_4Y;
+    quadrennia := days / DAYS_PER_4Y;
+    if quadrennia == 25 quadrennia -= 1;
+    days -= quadrennia * DAYS_PER_4Y;
 
-    rem_years := days / 365;
-    if rem_years == 4 rem_years -= 1;
-    days -= rem_years * 365;
+    years := days / 365;
+    if years == 4 years -= 1;
+    days -= years * 365;
 
-    leap  := !rem_years && (q_cycles || !c_cycles);
-    years := rem_years + 4*q_cycles + 100*c_cycles + 400*qc_cycles;
+    years += 4*quadrennia + 100*centuries + 400*quad_centuries;
 
     days_in_month :: int.[ 31, 30, 31, 30, 31, 31, 30, 31, 30, 31, 31, 29 ];
 
@@ -152,6 +152,7 @@ native_apollo_to_calendar :: (apollo: Apollo_Time) -> Calendar_Time {
     }
 
     ct: Calendar_Time;
+
     ct.month\      _starting_at_0 = cast(s8, months + 2);
     ct.day_of_month_starting_at_0 = cast(s8, days);
     ct.day_of_week\_starting_at_0 = cast(s8, weekday);
@@ -395,11 +396,13 @@ hpet_configure_timer :: (timer_index: int, frequency: u64, periodic: bool) {
 
     timer_flags := cast(Hpet_Timer_Flags) read(register_offset + .TIMER0);
 
-    if !(timer_flags & .PERIODIC_CAPABLE)
+    if !(timer_flags & .PERIODIC_CAPABLE) {
         log("HPET timer % is not periodic capable", timer_index);
+    }
 
-    if !(timer_flags & .SIXTYFOUR_BIT_CAPABLE)
+    if !(timer_flags & .SIXTYFOUR_BIT_CAPABLE) {
         log("HPET timer % is not 64bit capable", timer_index);
+    }
 
     timer_flags |=  (.INTERRUPT_ENABLE | .WRITE_ACCUMULATOR_ENABLE);
     timer_flags &= ~ .INTERRUPT_TYPE;
