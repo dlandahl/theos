@@ -391,7 +391,9 @@ initialize_hpet :: () {
     ioapic_add_interrupt_redirection_table_entry(8, t1_gate);
 }
 
-hpet_configure_timer :: (timer_index: int, frequency: u64, periodic: bool) {
+hpet_configure_timer :: (timer_index: int, frequency: u64, periodic: bool, frequency_in_millihertz := false) {
+    assert(timer_index == 0 || timer_index == 1);
+
     hpet := *kernel_globals.high_precision_timer;
 
     register_offset := cast(Hpet_Register, 0x20 * timer_index);
@@ -419,6 +421,13 @@ hpet_configure_timer :: (timer_index: int, frequency: u64, periodic: bool) {
     ticks_per_second := cast(u64) 1_000_000_000_000_000 / hpet.tick_period_femtoseconds;
     timer.ticks_per_interrupt = ticks_per_second / frequency;
 
+    if frequency_in_millihertz {
+        timer.ticks_per_interrupt *= 1000;
+    }
+
+    if !periodic {
+        timer.ticks_per_interrupt += read(Hpet_Register.COUNTER);
+    }
     write(register_offset + .TIMER0_COMP, timer.ticks_per_interrupt);
 
     timer.counter = 0;
@@ -447,7 +456,7 @@ hpet_restart :: () {
 
 #program_export hpet_timer1_interrupt :: (data: *Interrupt_Stack()) #c_call {
     using kernel_globals.high_precision_timer;
-    timers[0].counter += 1;
+    timers[1].counter += 1;
     write_apic_register(.EOI__END_OF_INTERRUPT, 0);
 } @InterruptRoutine
 
@@ -541,6 +550,30 @@ calibrate_tsc :: () -> hz: u64 {
 
     bluescreen();
     return 0;
+}
+
+calibrate_tsc_interrupt :: () {
+    for 1..10 {
+        hpet_configure_timer(
+            timer_index = 1,
+            frequency = 1,
+            periodic = false,
+        );
+
+        tsc0 := rdtsc();
+
+        while true {
+            #asm { hlt; }
+            if kernel_globals.high_precision_timer.timers[1].counter > 0 {
+                break;
+            }
+        }
+
+        tsc1 := rdtsc();
+        frequency := tsc1 - tsc0;
+
+        log("Frequency according to 1 second interrupt calibration: %\n", frequency);
+    }
 }
 
 debug_measure_tsc_drift :: () {
