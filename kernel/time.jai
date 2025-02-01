@@ -69,12 +69,13 @@ native_calendar_to_apollo :: (ct: Calendar_Time) -> Apollo_Time {
 
     seconds += cumulative_days[ct.month_starting_at_0] * 86400;
 
-    is_leap_year := (ct.year % 4 == 0) && (!(ct.year % 100 == 0) || (ct.year % 400 == 0));
+    is_leap_year := (ct.year % 4 == 0) && ((ct.year % 100 != 0) || (ct.year % 400 == 0));
+
     if ct.month_starting_at_0 > 1 && is_leap_year {
         seconds += 86400;
     }
 
-    seconds += 86400 * cast(int) ct.day_of_month_starting_at_0;
+    seconds += cast(int) ct.day_of_month_starting_at_0 * 86400;
     seconds += cast(int) ct.hour * 60 * 60;
     seconds += cast(int) ct.minute * 60;
     seconds += cast(int) ct.second;
@@ -82,6 +83,7 @@ native_calendar_to_apollo :: (ct: Calendar_Time) -> Apollo_Time {
     apollo := seconds_to_apollo(seconds);
     apollo += milliseconds_to_apollo(ct.millisecond);
     apollo += APOLLO_TIME_FOR_JAN_1_1970;
+
     return apollo;
 }
 
@@ -91,9 +93,9 @@ native_calendar_to_apollo :: (ct: Calendar_Time) -> Apollo_Time {
 native_apollo_to_calendar :: (apollo: Apollo_Time) -> Calendar_Time {
     LEAPOCH :: #run calendar_to_apollo(.{year=2000, month_starting_at_0=2, day_of_month_starting_at_0=0});
 
-    DAYS_PER_400Y :: 146097;
-    DAYS_PER_100Y :: 36524;
-    DAYS_PER_4Y   :: 1461;
+    DAYS_PER_QUAD_CENTURY :: 146097;
+    DAYS_PER_CENTURY      :: 36524;
+    DAYS_PER_QUADRENNIUM  :: 1461;
 
     seconds := to_seconds(apollo - LEAPOCH);
 
@@ -115,21 +117,21 @@ native_apollo_to_calendar :: (apollo: Apollo_Time) -> Calendar_Time {
     weekday := (days + 3) % 7;
     if weekday < 0 weekday += 7;
 
-    quad_centuries := days / DAYS_PER_400Y;
-    days %= DAYS_PER_400Y;
+    quad_centuries := days / DAYS_PER_QUAD_CENTURY;
+    days %= DAYS_PER_QUAD_CENTURY;
 
-    if (days < 0) {
-        days += DAYS_PER_400Y;
+    if days < 0 {
+        days += DAYS_PER_QUAD_CENTURY;
         quad_centuries -= 1;
     }
 
-    centuries := days / DAYS_PER_100Y;
+    centuries := days / DAYS_PER_CENTURY;
     if centuries == 4 centuries -= 1;
-    days -= centuries * DAYS_PER_100Y;
+    days -= centuries * DAYS_PER_CENTURY;
 
-    quadrennia := days / DAYS_PER_4Y;
+    quadrennia := days / DAYS_PER_QUADRENNIUM;
     if quadrennia == 25 quadrennia -= 1;
-    days -= quadrennia * DAYS_PER_4Y;
+    days -= quadrennia * DAYS_PER_QUADRENNIUM;
 
     years := days / 365;
     if years == 4 years -= 1;
@@ -138,10 +140,9 @@ native_apollo_to_calendar :: (apollo: Apollo_Time) -> Calendar_Time {
     years += 4*quadrennia + 100*centuries + 400*quad_centuries;
 
     days_in_month :: int.[ 31, 30, 31, 30, 31, 31, 30, 31, 30, 31, 31, 29 ];
+    months := 0;
 
-    months: int;
-    while true {
-        if days_in_month[months] > days break;
+    while days_in_month[months] <= days {
         days -= days_in_month[months];
         months += 1;
     }
@@ -259,6 +260,7 @@ rtc_get_calendar_time :: () -> Calendar_Time {
     cal.second = cast(s8)  rtc_read(.SECONDS);
 
     fadt := kernel_globals.fadt;
+
     if fadt && fadt.century {
         century := cast(s32) rtc_read(cast(Rtc_Register) fadt.century);
         cal.year += century * 100;

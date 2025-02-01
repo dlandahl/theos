@@ -256,8 +256,6 @@ ap_startup_bin :: #run,host -> [] u8 {
     #import "Compiler";
     #import "File";
 
-    context.allocator = Context_Base.default_allocator;
-
     code := read_entire_file(".build/ap_startup.bin");
     return add_global_data(cast([] u8) code, .WRITABLE);
 }
@@ -557,7 +555,7 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
     value: u64;
 
     #asm {
-        address === d;
+        address === d;
         value   === a;
     }
 
@@ -627,8 +625,9 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
 }
 
 #program_export uacpi_kernel_alloc :: (size: uacpi_size) -> *void #c_call {
-    // Not currently thread synced, and alloc_block is not efficient for small allocations.
     push_context {
+        Scoped_Acquire(*kernel_globals.memory_spinlock);
+
         phys := alloc_block(*kernel_globals.physical_block_allocator, size);
         virt := cast(*void) phys + DIRECT_MAPPING_BASE;
 
@@ -637,10 +636,11 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
 }
 
 #program_export uacpi_kernel_calloc :: (count: uacpi_size, size: uacpi_size) -> *void #c_call {
-    // Comment in uacpi_kernel_alloc applies
     size_bytes := size*count;
 
     push_context {
+        Scoped_Acquire(*kernel_globals.memory_spinlock);
+
         phys := alloc_block(*kernel_globals.physical_block_allocator, size_bytes);
         virt := cast(*void) phys + DIRECT_MAPPING_BASE;
 
@@ -650,10 +650,11 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
 }
 
 #program_export uacpi_kernel_free :: (mem: *void) #c_call {
-    // Comment in uacpi_kernel_alloc applies
     if mem == null return;
 
     push_context {
+        Scoped_Acquire(*kernel_globals.memory_spinlock);
+
         phys := cast(u64) mem - DIRECT_MAPPING_BASE;
         free_block(*kernel_globals.physical_block_allocator, phys);
     }
@@ -696,7 +697,6 @@ next_event_handle: uacpi_handle = xx 1;
 }
 
 #program_export uacpi_kernel_free_mutex :: (handle: uacpi_handle) #c_call {
-    // Do nothing
 }
 
 #program_export uacpi_kernel_create_event :: () -> uacpi_handle #c_call {
@@ -706,11 +706,11 @@ next_event_handle: uacpi_handle = xx 1;
 }
 
 #program_export uacpi_kernel_free_event :: () #c_call {
-    // Do nothing
 }
 
 #program_export uacpi_kernel_get_thread_id :: () -> uacpi_thread_id #c_call {
-    return cast(*void) 1;
+    core := get_current_core();
+    return xx core.scheduler.current_task.id;
 }
 
 #program_export uacpi_kernel_acquire_mutex :: (handle: uacpi_handle, timeout: uacpi_u16) -> uacpi_status #c_call {
@@ -718,7 +718,6 @@ next_event_handle: uacpi_handle = xx 1;
 }
 
 #program_export uacpi_kernel_release_mutex :: (handle: uacpi_handle) #c_call {
-    // Do nothing
 }
 
 #program_export uacpi_kernel_wait_for_event :: (handle: uacpi_handle, timeout: uacpi_u16) -> uacpi_bool #c_call {

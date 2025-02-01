@@ -198,6 +198,7 @@ kernel_entry :: () #no_context {
         find_all_pci_devices();
         for pci_devices {
             if it.class_code == .MASS_STORAGE && it.subclass == 0x6 {
+
                 controller := init_ahci_controller(it);
                 memory := allocate_large_page();
                 ahci_transfer(*controller, .READ, memory, 512, 0);
@@ -1023,7 +1024,7 @@ sequence_read :: (lock: *Sequence_Lock, body: Code) #expand {
 
             if (sequence & 1) == 0 break;
 
-            #asm { pause; pause; pause; pause; }
+            #asm { pause; }
         }
         load_fence();
 
