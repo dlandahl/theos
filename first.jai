@@ -62,17 +62,17 @@ main :: () {
 
     if do_bootloader && !compile_bootloader() {
         log_error("Failed to compile the bootloader.\n");
-        return;
+        exit(1);
     }
 
     if do_kernel && !compile_kernel() {
         log_error("Failed to compile the kernel.\n");
-        return;
+        exit(1);
     }
 
     if !format_disk() {
         log_error("Failed to format the hard disk.\n");
-        return;
+        exit(1);
     }
 }
 
@@ -265,8 +265,8 @@ format_disk :: () -> success: bool {
     log("Formatting disk image\n\n");
 
     script :: string.[
-        "dd if=/dev/zero of=fat.img bs=1k count=1440",
-        "mformat -i fat.img -f 1440 ::",
+        "dd if=/dev/zero of=fat.img bs=1k count=2880",
+        "mformat -i fat.img -f 2880 ::",
         "mmd -i fat.img ::/EFI",
         "mmd -i fat.img ::/EFI/BOOT",
         "mcopy -i fat.img .build/bootx64.efi ::/EFI/BOOT",
@@ -288,7 +288,7 @@ format_disk :: () -> success: bool {
         result := run_command(.. command);
 
         if result.exit_code != 0 {
-            log_error("mtools disk formatting command failed. Please make sure mtools is installed.");
+            log_error("mtools disk formatting command failed: (\"%\").\nPlease make sure mtools is installed.", it);
             return false;
         }
     }

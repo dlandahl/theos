@@ -34,7 +34,6 @@ Kernel_Globals :: struct {
     physical_page_pool: Physical_4k_Page_Pool(1024);
     physical_block_allocator: Block_Allocator;
     virtual_block_allocator: Block_Allocator;
-    uncacheable_block_allocator: Block_Allocator;
 
     root_acpi_table: *Acpi_Table_Header;
     acpi_version: int;
@@ -44,7 +43,9 @@ Kernel_Globals :: struct {
     interrupt_descriptor_table: [256] Interrupt_Gate_Descriptor #align 16;
     next_free_interrupt_gate: int;
 
-    space_for_processor_cores: [1024] X64_Core;
+    // This takes up a lot of static memory, as each core contains an 8Kb IO permission bitmap.
+    // We could use the same IOPB, but it's addressed by a 16-bit relative pointer in the TSS, which needs to be per core.
+    space_for_processor_cores: [64] X64_Core;
     processor_cores: [] X64_Core;
 
     apic: *void;
@@ -1110,9 +1111,9 @@ debug_print_physical_memory_map :: () {
     }
 }
 
-align :: (alignment: int, value: int) -> int #no_context {
+align :: (alignment: int, value: $T) -> T #no_context {
     // if popcount(alignment) != 1 bluescreen();
-    return (value + (alignment - 1)) & -alignment;
+    return cast(T, (cast,no_check(int, value) + (alignment - 1)) & -alignment);
 }
 
 Timeout :: (code: Code, message := "", time := 1000) #expand {

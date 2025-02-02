@@ -25,10 +25,10 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         boot_data := cast(*Boot_Data) boot_data_address;
         boot_data.* = .{};
 
-        // Even though this mapping is not needed while boot-services are still active, we create it in the boot-services memory map anyway, so that it gets reported by GetMemoryMap, and the kernel will know the memory is not available.
-        // Todo: this call fails on VirtualBox
-        kernel_base: u64 = Boot_Data.KERNEL_PHYS_BASE;
-        EFI_CHECK(boot_services.AllocatePages(.AllocateAddress, UserReservedMemoryType, 0x10_0000 / 4096, *kernel_base));
+        // Memory for the kernel executable
+        kernel_base: *void;
+        EFI_CHECK(boot_services.AllocatePool(UserReservedMemoryType, 0x40_0000, *kernel_base));
+        kernel_base = cast(*void, (cast(s64) kernel_base + (0x20_0000 - 1)) & -0x20_0000);
 
         {
             // Get framebuffer and clear the screen
@@ -73,7 +73,6 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         }
 
 
-
         // All this stuff is to load the kernel ELF file from the EFI filesystem
 
         loaded_image_protocol: *EFI_LOADED_IMAGE_PROTOCOL;
@@ -101,7 +100,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         EFI_CHECK(boot_volume.GetInfo(boot_volume, *EFI_FILE_INFO_GUID, xx *info_size, *file_info));
 
-        size: u64 = 0x10_0000; // file_info.FileSize; // For some reason FileSize is zero, even though boot_volume.GetInfo claims to have returned a valid File_Info
+        size: u64 = 0x20_0000; // file_info.FileSize; // For some reason FileSize is zero, even though boot_volume.GetInfo claims to have returned a valid File_Info
         load_buffer: *void;
 
         EFI_CHECK(boot_services.AllocatePool(.EfiLoaderData, size, *load_buffer));
@@ -173,7 +172,8 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
             using boot_data.page_tables;
 
-            PAGE_PRESENT    : u64 : 0x1 | 0x4; // Adding the USER/SUPERVISOR bit to all pages so we can do stuff in ring 3 and not think about this yet.
+            PAGE_USER       : u64 : 0x4;
+            PAGE_PRESENT    : u64 : 0x1 | PAGE_USER; // Adding the USER/SUPERVISOR bit to all pages so we can do stuff in ring 3 and not think about this yet.
             PAGE_READ_WRITE : u64 : 0x2;
             PAGE_SIZE       : u64 : 0x80;
 
@@ -194,11 +194,14 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             }
 
             // 8Mb higher-half memory for the kernel.
+            virtual_base : u64 : 0xffff_ffff_8000_0000;
             pml4[0x1ff] = cast(u64) pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
             pdpt[0x1fe] = cast(u64) pd.data   | PAGE_PRESENT | PAGE_READ_WRITE;
 
+            // Todo: these page directory indeces are hardcoded in a few places below.
+            // Maybe have a table that defines the map of the top two gigabytes of virtual memory.
             for 0..3 {
-                address := Boot_Data.KERNEL_PHYS_BASE + cast(u64) it * 0x20_0000;
+                address := cast(u64) kernel_base + cast(u64) it * 0x20_0000;
                 pd[it] = address | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             }
 
@@ -214,7 +217,6 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
                 }
             }
 
-            virtual_base : u64 : 0xffff_ffff_8000_0000;
             offset := cast(u64) boot_data.framebuffer.buffer & 0x1fffff;
 
             // Map the framebuffer. Todo: enable write combining for this memory
@@ -348,6 +350,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             elf_header := cast(*Elf64_Ehdr) elf;
 
             for 0..elf_header.e_phnum-1 {
+
                 base := elf + elf_header.e_phoff;
                 base += it  * elf_header.e_phentsize;
                 program_header := cast(*Elf64_Phdr) base;
@@ -440,3 +443,72 @@ ascii_to_wide :: (input: string, buffer: [] u16) -> *u16 {
 
 #program_export
 __chkstk :: () {}
+
+serial_out :: (data: string) #no_context {
+    COM1 :: 0x3f8;
+
+    for cast([] u8) data {
+        for 1..10_0000 {
+            status: u8;
+            port := COM1 + 5;
+
+            #asm {
+                status === a;
+                port   === d;
+                in.b status, port;
+            }
+
+            if status & 0x20 break;
+
+            #asm { pause; }
+        }
+
+        byte := it;
+        port := COM1;
+
+        #asm {
+            byte === a;
+            port === d;
+            out.b port, byte;
+        }
+    }
+}
+
+write_nonnegative_number :: (n: u64, base := 10, to_standard_error := false) {
+    if n == 0 {
+        display_string("0");
+        return;
+    }
+
+    if base > 16  base = 16;
+    if base < 2   base = 2;
+
+    ubase := cast,no_check(u64) base;
+
+    // This is of course a horrible hack.
+    // A u64 in base 2 can be up to 64 digits,
+    // so we need at least that much space. Add a few more digits for superstition.
+    buf: [69] u8;
+
+    starting_cursor : s32 = buf.count;
+    cursor := starting_cursor;
+
+
+    while n {
+        cursor -= 1;
+        index := n % ubase;
+        if index <= 9 {
+            buf[cursor] = cast(u8)(index + #char "0");
+        } else {
+            buf[cursor] = cast(u8)(index - 10 + #char "a");
+        }
+
+        n /= ubase;
+    }
+
+    s: string = ---;
+    s.data  = buf.data + cursor;
+    s.count = starting_cursor - cursor;
+    display_string(s);
+    display_string("\n");
+}

@@ -32,7 +32,6 @@ Boot_Data :: struct {
     BASE_ADDRESS :: 0x10_0000;
 
     page_directories_used: int;
-    KERNEL_PHYS_BASE :: 0x600_0000;
 
     framebuffer: Framebuffer;
 

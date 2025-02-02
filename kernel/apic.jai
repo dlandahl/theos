@@ -137,6 +137,7 @@ initialize_apic :: () {
     kernel_globals.processor_cores.count = 1;
     bootstrap_core := *kernel_globals.processor_cores[0];
     bootstrap_core.local_apic_id = read_apic_register(.APIC_ID) >> 24;
+
     init_processor_core();
 
     #insert #run,host -> string {
@@ -263,6 +264,7 @@ ap_startup_bin :: #run,host -> [] u8 {
 ap_startup_spinlock: Spinlock;
 
 ap_entry_point :: () #c_call {
+
     release(*ap_startup_spinlock);
 
     push_context {
@@ -555,7 +557,7 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
     value: u64;
 
     #asm {
-        address === d;
+        address === d;
         value   === a;
     }
 
