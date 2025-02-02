@@ -28,6 +28,8 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         // Memory for the kernel executable
         kernel_base: *void;
         EFI_CHECK(boot_services.AllocatePool(UserReservedMemoryType, 0x40_0000, *kernel_base));
+        // Aligning this to 2MB is necessary because we map it as large pages, but this potentially wastes a lot of memory.
+        // Maybe we can use one of the other UEFI allocators.
         kernel_base = cast(*void, (cast(s64) kernel_base + (0x20_0000 - 1)) & -0x20_0000);
 
         {

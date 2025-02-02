@@ -1,6 +1,7 @@
 
 #import "Basic";
 #import "Machine_X64";
+#import "Bit_Operations";
 
 #import "Bitfield";
 set :: bitfield_set;
@@ -147,7 +148,9 @@ kernel_entry :: () #no_context {
         heap_base := DIRECT_MAPPING_BASE + direct_mapping_size;
         heap_size := 64 * GB;
 
-        init_block_allocator(*virtual_block_allocator, cast(u64) heap_base, cast(u64) heap_size);
+        // Keep virtual allocations page aligned, since virtual memory always needs to be mapped anyway.
+        alignment := 4096;
+        init_block_allocator(*virtual_block_allocator, cast(u64) heap_base, cast(u64) heap_size, alignment);
 
 
         // Sequentially allocating interrupt gates, starting after the ISA exceptions
@@ -668,7 +671,7 @@ get_4k_page :: (pool: *Physical_4k_Page_Pool) -> u64 #no_context {
 }
 
 free_4k_page :: (pool: *Physical_4k_Page_Pool, address: u64) #no_context {
-
+    // Todo
 }
 
 
@@ -688,8 +691,8 @@ get_or_create_page_table :: (table: *u64, entry: u64) -> *u64 {
     return cast(*u64, address + DIRECT_MAPPING_BASE);
 }
 
-map_page :: (virtual_address: *void, physical_address: u64, flags := Page_Flags.PRESENT | .READ_WRITE) {
-    map_page(cast(u64) virtual_address, physical_address);
+map_page :: (virtual_address: *void, physical_address: u64, flags := Page_Flags.PRESENT | .READ_WRITE, loc := #caller_location) {
+    map_page(cast(u64) virtual_address, physical_address, flags, loc);
 }
 
 map_page :: (virtual_address: u64, physical_address: u64, flags := Page_Flags.PRESENT | .READ_WRITE, loc := #caller_location) {
@@ -749,9 +752,10 @@ Block_Allocator :: struct {
 
     base_address: u64;
     max_size: u64;
+    alignment: int;
 }
 
-init_block_allocator :: (allocator: *Block_Allocator, base_address: u64, max_size: u64) #no_context {
+init_block_allocator :: (allocator: *Block_Allocator, base_address: u64, max_size: u64, alignment := 0) #no_context {
     // Use a large page to hold block descriptors
     page := allocate_large_page();
 
@@ -760,6 +764,7 @@ init_block_allocator :: (allocator: *Block_Allocator, base_address: u64, max_siz
 
     allocator.base_address = base_address;
     allocator.max_size = max_size;
+    allocator.alignment = alignment;
 
     allocator.blocks.count = 1;
     allocator.blocks[0] = .{
@@ -769,7 +774,15 @@ init_block_allocator :: (allocator: *Block_Allocator, base_address: u64, max_siz
     };
 }
 
-alloc_block :: (using allocator: *Block_Allocator, bytes_wanted: u64, loc := #caller_location) -> address: u64, Block_Desc #no_context {
+alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: u64, loc := #caller_location) -> address: u64, Block_Desc #no_context {
+
+    bytes_wanted: u64;
+
+    if alignment {
+        bytes_wanted = align(alignment, unaligned_bytes_wanted);
+    } else {
+        bytes_wanted = unaligned_bytes_wanted;
+    }
 
     for* blocks {
         if !it.used && it.size >= bytes_wanted {
@@ -1111,9 +1124,22 @@ debug_print_physical_memory_map :: () {
     }
 }
 
-align :: (alignment: int, value: $T) -> T #no_context {
-    // if popcount(alignment) != 1 bluescreen();
-    return cast(T, (cast,no_check(int, value) + (alignment - 1)) & -alignment);
+align :: (alignment: $T, value: $V) -> V #no_context {
+    #assert size_of(T) == 8;
+    #assert size_of(V) == 8;
+
+    return cast(V) align(cast(int) alignment, cast(int) value);
+}
+
+align :: (alignment: int, value: int) -> int #no_context {
+    if alignment == 0 return value;
+
+    // This only works for powers of two.
+    if popcount(alignment) != 1 {
+        bluescreen();
+    }
+
+    return (value + (alignment - 1)) & -alignment;
 }
 
 Timeout :: (code: Code, message := "", time := 1000) #expand {

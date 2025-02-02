@@ -132,11 +132,9 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
         bluescreen();
     }
 
-    // Map an extra 4k, since block allocations are not page aligned, and we need to align up to map the memory.
-    virtual := alloc_block(*kernel_globals.virtual_block_allocator, bar.limit + 4096);
-    virtual = (virtual + xx (4096 - 1)) & xx,no_check (-4096);
+    virtual := alloc_block(*kernel_globals.virtual_block_allocator, bar.limit);
 
-    for 0..bar.limit / 4096 {
+    for 0..(bar.limit-1) / 4096 {
         offset := it * 4096;
         map_page(virtual + offset, bar.base + offset, uncacheable_flags);
     }
@@ -261,7 +259,7 @@ init_ahci_controller :: (device: Pci_Device) -> Ahci_Controller {
         virtual  := cast(*void) alloc_block(*virtual_block_allocator,  memory_needed);
         physical :=             alloc_block(*physical_block_allocator, memory_needed);
 
-        virtual  = xx align(4096, xx virtual);
+        // The virtual memory gets aligned by the allocator
         physical = xx align(4096, xx physical);
 
         page_flags := Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE;
