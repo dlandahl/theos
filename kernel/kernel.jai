@@ -57,8 +57,6 @@ Kernel_Globals :: struct {
 
     main_thread_context: #Context;
 
-    memory_spinlock: Spinlock;
-
     tasks: Bucket_Array(Task_Info, 256, always_iterate_by_pointer=true);
     next_task_id: int;
     add_task_info_struct_spinlock: Spinlock;
@@ -82,6 +80,7 @@ kernel_entry :: () #no_context {
     // We should avoid using the UEFI identity map because we'll need to get rid of it once we run user processes in low memory.
     boot_data = cast(*Boot_Data, Boot_Data.BASE_ADDRESS + DIRECT_MAPPING_BASE);
 
+    // Used for AP bootstrap.
     large_pages[0].state = .RESERVED;
 
     memory_map_index: int;
@@ -283,7 +282,6 @@ make_kernel_context :: (c: *#Context) #no_context {
     c.print_style.default_format_struct.use_newlines_if_long_form = true;
 
     c.allocator.proc = (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
-        Scoped_Acquire(*kernel_globals.memory_spinlock);
 
         if mode == .ALLOCATE || mode == .RESIZE {
             if size == 0 {
@@ -322,10 +320,8 @@ make_kernel_context :: (c: *#Context) #no_context {
     };
 
     {
-        acquire(*kernel_globals.memory_spinlock);
         ts_buffer_block := alloc_block(*kernel_globals.physical_block_allocator, 0x2000);
         c.temporary_storage = cast(*Temporary_Storage) get_4k_page();
-        release(*kernel_globals.memory_spinlock);
 
         ts_buffer := cast(*void) ts_buffer_block + DIRECT_MAPPING_BASE;
 
@@ -462,13 +458,13 @@ Large_Page_Allocator :: struct {
     lru_least: s32;
     lru_most:  s32;
 
-    lock: Recursive_Spinlock;
+    spinlock: Recursive_Spinlock;
 }
 
 allocate_large_page :: () -> u64 #no_context {
 
     using kernel_globals.large_page_allocator;
-    acquire(*lock);
+    Scoped_Acquire(*spinlock);
 
     if freelist != FREELIST_TAIL {
         address := freelist * 0x20_0000;
@@ -483,7 +479,7 @@ allocate_large_page :: () -> u64 #no_context {
     while max_large_page_used < kernel_globals.large_pages.count {
         desc := *kernel_globals.large_pages[max_large_page_used];
 
-        page := max_large_page_used * 0x20_0000;
+        address := max_large_page_used * 0x20_0000;
         max_large_page_used += 1;
 
         if desc.state == .RESERVED {
@@ -491,7 +487,7 @@ allocate_large_page :: () -> u64 #no_context {
         }
 
         desc.state = .ALLOCATED;
-        return cast(u64) page;
+        return cast(u64) address;
     }
 
     // There are no free large pages, evict one from the disk cache.
@@ -499,10 +495,10 @@ allocate_large_page :: () -> u64 #no_context {
         desc := *kernel_globals.large_pages[lru_least];
         desc.state = .ALLOCATED;
 
-        page := cast(u64) lru_least * 0x20_0000;
-        evict_disk_cache_entry(page);
+        address := cast(u64) lru_least * 0x20_0000;
+        evict_disk_cache_entry(address);
 
-        return page;
+        return address;
     }
 
     // There's no free memory
@@ -512,7 +508,7 @@ allocate_large_page :: () -> u64 #no_context {
 
 find_or_add_disk_cache_entry :: (disk_address: u64) -> u64 {
     using kernel_globals;
-    Scoped_Acquire(*large_page_allocator.lock);
+    Scoped_Acquire(*large_page_allocator.spinlock);
 
     block_index := disk_address / 0x20_0000;
     block_hash  := block_index % cast(u64) large_pages.count;
@@ -621,7 +617,7 @@ Physical_4k_Page_Pool :: struct(page_count: int) {
 
     large_pages_used: s32;
 
-    lock: Spinlock;
+    spinlock: Spinlock;
 }
 
 page_pool_index_to_address :: (pool: *Physical_4k_Page_Pool, index: s32) -> u64 #no_context {
@@ -649,7 +645,7 @@ get_4k_page :: () -> u64 #no_context {
 
 get_4k_page :: (pool: *Physical_4k_Page_Pool) -> u64 #no_context {
     using pool;
-    Scoped_Acquire(*lock);
+    Scoped_Acquire(*spinlock);
 
     if freelist_length != 0 {
         freelist_length -= 1;
@@ -753,6 +749,8 @@ Block_Allocator :: struct {
     base_address: u64;
     max_size: u64;
     alignment: int;
+
+    spinlock: Spinlock;
 }
 
 init_block_allocator :: (allocator: *Block_Allocator, base_address: u64, max_size: u64, alignment := 0) #no_context {
@@ -775,6 +773,7 @@ init_block_allocator :: (allocator: *Block_Allocator, base_address: u64, max_siz
 }
 
 alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: u64, loc := #caller_location) -> address: u64, Block_Desc #no_context {
+    Scoped_Acquire(*spinlock);
 
     bytes_wanted: u64;
 
@@ -816,13 +815,11 @@ alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: u64, 
     return 0, .{};
 }
 
-free_block :: (allocator: *Block_Allocator, address: u64) -> bool {
+free_block :: (using allocator: *Block_Allocator, address: u64) -> bool {
+    Scoped_Acquire(*spinlock);
+
     // Find the block corresponding to that address using linear search
-
     looking_for := address - allocator.base_address;
-
-    blocks := allocator.blocks;
-    defer allocator.blocks = blocks;
 
     m := -1;
 

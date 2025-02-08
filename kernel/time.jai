@@ -463,7 +463,7 @@ hpet_restart :: () {
 
 
 calibrate_tsc :: () -> hz: u64 {
-    // Try to read TSC frequency from CPUID. Modern CPUs support it, but it's not supported on either VirtualBox nor QEMU, so fallback to manual timing using HPET.
+    // Try to read TSC frequency from CPUID. Modern CPUs support it, but even fairly recent ones don't, so fallback to manual timing using HPET.
     eax, ebx, ecx, edx: u64;
 
     #asm {
@@ -527,6 +527,8 @@ calibrate_tsc :: () -> hz: u64 {
         delta[1] = delta[0];
         delta[0] = cast(int, tsc1 - tsc0);
 
+        if it < 3 continue;
+
         abs :: (a: int) -> int {
             if a < 0 return -a;
             return a;
@@ -541,10 +543,6 @@ calibrate_tsc :: () -> hz: u64 {
 
             log("Calibrating TSC took % 50ms calibration runs, frequency is %", it, frequency);
             return frequency;
-        }
-
-        if it % 3 == 0 {
-            // max_error += 1000;
         }
     }
 

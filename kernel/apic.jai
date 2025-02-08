@@ -4,59 +4,61 @@ Acpi_Madt :: struct {
 
     local_apic_address: u32;
     flags: u32;
+}
 
-    Interrupt_Controller_Structure :: struct {
-        subtype: Subtype;
-        length: u8;
+Interrupt_Controller_Structure :: struct {
+    subtype: Subtype;
+    length: u8;
 
-        Subtype :: enum u8 {
-            LOCAL_APIC                :: 0;
-            IO_APIC                   :: 1;
-            INTERRUPT_SOURCE_OVERRIDE :: 2;
-            NON_MASKABLE_INTERRUPT    :: 4;
-            LAPIC_ADDRESS_OVERRIDE    :: 5;
-            LOCAL_X2APIC              :: 9;
-        }
-    }
-
-    Ics_Local_Apic :: struct {
-        using ics: Interrupt_Controller_Structure;
-
-        acpi_processor_uid: u8;
-        apic_id: u8;
-
-        flags: enum_flags u32 {
-            ENABLED           :: 0x1;
-            ONLINE_CAPABLE    :: 0x2;
-        };
-    }
-
-    Ics_Io_Apic :: struct {
-        using ics: Interrupt_Controller_Structure;
-
-        io_apic_id: u8;
-        reserved: u8;
-        address: u32;
-        global_system_interrupt_base: u32;
-    }
-
-    Ics_Source_Override :: struct {
-        using ics: Interrupt_Controller_Structure;
-
-        bus: u8;
-        source: u8;
-        global_system_interrupt: u32;
-        flags: u16;
-    }
-
-    Ics_Non_Maskable_Interrupt :: struct {
-        using ics: Interrupt_Controller_Structure;
-
-        processor_uid: u8;
-        flags: u16 #align 1;
-        lapic_lint: u8;
+    Subtype :: enum u8 {
+        LOCAL_APIC                :: 0;
+        IO_APIC                   :: 1;
+        INTERRUPT_SOURCE_OVERRIDE :: 2;
+        NON_MASKABLE_INTERRUPT    :: 4;
+        LAPIC_ADDRESS_OVERRIDE    :: 5;
+        LOCAL_X2APIC              :: 9;
     }
 }
+
+Ics_Local_Apic :: struct {
+    using ics: Interrupt_Controller_Structure;
+
+    acpi_processor_uid: u8;
+    apic_id: u8;
+
+    flags: enum_flags u32 {
+        ENABLED           :: 0x1;
+        ONLINE_CAPABLE    :: 0x2;
+    };
+}
+
+Ics_Io_Apic :: struct {
+    using ics: Interrupt_Controller_Structure;
+
+    io_apic_id: u8;
+    reserved: u8;
+    address: u32;
+    global_system_interrupt_base: u32;
+}
+
+Ics_Source_Override :: struct {
+    using ics: Interrupt_Controller_Structure;
+
+    bus: u8;
+    source: u8;
+    global_system_interrupt: u32;
+    flags: u16;
+}
+
+Ics_Non_Maskable_Interrupt :: struct {
+    using ics: Interrupt_Controller_Structure;
+
+    processor_uid: u8;
+    flags: u16 #align 1;
+    lapic_lint: u8;
+}
+
+
 
 Apic_Register :: enum {
     APIC_ID                   :: 0x20;
@@ -142,14 +144,13 @@ initialize_apic :: () {
 
     #insert #run,host -> string {
         builder: String_Builder;
-        for 0..12 {
-            print(*builder, "register_interrupt_gate(int__fault_%1, %1, true);\n", it);
+        for 0..31 {
+            print(*builder, "register_interrupt_gate(int__default_isa_fault_handler_%1, %1, true);\n", it);
         }
         return builder_to_string(*builder);
     };
 
     register_interrupt_gate(int__general_protection_fault,      13, true);
-    register_interrupt_gate(int__fault_14,                      14, true);
     register_interrupt_gate(int__simd_floating_point_exception, 19, true);
 
     //
@@ -159,12 +160,13 @@ initialize_apic :: () {
     cursor := cast(u64) acpi_header + size_of(Acpi_Madt);
 
     while cursor < cast(u64) acpi_header + acpi_header.length {
-        ics := cast(*Acpi_Madt.Interrupt_Controller_Structure) cursor;
+
+        ics := cast(*Interrupt_Controller_Structure) cursor;
         defer cursor += ics.length;
 
         if ics.subtype == {
           case .LOCAL_APIC;
-            lapic_ics := cast(*Acpi_Madt.Ics_Local_Apic) ics;
+            lapic_ics := cast(*Ics_Local_Apic) ics;
 
             if lapic_ics.apic_id == bootstrap_core.local_apic_id {
                 continue;
@@ -184,7 +186,7 @@ initialize_apic :: () {
           case .IO_APIC;
             assert(kernel_globals.io_apic == null);
 
-            ioapic_ics := cast(*Acpi_Madt.Ics_Io_Apic) ics;
+            ioapic_ics := cast(*Ics_Io_Apic) ics;
 
             virtual := alloc_block(*kernel_globals.virtual_block_allocator, 4096);
             map_page(virtual, ioapic_ics.address, Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE);
@@ -194,7 +196,7 @@ initialize_apic :: () {
             assert(ioapic_ics.address == 0xfec0_0000);
 
           case .INTERRUPT_SOURCE_OVERRIDE;
-            iso := cast(*Acpi_Madt.Ics_Source_Override) ics;
+            iso := cast(*Ics_Source_Override) ics;
             // Todo
         }
     }
@@ -202,8 +204,8 @@ initialize_apic :: () {
     timer_gate := allocate_interrupt_gate();
     register_interrupt_gate(int__local_apic_timer_interrupt, timer_gate);
 
-    // Store this, to be able to configure the LAPIC of all CPUs to use the same interrupt handler.
-    // In the future we might not need LAPIC timer if we only support CPUs with the TSC deadline feature.
+    // Store this, to be able to configure the APIC timer of all CPUs to use the same interrupt handler.
+    // In the future we might not need the APIC timer if we only support CPUs with the TSC deadline feature.
     kernel_globals.local_apic_timer_interrupt_gate = timer_gate;
 }
 
@@ -231,18 +233,16 @@ startup_application_processors :: () {
         }
 
         // This lock is to ensure that APs have time to copy their stack's base address into their stack register before the next AP is started up.
-        // Maybe if processors could use their APIC ID to find their stack memory it would be faster
+        // Maybe if processors could use their APIC ID to find their stack memory it would be faster.
         acquire(*ap_startup_spinlock);
 
-        acquire(*kernel_globals.memory_spinlock);
         stack := alloc_block(*kernel_globals.physical_block_allocator, 0x1_0000) + 0x1_0000;
-        release(*kernel_globals.memory_spinlock);
 
         ap_startup_data.stack = stack + DIRECT_MAPPING_BASE;
 
         write_apic_register(.DES__INTERRUPT_DEST, it.local_apic_id << 24);
 
-        // Todo: People online are saying these sometimes need to be executed multiple times per core
+        // Todo: People online are saying these sometimes need to be executed multiple times per core.
         // Todo: Magic numbers
         command: u32;
         command = (0b101 << 8) | (1 << 14); // INIT IPI
@@ -321,140 +321,25 @@ ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, gate_nu
 
 
 
-
-
-#program_export fault_0 :: (stack: *void) #c_call {
-    core := get_current_core();
-
-    write_string("Something bad happened (0) on core ");
-    write_number(core.id);
-    write_string("\n");
-
-    bluescreen();
-} @InterruptRoutine
-
-#program_export fault_1 :: (stack: *void) #c_call {
-    core := get_current_core();
-
-    write_string("Something bad happened (1) on core ");
-    write_number(core.id);
-    write_string("\n");
-
-    bluescreen();
-} @InterruptRoutine
-
-#program_export fault_2 :: (stack: *void) #c_call {
-    core := get_current_core();
-
-    write_string("Something bad happened (2) on core ");
-    write_number(core.id);
-    write_string("\n");
-
-    bluescreen();
-} @InterruptRoutine
-
-#program_export fault_3 :: (stack: *void) #c_call {
-    core := get_current_core();
-
-    write_string("Something bad happened (3) on core ");
-    write_number(core.id);
-    write_string("\n");
-
-    bluescreen();
-} @InterruptRoutine
-
-#program_export fault_4 :: (stack: *void) #c_call {
-    core := get_current_core();
-
-    write_string("Something bad happened (4) on core ");
-    write_number(core.id);
-    write_string("\n");
-
-    bluescreen();
-} @InterruptRoutine
-
-#program_export fault_5 :: (stack: *void) #c_call {
-    core := get_current_core();
-
-    write_string("Something bad happened (5) on core ");
-    write_number(core.id);
-    write_string("\n");
-
-    bluescreen();
-} @InterruptRoutine
-
-#program_export fault_6 :: (stack: *Interrupt_Stack(false)) #c_call {
-    push_context {
-        context.print_style.default_format_int.base = 16;
-
-        print("Invalid Opcode.\n");
-        print("RIP: 0x%\n", stack.ip);
-        print("RSP: 0x%\n", stack.sp);
-        print("SS: 0x%\n", stack.ss);
-        print("CS: 0x%\n", stack.cs);
-        bluescreen();
+#insert #run,host -> string {
+    builder: String_Builder;
+    for 0..31 {
+        print(*builder, DEFAULT_ISA_FAULT_HANDLER, it);
     }
-} @InterruptRoutine
+    return builder_to_string(*builder);
+};
 
-#program_export fault_7 :: (stack: *void) #c_call {
+DEFAULT_ISA_FAULT_HANDLER :: #string END
+#program_export default_isa_fault_handler_%1 :: (stack: *void) #c_call {
     core := get_current_core();
 
-    write_string("Something bad happened (7) on core ");
+    write_string("Something bad happened (%1) on core ");
     write_number(core.id);
     write_string("\n");
 
     bluescreen();
 } @InterruptRoutine
-
-#program_export fault_8 :: (stack: *void) #c_call {
-    core := get_current_core();
-
-    write_string("Something bad happened (8) on core ");
-    write_number(core.id);
-    write_string("\n");
-
-    bluescreen();
-} @InterruptRoutineWithErrorCode
-
-#program_export fault_9 :: (stack: *void) #c_call {
-    core := get_current_core();
-
-    write_string("Something bad happened (9) on core ");
-    write_number(core.id);
-    write_string("\n");
-
-    bluescreen();
-} @InterruptRoutine
-
-#program_export fault_10 :: (stack: *void) #c_call {
-    core := get_current_core();
-
-    write_string("Something bad happened (10) on core ");
-    write_number(core.id);
-    write_string("\n");
-
-    bluescreen();
-} @InterruptRoutineWithErrorCode
-
-#program_export fault_11 :: (stack: *void) #c_call {
-    core := get_current_core();
-
-    write_string("Something bad happened (11) on core ");
-    write_number(core.id);
-    write_string("\n");
-
-    bluescreen();
-} @InterruptRoutineWithErrorCode
-
-#program_export fault_12 :: (stack: *void) #c_call {
-    core := get_current_core();
-
-    write_string("Something bad happened (12) on core ");
-    write_number(core.id);
-    write_string("\n");
-
-    bluescreen();
-} @InterruptRoutineWithErrorCode
+END;
 
 #program_export
 general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c_call {
@@ -494,26 +379,6 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
         bluescreen();
     }
 } @InterruptRoutineWithErrorCode
-
-#program_export fault_14 :: (stack: *void) #c_call {
-    core := get_current_core();
-
-    write_string("Something bad happened (14) on core ");
-    write_number(core.id);
-    write_string("\n");
-
-    bluescreen();
-} @InterruptRoutineWithErrorCode
-
-#program_export fault_15 :: (stack: *void) #c_call {
-    core := get_current_core();
-
-    write_string("Something bad happened (15) on core ");
-    write_number(core.id);
-    write_string("\n");
-
-    bluescreen();
-} @InterruptRoutine
 
 
 
@@ -628,8 +493,6 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
 
 #program_export uacpi_kernel_alloc :: (size: uacpi_size) -> *void #c_call {
     push_context {
-        Scoped_Acquire(*kernel_globals.memory_spinlock);
-
         phys := alloc_block(*kernel_globals.physical_block_allocator, size);
         virt := cast(*void) phys + DIRECT_MAPPING_BASE;
 
@@ -641,8 +504,6 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
     size_bytes := size*count;
 
     push_context {
-        Scoped_Acquire(*kernel_globals.memory_spinlock);
-
         phys := alloc_block(*kernel_globals.physical_block_allocator, size_bytes);
         virt := cast(*void) phys + DIRECT_MAPPING_BASE;
 
@@ -655,8 +516,6 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
     if mem == null return;
 
     push_context {
-        Scoped_Acquire(*kernel_globals.memory_spinlock);
-
         phys := cast(u64) mem - DIRECT_MAPPING_BASE;
         free_block(*kernel_globals.physical_block_allocator, phys);
     }

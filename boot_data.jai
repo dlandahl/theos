@@ -66,9 +66,7 @@ Large_Page :: struct {
         RESERVED;
     };
 
-
     // ------- Disk cache entry -------
-    // Todo: when a block is in the disk cache, it's not in the freelist, so could union those two integers
     more_recently_used: s32;
     less_recently_used: s32;
 

@@ -100,7 +100,7 @@ read_base_address_register :: (device: Pci_Device, bar_index: int) -> Pci_Bar {
     bar := device.registers[0x4 + bar_index];
 
     if bar & 0b001 {
-        log_error("IO Space base address registers are not supported. Device: %", device.configuration_space.*);
+        log_error("IO-space base address registers are not supported. Device: %", device.configuration_space.*);
         bluescreen();
     }
 
@@ -151,28 +151,6 @@ Ahci_Controller :: struct {
 
     received_fis: *Ahci_Received_Fis;
     port: *Ahci_Port;
-}
-
-Ata_Command :: enum u8 {
-    READ_PIO  :: 0x20;
-    READ_DMA  :: 0xc8;
-    READ_DMA_EX :: 0x25;
-    WRITE_PIO :: 0x30;
-    WRITE_DMA :: 0xca;
-    WRITE_DMA_EX :: 0x35;
-    IDENTIFY  :: 0xec;
-}
-
-Ata_Status :: enum_flags u8 {
-    NONE                :: 0x0;
-    ERROR               :: 0x1;
-    INDEX               :: 0x2;
-    CORRECTED_DATA      :: 0x4;
-    TRANSFER_REQUESTED  :: 0x8;
-    SEEK_COMPLETE       :: 0x10;
-    DEVICE_FAULT        :: 0x20;
-    READY               :: 0x40;
-    BUSY                :: 0x80;
 }
 
 init_ahci_controller :: (device: Pci_Device) -> Ahci_Controller {
@@ -289,11 +267,13 @@ init_ahci_controller :: (device: Pci_Device) -> Ahci_Controller {
         }
 
         port.CMD__command_status |= .FRE__fis_receive_enable;
+
         Timeout(#code {
             if port.CMD__command_status & .FR__receive_running > 0 break;
         }, "AHCI port idle timeout (receive running)");
 
         port.CMD__command_status |= .ST__start;
+
         Timeout(#code {
             if port.CMD__command_status & .CR__command_list_running > 0 break;
         }, "AHCI port idle timeout (command list running)");
@@ -325,8 +305,8 @@ ahci_transfer :: (controller: *Ahci_Controller, direction: Transfer_Direction, m
 
     if sector_count == 0 return;
 
-    // DMA does not support memory accesses that cross a 64k boundary. This code splits the
-    // operation into 64k blocks
+    // DMA hardware does not support memory accesses that cross a 64k boundary in physical memory.
+    // This code splits the operation into 64k blocks.
 
     first_sector_count := (0x1_0000 - memory_address % 0x1_0000) / 0x200;
     if first_sector_count > sector_count first_sector_count = sector_count;
@@ -401,6 +381,28 @@ ahci_transfer_sectors :: (controller: *Ahci_Controller, direction: Transfer_Dire
     Timeout(#code {
         if !(controller.port.CI__command_issue & 1) break;
     }, "SATA command issue timeout");
+}
+
+Ata_Command :: enum u8 {
+    READ_PIO  :: 0x20;
+    READ_DMA  :: 0xc8;
+    READ_DMA_EX :: 0x25;
+    WRITE_PIO :: 0x30;
+    WRITE_DMA :: 0xca;
+    WRITE_DMA_EX :: 0x35;
+    IDENTIFY  :: 0xec;
+}
+
+Ata_Status :: enum_flags u8 {
+    NONE                :: 0x0;
+    ERROR               :: 0x1;
+    INDEX               :: 0x2;
+    CORRECTED_DATA      :: 0x4;
+    TRANSFER_REQUESTED  :: 0x8;
+    SEEK_COMPLETE       :: 0x10;
+    DEVICE_FAULT        :: 0x20;
+    READY               :: 0x40;
+    BUSY                :: 0x80;
 }
 
 Ahci_Command_Header :: struct {

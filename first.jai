@@ -102,7 +102,7 @@ compile_bootloader :: () -> success: bool {
         set_build_options(options, workspace);
     }
 
-    compiler_begin_intercept(workspace);
+    compiler_begin_intercept(workspace, .SKIP_ALL);
     add_build_file("bootloader/bootloader.jai", workspace);
 
     success: bool;
@@ -180,7 +180,8 @@ compile_kernel :: () -> success: bool {
         set_build_options(options, workspace);
     }
 
-    compiler_begin_intercept(workspace);
+    intercept := Intercept_Flags.SKIP_ALL & ~.SKIP_PROCEDURE_HEADERS;
+    compiler_begin_intercept(workspace, intercept);
 
     add_build_file("kernel/kernel.jai", workspace);
 
@@ -200,7 +201,7 @@ compile_kernel :: () -> success: bool {
                 proc := header.expression;
 
                 for proc.notes {
-                    if it.text != "InterruptRoutine" && it.text != "InterruptRoutineWithErrorCode" {
+                    if !begins_with(it.text, "InterruptRoutine") {
                         continue;
                     }
 
