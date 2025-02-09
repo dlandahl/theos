@@ -98,11 +98,14 @@ core_begin_multitasking :: () {
 
         write_apic_register(.TIC__TIMER_INITIAL, 0x0400_0000);
 
-        lvtt: Apic_Lvt_Timer;
-        set(*lvtt, .gate_index, cast(u8) kernel_globals.local_apic_timer_interrupt_gate);
-        set(*lvtt, .mask, 0);
-        set(*lvtt, .timer_mode, 0b01);
-        write_apic_register(.LVT__TIMER, << cast(*u32) *lvtt);
+        lapic_timer: Apic_Lvt_Timer;
+        gate := cast(u8) kernel_globals.local_apic_timer_interrupt_gate;
+
+        bitfield_set(*lapic_timer, .gate_index, gate);
+        bitfield_set(*lapic_timer, .mask,       0);
+        bitfield_set(*lapic_timer, .timer_mode, 0b01);
+
+        write_apic_register(.LVT__TIMER, << cast(*u32) *lapic_timer);
     }
 }
 
@@ -230,6 +233,11 @@ yield :: () {
     // Todo: we don't need to write into scheduler.current_task in the interrupt routine
     _current := *scheduler.current_task;
     core.task_state_segment.rsp[0] = next.kernel_stack;
+
+    // Todo: I don't think it makes sense to trigger a manual software interrupt in order to load the
+    // stack/RIP of the target task in cases where we called into the scheduler from the timer IRQ.
+    // Because in theory, we should be able to use that interrupt stack frame to do the same thing.
+    // It's not clear to me at the moment how to structure the code to do this.
 
     #asm {
         mov rax: gpr === a, _current;

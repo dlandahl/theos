@@ -237,7 +237,6 @@ startup_application_processors :: () {
         acquire(*ap_startup_spinlock);
 
         stack := alloc_block(*kernel_globals.physical_block_allocator, 0x1_0000) + 0x1_0000;
-
         ap_startup_data.stack = stack + DIRECT_MAPPING_BASE;
 
         write_apic_register(.DES__INTERRUPT_DEST, it.local_apic_id << 24);
@@ -294,9 +293,8 @@ ap_entry_point :: () #c_call {
 }
 
 get_current_core :: (loc := #caller_location) -> *X64_Core #no_context {
-    // Depending on FSGSBASE because for some reason I could not get GS_BASE MSR to work.
-
     core: *X64_Core;
+
     #asm FSGSBASE {
         rdgsbase core;
     }

@@ -523,7 +523,6 @@ Ahci_Port :: struct {
 #assert size_of(Ahci_Command_Header)   == 0x20;
 #assert size_of(Ahci_Command_Table)    == 0x80 + size_of(Ahci_Physical_Region_Descriptor);
 #assert size_of(Ahci_Port)             == 0x80;
-#assert size_of(Ahci_Received_Fis)     == 0x100;
 
 HBA_GHC__Ahci_Global_Host_Control :: enum_flags u32 {
     HR__hba_reset                      :: 0x1;

@@ -16,7 +16,8 @@ get_kernel_timestamp :: () -> Kernel_Timestamp {
         ts.ticks   = high_precision_timer.timers[0].ticks_at_last_interrupt;
     });
 
-    // Todo: figure out the performace characteristics of reading this register
+    // Todo: figure out the performace characteristics of reading this register.
+    // Apparently its not very good.
     ticks_now := cast(u64) read(.COUNTER);
 
     if ticks_now < ts.ticks {
@@ -499,7 +500,7 @@ calibrate_tsc :: () -> hz: u64 {
     ticks_per_calibration_run := cast(u32, calibration_time_fs / hpet.tick_period_femtoseconds);
 
     // Run until we get three consecutive results within a certain error
-    max_error := 1000;
+    max_error := 1000; // Todo: this value might need to be dynamically estimated, since any specific value will not be reasonable for all possible TSC frequencies.
     delta: [3] int;
 
     counter_register := cast(*u32, hpet.base_address + cast(u64) Hpet_Register.COUNTER);
@@ -578,14 +579,17 @@ debug_measure_tsc_drift :: () {
     #asm { cli; }
 
     tsc_start := rdtsc();
+    tsc_frequency := cast(float) kernel_globals.timestamp_counter_frequency;
+
     time := get_monotonic_system_time();
 
     for 1..1_000_000 {
         time += seconds_to_apollo(1);
-        sleep_until(time);
 
+        sleep_until(time);
         tsc_now := rdtsc();
-        seconds_according_to_tsc := cast(float, tsc_now - tsc_start) / cast(float) kernel_globals.timestamp_counter_frequency;
+
+        seconds_according_to_tsc := cast(float, tsc_now - tsc_start) / tsc_frequency;
 
         print("[%] TSC: % | Error: %\n", it, seconds_according_to_tsc, cast(float) it - seconds_according_to_tsc);
     }

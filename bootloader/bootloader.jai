@@ -188,7 +188,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             boot_pd[2] = 0x40_0000 | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             boot_pd[3] = 0x60_0000 | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
 
-            // UEFI seems to put the stack at the top of physical memory. Don't know if that's standardised. For now assume that the machine has 256Mb
+            // UEFI seems to put the stack at the top of physical memory. I don't know if that's standardised. For now assume that the machine has 256Mb
             index: int = 128;
             for 0..20 {
                 boot_pd[index] = (0x1000_0000 - cast(u64) it*0x20_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
@@ -228,18 +228,29 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             // Translate framebuffer address to virtual
             boot_data.framebuffer.buffer = cast(*u32) (virtual_base + 4*0x20_0000 + offset);
 
+
+            // Map load_buffer, which contains the kernel ELF file, to be loaded into high virtual memory later.
+            offset = cast(u64) load_buffer & 0x1fffff;
+
+            pd[6] = (cast(u64) load_buffer - offset)             | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            pd[7] = (cast(u64) load_buffer - offset + 0x20_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+
+            // Translate load buffer address to virtual
+            load_buffer = cast(*void) (virtual_base + 6*0x20_0000 + offset);
+
+
             // Map the page frame descriptors
             page_directories_needed := (boot_data.large_pages.count * size_of(Large_Page)) / (0x20_0000) + 2;
             offset = cast(u64) boot_data.large_pages.data & 0x1fffff;
 
             for 0..page_directories_needed-1 {
                 base := cast(u64) boot_data.large_pages.data - offset + cast(u64) it * 0x20_0000;
-                pd[6 + it] = base | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+                pd[8 + it] = base | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             }
 
             // Translate page frame descriptor array address to virtual
-            boot_data.large_pages.data = cast(*Large_Page) (virtual_base + 6*0x20_0000 + offset);
-            boot_data.page_directories_used = 6 + page_directories_needed;
+            boot_data.large_pages.data = cast(*Large_Page) (virtual_base + 8*0x20_0000 + offset);
+            boot_data.page_directories_used = 8 + page_directories_needed;
         }
 
         mmap_key = 0;
@@ -476,9 +487,9 @@ serial_out :: (data: string) #no_context {
     }
 }
 
-write_nonnegative_number :: (n: u64, base := 10, to_standard_error := false) {
+write_number :: (n: u64, base := 16) {
     if n == 0 {
-        display_string("0");
+        serial_out("0\n");
         return;
     }
 
@@ -511,6 +522,6 @@ write_nonnegative_number :: (n: u64, base := 10, to_standard_error := false) {
     s: string = ---;
     s.data  = buf.data + cursor;
     s.count = starting_cursor - cursor;
-    display_string(s);
-    display_string("\n");
+    serial_out(s);
+    serial_out("\n");
 }

@@ -251,7 +251,7 @@ simd_floating_point_exception :: (stack: *Interrupt_Stack()) #c_call {
 
     push_context {
         core := get_current_core();
-        print("Floating point exception: % (thread %)\n", mxcsr, core.scheduler.current_task.id);
+        log("Floating point exception: % (thread %)\n", mxcsr, core.scheduler.current_task.id);
     }
 } @InterruptRoutine
 
@@ -506,6 +506,9 @@ allocate_large_page :: () -> u64 #no_context {
     return 0;
 }
 
+// These procs do a lot of hardcoded linked-list manipulation. It would be good to
+// move that into dedicated structs and procedures but not sure how to express it.
+
 find_or_add_disk_cache_entry :: (disk_address: u64) -> u64 {
     using kernel_globals;
     Scoped_Acquire(*large_page_allocator.spinlock);
@@ -754,7 +757,7 @@ Block_Allocator :: struct {
 }
 
 init_block_allocator :: (allocator: *Block_Allocator, base_address: u64, max_size: u64, alignment := 0) #no_context {
-    // Use a large page to hold block descriptors
+    // For bootstrapping, use a large page to hold block descriptors
     page := allocate_large_page();
 
     allocator.blocks.data = cast(*void) page + DIRECT_MAPPING_BASE;
@@ -1086,40 +1089,43 @@ debug_print_physical_memory_map :: () {
     using kernel_globals;
     context.print_style.default_format_float.trailing_width = 2;
 
-#if false {
-    total_by_type: [5] float;
-    for 0..boot_data.memory_map_entries_used-1 {
+    #if false {
+        total_by_type: [5] float;
 
-        region := boot_data.memory_map[it];
-        mb := (cast(float) region.pages * 4096) / 0x20_0000;
-        print("Region (%) at % (% blocks)\n", region.type, formatInt(region.address, base=16), mb);
+        for 0..boot_data.memory_map_entries_used-1 {
+            region := boot_data.memory_map[it];
+            mb := (cast(float) region.pages * 4096) / 0x20_0000;
+            print("Region (%) at % (% blocks)\n", region.type, formatInt(region.address, base=16), mb);
 
-        total_by_type[region.type] += cast(int) region.pages;
+            total_by_type[region.type] += cast(int) region.pages;
 
-        if false for 0..cast(int) mb-1 {
-            if region.type == {
-                case .FREE; print("-");
-                case .RESERVED_BY_THE_BOOTLOADER; print("+");
-                case .RESERVED_BY_FIRMWARE; print("=");
-                case .DONT_KNOW; print("?");
+            if false for 0..cast(int) mb-1 {
+                if region.type == {
+                    case .FREE; print("-");
+                    case .RESERVED_BY_THE_BOOTLOADER; print("+");
+                    case .RESERVED_BY_FIRMWARE; print("=");
+                    case .DONT_KNOW; print("?");
+                }
             }
+        }
+
+        print("\n\n\n");
+
+        context.print_style.default_format_float.trailing_width = 2;
+        for total_by_type {
+            print("Total (%) % MB\n=======\n", cast(type_of(Memory_Region.type)) it_index, it / 256);
         }
     }
 
-    print("\n\n\n");
-
-    context.print_style.default_format_float.trailing_width = 2;
-    for total_by_type {
-        print("Total (%) % MB\n=======\n", cast(type_of(Memory_Region.type)) it_index, it / 256);
-    }
-}
-
+    // Visualize the disk cache LRU
     print("Most recently used: %\nLeast recently used: %\n", large_page_allocator.lru_most, large_page_allocator.lru_least);
 
     for boot_data.large_pages {
         print("[% ->%] % (%<->%)\n", it_index, it.lru_entry, it.state, it.less_recently_used, it.more_recently_used);
     }
 }
+
+
 
 align :: (alignment: $T, value: $V) -> V #no_context {
     #assert size_of(T) == 8;
