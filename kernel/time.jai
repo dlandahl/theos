@@ -201,6 +201,8 @@ Rtc_Register :: enum u8 {
     STATUS_A         :: 0x0a;
     STATUS_B         :: 0x0b;
     STATUS_C         :: 0x0c;
+
+    // CENTURY may be somewhere here, as described by ACPI
 }
 
 rtc_init :: () {
@@ -463,6 +465,38 @@ hpet_restart :: () {
 
 
 
+init_tsc :: () {
+
+    // Check for TSC hardware support.
+
+    edx, ecx: u64;
+    #asm {
+        edx === d;
+        ecx === c;
+
+        mov eax: gpr === a, 0x80000007;
+        cpuid eax, ebx:, ecx, edx;
+    }
+
+    if edx & 0x200 {
+        log("Invariant/Constant TSC Supported.");
+    }
+
+
+    #asm {
+        mov eax, 1;
+        cpuid eax, ebx, ecx, edx;
+    }
+
+    if ecx & (1 << 24) {
+        log("TSC_DEADLINE Supported.");
+        kernel_globals.tsc_deadline_support = true;
+    }
+
+
+    kernel_globals.tsc_frequency = calibrate_tsc();
+}
+
 calibrate_tsc :: () -> hz: u64 {
     // Try to read TSC frequency from CPUID. Modern CPUs support it, but even fairly recent ones don't, so fallback to manual timing using HPET.
     eax, ebx, ecx, edx: u64;
@@ -579,7 +613,7 @@ debug_measure_tsc_drift :: () {
     #asm { cli; }
 
     tsc_start := rdtsc();
-    tsc_frequency := cast(float) kernel_globals.timestamp_counter_frequency;
+    tsc_frequency := cast(float) kernel_globals.tsc_frequency;
 
     time := get_monotonic_system_time();
 

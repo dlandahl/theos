@@ -66,7 +66,13 @@ Kernel_Globals :: struct {
 
     large_page_allocator: Large_Page_Allocator;
 
-    timestamp_counter_frequency: u64;
+    tsc_frequency: u64;
+
+    // If future x64 CPUs all support this, plus some other TSC specific features, then we'll likely remove
+    // support for HPET and the Local APIC timer, and use TSC for everything. Namely the features you would
+    // need are Invariant TSC, and for the frequency to be provided by CPUID. However, Boostibot on Discord
+    // has said that TSC frequency is imprecise even if provided by CPUID, so will need to investigate that.
+    tsc_deadline_support: bool;
 }
 
 kernel_globals: Kernel_Globals;
@@ -194,11 +200,11 @@ kernel_entry :: () #no_context {
         // Don't use Basic.calendar_to_apollo, because it's OS specific
         boot_time = native_calendar_to_apollo(boot_calendar_time);
 
-        timestamp_counter_frequency = calibrate_tsc();
+        init_tsc();
 
         core_begin_multitasking();
 
-        find_all_pci_devices();
+        // find_all_pci_devices();
         for pci_devices {
             if it.class_code == .MASS_STORAGE && it.subclass == 0x6 {
 

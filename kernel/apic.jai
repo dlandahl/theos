@@ -103,6 +103,10 @@ Apic_Lvt_Timer :: enum u32 {
     reserved_2      :: 13;
 } @Bitfield
 
+APIC_TIMER_MODE_ONE_SHOT     :: 0b00;
+APIC_TIMER_MODE_PERIODIC     :: 0b01;
+APIC_TIMER_MODE_TSC_DEADLINE :: 0b10;
+
 initialize_apic :: () {
 
     // Disable the older interrupt controller. I sort of assume UEFI does this anyway.

@@ -96,16 +96,25 @@ core_begin_multitasking :: () {
         spurious := read_apic_register(.SPURIOUS_INTERRUPT);
         write_apic_register(.SPURIOUS_INTERRUPT, spurious | 0x1ff);
 
-        write_apic_register(.TIC__TIMER_INITIAL, 0x0400_0000);
-
         lapic_timer: Apic_Lvt_Timer;
-        gate := cast(u8) kernel_globals.local_apic_timer_interrupt_gate;
 
+        if kernel_globals.tsc_deadline_support {
+            bitfield_set(*lapic_timer, .timer_mode, APIC_TIMER_MODE_TSC_DEADLINE);
+        } else {
+            write_apic_register(.TIC__TIMER_INITIAL, 0x0400_0000);
+            bitfield_set(*lapic_timer, .timer_mode, APIC_TIMER_MODE_PERIODIC);
+        }
+
+        gate := cast(u8) kernel_globals.local_apic_timer_interrupt_gate;
         bitfield_set(*lapic_timer, .gate_index, gate);
         bitfield_set(*lapic_timer, .mask,       0);
-        bitfield_set(*lapic_timer, .timer_mode, 0b01);
 
         write_apic_register(.LVT__TIMER, << cast(*u32) *lapic_timer);
+
+        if kernel_globals.tsc_deadline_support {
+            delay := kernel_globals.tsc_frequency / 10;
+            write_msr(.TSC_DEADLINE, rdtsc() + delay);
+        }
     }
 }
 
@@ -365,11 +374,11 @@ task_do_work_in_ring_3 :: () #c_call {
         while true {
             print_from_user_mode("Thread % doing some work in user mode, on core %.\n", thread.id, core.id);
 
-            for 1..5_000_000 {
+            for 1..15_000_000 {
                 #asm { pause; }
             }
 
-            ms := rdtsc() % 2000;
+            ms := rdtsc() % 10000;
 
             print_from_user_mode("Sleeping for % ms\n", ms);
             sleep_from_user_mode(milliseconds_to_apollo(xx ms));
@@ -381,6 +390,11 @@ task_do_work_in_ring_3 :: () #c_call {
 #program_export
 local_apic_timer_interrupt :: (stack: *Interrupt_Stack()) #c_call {
     write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
+
+    if kernel_globals.tsc_deadline_support {
+        delay := kernel_globals.tsc_frequency / 10;
+        write_msr(.TSC_DEADLINE, rdtsc() + delay);
+    }
 
     if stack.cs == .RING0_CODE {
         // Don't preempt the kernel.
