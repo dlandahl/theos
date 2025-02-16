@@ -1262,24 +1262,33 @@ draw_text :: (text: string) #no_context {
             cursor_x = 0;
         }
 
-        max_y := (cursor_y+1) * (char_height + text_spacing) + margin * 2;
-        if max_y > framebuffer.y_resolution {
-            cursor_y = 0;
+        screen_x := cursor_x * char_width + margin;
+        screen_y := cursor_y * (char_height + text_spacing) + margin;
+
+        if screen_y + char_height + text_spacing + margin > framebuffer.y_resolution {
+            source := (char_height + text_spacing + margin) * framebuffer.stride;
+            target := margin * framebuffer.stride;
+
+            count := cursor_y * (char_height + text_spacing) * framebuffer.stride;
+
+            memcpy(framebuffer.buffer + target, framebuffer.buffer + source, count * size_of(u32));
+
+            cursor_y -= 1;
+            screen_y -= char_height + text_spacing;
         }
 
         source_top_left := char_width * (cast(int) it - 0x20);
+        target_top_left := screen_x + screen_y * framebuffer.stride;
 
-        for y: 0..char_height-1 {
-            for x: 0..char_width-1 {
-                line := cursor_y * (char_height + text_spacing) * framebuffer.stride + margin * framebuffer.stride;
-                column := cursor_x * char_width + margin;
+        for char_y: 0..char_height-1 {
+            for char_x: 0..char_width-1 {
 
-                pixel := line + column + x + y * framebuffer.stride;
-                index := source_top_left + x + y * font.width;
+                pixel_in_font   := source_top_left + char_x + char_y * font.width;
+                pixel_on_screen := target_top_left + char_x + char_y * framebuffer.stride;
 
-                c := cast(u32) font.data[index];
+                c := cast(u32) font.data[pixel_in_font];
 
-                framebuffer.buffer[pixel] = (c) | (c << 8) | (c << 16) | (c << 24);
+                framebuffer.buffer[pixel_on_screen] = (c) | (c << 8) | (c << 16) | (c << 24);
             }
         }
 
