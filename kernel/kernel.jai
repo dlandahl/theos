@@ -222,7 +222,7 @@ kernel_entry :: () #no_context {
 
         core_begin_multitasking();
 
-        // find_all_pci_devices();
+        find_all_pci_devices();
         for pci_devices {
             if it.class_code == .MASS_STORAGE && it.subclass == 0x6 {
 
@@ -238,6 +238,14 @@ kernel_entry :: () #no_context {
                 }
             }
         }
+
+        for pci_devices {
+            if it.class_code == .MASS_STORAGE && it.subclass == 0x8 {
+                init_nvme_controller(it);
+            }
+        }
+
+        while true {}
 
         startup_application_processors();
 
@@ -306,7 +314,6 @@ make_kernel_context :: (c: *#Context) #no_context {
     c.print_style.default_format_struct.use_newlines_if_long_form = true;
 
     c.allocator.proc = (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
-
         if mode == .ALLOCATE || mode == .RESIZE {
             if size == 0 {
                 return null;
@@ -957,7 +964,7 @@ find_acpi_table :: (signature: string) -> *Acpi_Table_Header {
 serial_out :: (data: string) #no_context {
     COM1 :: 0x3f8;
 
-    for cast([] u8) data {
+    for data {
         for 1..10_0000 {
             status: u8;
             port := COM1 + 5;
@@ -1208,7 +1215,7 @@ align :: (alignment: int, value: int) -> int #no_context {
     return (value + (alignment - 1)) & -alignment;
 }
 
-Timeout :: (code: Code, message := "", time := 1000) #expand {
+Timeout_Block :: (code: Code, message := "", time := 1000) #expand {
     start := get_monotonic_system_time();
 
     while true {
@@ -1222,8 +1229,21 @@ Timeout :: (code: Code, message := "", time := 1000) #expand {
     }
 }
 
+Timeout :: (code: Code, message := "", time := 1000) #expand {
+    start := get_monotonic_system_time();
 
+    while true {
+        condition_met := #insert code;
+        if condition_met break;
 
+        elapsed := get_monotonic_system_time() - start;
+
+        if to_milliseconds(elapsed) > time {
+            log_error(message);
+            bluescreen();
+        }
+    }
+}
 
 
 
@@ -1242,9 +1262,9 @@ draw_text :: (text: string) #no_context {
     Scoped_Acquire(*spinlock);
 
     text_spacing :: 5;
-    char_width :: 9;
-    char_height :: 16;
-    margin :: 10;
+    char_width   :: 9;
+    char_height  :: 16;
+    margin       :: 10;
 
     framebuffer := kernel_globals.framebuffer;
 
@@ -1271,6 +1291,7 @@ draw_text :: (text: string) #no_context {
 
             count := cursor_y * (char_height + text_spacing) * framebuffer.stride;
 
+            // Inefficient when printing strings with many newlines.
             memcpy(framebuffer.buffer + target, framebuffer.buffer + source, count * size_of(u32));
 
             cursor_y -= 1;
@@ -1331,7 +1352,7 @@ parse_pnm :: (file: [] u8) -> Pnm {
             || char == #char "#";
     }
 
-    ConsumeWhitespaceAndComments :: () #expand {
+    skip_whitespace_and_comments :: () #expand {
         while is_whitespace(buffer[`cursor]) {
             if buffer[`cursor] == #char "#" {
                 while buffer[`cursor] != 0xa `cursor += 1;
@@ -1340,7 +1361,7 @@ parse_pnm :: (file: [] u8) -> Pnm {
         }
     }
 
-    ParseInt :: () -> int #expand {
+    parse_int :: () -> int #expand {
         digit := buffer[`cursor];
         result: int;
 
@@ -1355,17 +1376,21 @@ parse_pnm :: (file: [] u8) -> Pnm {
     }
 
     cursor := 2;
-    ConsumeWhitespaceAndComments();
-    pnm.width = ParseInt();
+    skip_whitespace_and_comments();
 
-    ConsumeWhitespaceAndComments();
-    pnm.height = ParseInt();
+    pnm.width = parse_int();
 
-    ConsumeWhitespaceAndComments();
-    max_value := ParseInt();
+    skip_whitespace_and_comments();
+
+    pnm.height = parse_int();
+
+    skip_whitespace_and_comments();
+
+    max_value := parse_int();
     assert(max_value == 255);
 
-    ConsumeWhitespaceAndComments();
+    skip_whitespace_and_comments();
+
     pnm.data = buffer + cursor;
 
     return pnm;

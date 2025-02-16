@@ -1,3 +1,4 @@
+
 ENTRY(kernel_entry)
 
 SECTIONS {

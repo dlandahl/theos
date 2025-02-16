@@ -166,12 +166,12 @@ init_ahci_controller :: (device: Pci_Device) -> Ahci_Controller {
 
     ahci.GHC__global_host_control |= .AE__ahci_enable;
 
-    if ahci.CAP__host_capabilities & .S64A__64bit_addressing == 0 {
+    if !(ahci.CAP__host_capabilities & .S64A__64bit_addressing) {
         log_error("AHCI controller without 64-bit addressing not supported");
         return .{};
     }
 
-    if (ahci.CAP__host_capabilities & .SAM__supports_ahci_only) == 0 {
+    if !(ahci.CAP__host_capabilities & .SAM__supports_ahci_only) {
         ahci.GHC__global_host_control |= .HR__hba_reset;
     }
 
@@ -182,7 +182,7 @@ init_ahci_controller :: (device: Pci_Device) -> Ahci_Controller {
     max_ports := 32;
 
     for 0..max_ports-1 {
-        if ahci.PI__ports_implemented & (1 << it) == 0 {
+        if !(ahci.PI__ports_implemented & (1 << it)) {
             continue;
         }
 
@@ -190,27 +190,31 @@ init_ahci_controller :: (device: Pci_Device) -> Ahci_Controller {
 
         if ahci_port_is_running(port) {
             port.CMD__command_status &= ~.ST__start;
-            Timeout(#code {
-                if port.CMD__command_status & .CR__command_list_running == 0 break;
-            }, "AHCI port not idle timeout (command list running)");
+
+            Timeout(
+                !(port.CMD__command_status & .CR__command_list_running),
+                "AHCI port not idle timeout (command list running)"
+            );
 
             port.CMD__command_status &= ~.FRE__fis_receive_enable;
-            Timeout(#code {
-                if port.CMD__command_status & .FR__receive_running == 0 break;
-            }, "AHCI port not idle timeout (receive running)");
+
+            Timeout(
+                !(port.CMD__command_status & .FR__receive_running),
+                "AHCI port not idle timeout (receive running)"
+            );
         }
     }
 
     for 0..max_ports - 1 {
-        if ahci.PI__ports_implemented & (1 << it) == 0 continue;
+        if !(ahci.PI__ports_implemented & (1 << it)) continue;
 
         port := *ahci.ports[it];
-        if port.CMD__command_status & .SUD__spin_up_device == 0 {
+        if !(port.CMD__command_status & .SUD__spin_up_device) {
             log_error("AHCI port not spun up");
             return .{};
         }
 
-        // if ahci.CAP__host_capabilities & .STAGGERED_SPIN_UP > 0 {
+        // if ahci.CAP__host_capabilities & .STAGGERED_SPIN_UP {
         // }
 
         detection := port.SSTS__sata_status & .DET_MASK;
@@ -269,16 +273,17 @@ init_ahci_controller :: (device: Pci_Device) -> Ahci_Controller {
 
         port.CMD__command_status |= .FRE__fis_receive_enable;
 
-        Timeout(#code {
-            if port.CMD__command_status.FR__receive_running break;
-        }, "AHCI port idle timeout (receive running)");
-
+        Timeout(
+            port.CMD__command_status & .FR__receive_running,
+            "AHCI port idle timeout (receive running)"
+        );
 
         port.CMD__command_status |= .ST__start;
 
-        Timeout(#code {
-            if port.CMD__command_status.CR__command_list_running break;
-        }, "AHCI port idle timeout (command list running)");
+        Timeout(
+            port.CMD__command_status & .CR__command_list_running,
+            "AHCI port idle timeout (command list running)"
+        );
 
         return controller;
     }
@@ -365,24 +370,25 @@ ahci_transfer_sectors :: (controller: *Ahci_Controller, direction: Transfer_Dire
     prdt.DBC__data_byte_count = cast(u32) sector_count * 0x200 - 1;
     // prdt.I__interrupt_on_completion = .NO;
 
-    Timeout(#code {
-        if controller.port.SACT__sata_active & 1 > 0 continue;
+    Timeout_Block(#code {
+        if controller.port.SACT__sata_active & 1 continue;
 
         ata_status := cast(u32, Ata_Status.BUSY | .TRANSFER_REQUESTED);
 
-        if controller.port.TFD__task_file_data & ata_status > 0 {
+        if controller.port.TFD__task_file_data & ata_status {
             continue;
         }
 
         break;
     }, "SATA busy timeout");
 
-    assert(controller.port.CI__command_issue & 1 == 0);
+    assert(!(controller.port.CI__command_issue & 1));
     controller.port.CI__command_issue |= 1;
 
-    Timeout(#code {
-        if !(controller.port.CI__command_issue & 1) break;
-    }, "SATA command issue timeout");
+    Timeout(
+        !(controller.port.CI__command_issue & 1),
+        "SATA command issue timeout"
+    );
 }
 
 Ata_Command :: enum u8 {
@@ -561,6 +567,158 @@ HBA_PxSIG__Ahci_Port_Signature :: enum u32 {
     SEMB  :: 0xc33c_0101;
     PM    :: 0x9669_0101;
 }
+
+
+
+
+
+Nvme_Controller :: struct {
+    using mmio: *Nvme_Property_Memory_Map;
+
+    admin_submission_queue_tail: int;
+    admin_submission_queue: [] Nvme_Submission_Queue_Entry;
+}
+
+Nvme_Property_Memory_Map :: struct {
+    start_marker: void;
+
+    CAP__capabilities: u64;
+    VS__version:                  Nvme_Specification_Version_Descriptor;
+    INTMS: u32;
+    INTMC: u32;
+    CC__controller_config:        Nvme_Controller_Configuration;
+    __reserved__: u32;
+    CSTS__controller_status:      Nvme_Controller_Status;
+    NSSR: u32;
+    AQA__admin_queue_attributes:  Nvme_Admin_Queue_Attributes;
+    ASQ__admin_submission_queue:  u64;
+    ACQ__admin_completion_queue:  u64;
+
+#place start_marker;
+    offset_for_transport_specific_properties: [0x1000] u8;
+
+    SQ0TDBL__submission_queue_0_tail_doorbell: u32;
+    CQ0HDBL__completion_queue_0_head_doorbell: u32;
+}
+
+Nvme_Specification_Version_Descriptor :: struct {
+    ter__teritary: u8;
+    mnr__minor:    u8;
+    mjr__major:    u16;
+}
+
+Nvme_Controller_Configuration :: enum_flags u32 {
+    EN__ENABLE :: 0x1;
+}
+
+Nvme_Controller_Status :: enum_flags u32 {
+    RDY__READY :: 0x1;
+}
+
+Nvme_Admin_Queue_Attributes :: struct {
+    ASQS__submission_queue_size: u16;
+    ACQS__completion_queue_size: u16;
+}
+
+Nvme_Submission_Queue_Entry :: struct {
+    OPC__opcode: u8;
+    FUSE_and_PSDT: u8;
+    CID__command_identifier: u16;
+    NSID__namespace_identifier: u32;
+
+    CDW2__command_dword_2: u32;
+    CDW3__command_dword_3: u32;
+
+    MPTR__metadata_pointer: u64;
+    DPTR__data_pointer:     [2] u64;
+
+    CDW__command_dwords_10_to_15: [6] u32;
+}
+
+#assert size_of(Nvme_Submission_Queue_Entry) == 64;
+
+init_nvme_controller :: (device: Pci_Device) -> Nvme_Controller {
+    if device.class_code != .MASS_STORAGE bluescreen();
+    if device.subclass   != 0x8           bluescreen();
+
+    device.registers[1] |= cast(u32) Pci_Command.BUS_MASTER | .MEMORY_SPACE;
+    device.registers[1] &= cast(u32) ~Pci_Command.INTERRUPT_DISABLE;
+
+    nvme: Nvme_Controller;
+
+    bar := read_base_address_register(device, bar_index = 0);
+    nvme.mmio = map_base_address_register(bar);
+
+    log("Initializing NVMe controller. Spec version: %\n", nvme.VS__version);
+
+
+    // Reset the controller.
+    ready :: nvme => nvme.CSTS__controller_status & .RDY__READY;
+
+    nvme.CC__controller_config &= ~.EN__ENABLE;
+    Timeout(!ready(nvme), "NVMe reset timeout (RDY is set.)");
+
+    // Todo: set CC.MPS, .IOSQES, .CSS here
+
+    nvme.CC__controller_config |= .EN__ENABLE;
+    Timeout(ready(nvme), "NVMe reset timeout (RDY is unset.)");
+
+
+    // Initialize admin queues.
+    admin_sq := get_4k_page();
+    admin_cq := get_4k_page();
+
+    // Subtract one, because the field is zero based.
+    queue_size := 4096 / size_of(Nvme_Submission_Queue_Entry) - 1;
+
+    // Don't write these fields individually, since 16-bit access is not necessarily supported on 32-bit registers.
+    nvme.AQA__admin_queue_attributes = .{
+        cast(u16) queue_size,
+        cast(u16) queue_size
+    };
+
+    nvme.ASQ__admin_submission_queue = admin_sq;
+    nvme.ACQ__admin_completion_queue = admin_cq;
+
+    nvme.admin_submission_queue.data = cast(*Nvme_Submission_Queue_Entry, admin_sq + DIRECT_MAPPING_BASE);
+    nvme.admin_submission_queue.count = queue_size;
+
+
+    // Send IDENTIFY command.
+    identify_command: *Nvme_Submission_Queue_Entry = nvme.admin_submission_queue.data;
+    identify_command.* = .{};
+
+    identify_result_buffer := get_4k_page();
+    identify_command.DPTR__data_pointer[0] = identify_result_buffer;
+
+    // CNS, controller or namespace structure. 0x1 means identify the controller.
+    identify_command.CDW__command_dwords_10_to_15[0] = 0x1;
+    identify_command.OPC__opcode = 0x6;
+
+    completion_queue_base: *u64 = xx (admin_cq + DIRECT_MAPPING_BASE);
+
+    print("Completion queue entry: %\n", (completion_queue_base + 3).*);
+
+    nvme.admin_submission_queue_tail = 1;
+    nvme.SQ0TDBL__submission_queue_0_tail_doorbell = cast(u32) nvme.admin_submission_queue_tail;
+
+    while true {
+        for 0..511 {
+            byte := cast(*u8) identify_result_buffer + it + DIRECT_MAPPING_BASE;
+            print("% ", formatInt(byte.*, base=16, minimum_digits=2));
+
+            if !((it+1) % 16) print("\n");
+        }
+
+        print("Completion queue entry: %\n", (completion_queue_base + 3).*);
+
+        print("=============================\n");
+        for 1..10_000_000 #asm { pause; }
+    }
+
+    return nvme;
+}
+
 
 
 

@@ -205,8 +205,9 @@ enable_cpu_features :: () #no_context {
 
         CR4_OSFXSR     :=   1 << 9;
         CR4_OSXMMEXCPT :=   1 << 10;
-        CR4_OSXSAVE    :=   1 << 18;
         CR4_FSGSBASE   :=   1 << 16;
+        CR4_PCIDE      :=   1 << 17;
+        CR4_OSXSAVE    :=   1 << 18;
 
         if check_feature(cpu_features, .SSE) {
             #asm {
@@ -218,6 +219,14 @@ enable_cpu_features :: () #no_context {
                 get_cr4 cr4:;
                 or  cr4, CR4_OSFXSR;
                 or  cr4, CR4_OSXMMEXCPT;
+                set_cr4 cr4;
+            }
+        }
+
+        if check_feature(cpu_features, .PCID) {
+            #asm {
+                get_cr4 cr4:;
+                or  cr4, CR4_PCIDE;
                 set_cr4 cr4;
             }
         }
