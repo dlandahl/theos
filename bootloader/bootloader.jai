@@ -25,7 +25,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         boot_data := cast(*Boot_Data) boot_data_address;
         boot_data.* = .{};
 
-        // Memory for the kernel executable
+        // Memory for the kernel executable.
         kernel_base: *void;
         EFI_CHECK(boot_services.AllocatePool(UserReservedMemoryType, 0x40_0000, *kernel_base));
         // Aligning this to 2MB is necessary because we map it as large pages, but this potentially wastes a lot of memory.
@@ -315,7 +315,9 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
                 monotonic := last_region.address < region.address;
                 if !monotonic {
-                    display("Error: Firmware memory map is not in order.\n");
+                    display("Error: Firmware memory map is not in order.\n\r");
+                    display("Last region: ", last_region.address, "|", last_region.pages, "|", last_region.type, "\n\r");
+                    display("This region: ",      region.address, "|",      region.pages, "|",      region.type, "\n\r");
                     while true {}
                 }
 
@@ -338,7 +340,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             bd.memory_map_entries_used += 1;
 
             if bd.memory_map_entries_used == bd.memory_map.count {
-                display("Ran out of memory map entries.\n");
+                display("Ran out of memory map entries.\n\r");
                 break;
             }
         }
@@ -358,8 +360,10 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         }
 
         {
+
             // Load kernel executable
             elf := load_buffer;
+
             elf_header := cast(*Elf64_Ehdr) elf;
 
             for 0..elf_header.e_phnum-1 {

@@ -176,7 +176,7 @@ init_ahci_controller :: (device: Pci_Device) -> Ahci_Controller {
     }
 
     // Todo bitfield
-    num_ports := cast(int, ahci.CAP__host_capabilities & 0b11111) + 1;
+    num_ports          := cast(int,  ahci.CAP__host_capabilities       & 0b11111) + 1;
     command_slot_count := cast(int, (ahci.CAP__host_capabilities >> 8) & 0b11111) + 1;
 
     max_ports := 32;
@@ -266,16 +266,18 @@ init_ahci_controller :: (device: Pci_Device) -> Ahci_Controller {
             it.CTBA__command_table_base = physical + cast(u64) offset;
         }
 
+
         port.CMD__command_status |= .FRE__fis_receive_enable;
 
         Timeout(#code {
-            if port.CMD__command_status & .FR__receive_running > 0 break;
+            if port.CMD__command_status.FR__receive_running break;
         }, "AHCI port idle timeout (receive running)");
+
 
         port.CMD__command_status |= .ST__start;
 
         Timeout(#code {
-            if port.CMD__command_status & .CR__command_list_running > 0 break;
+            if port.CMD__command_status.CR__command_list_running break;
         }, "AHCI port idle timeout (command list running)");
 
         return controller;

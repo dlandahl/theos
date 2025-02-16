@@ -234,64 +234,19 @@ __arithmetic_overflow :: (left: s64, right: s64, type_code: u16, line_number: s6
     if fatal my_panic();
 }
 
+// write_string is implemented in the main program.
+write_string_callback: (s: string) #no_context;
+
 write_string_unsynchronized :: (s: string, to_standard_error := false) #no_context {
-    serial_out(s);
+    write_string_callback(s);
 }
 
 write_string :: (s: string, to_standard_error := false) #no_context #compiler {
-
-    mutex := *serial_mutex;
-    carry: u8;
-
-    while true {
-        #asm {
-            lock_bts.q [mutex], 0;
-            setc carry;
-        }
-
-        if !carry break;
-        #asm { pause; }
-    }
-
-    write_string_unsynchronized(s, to_standard_error);
-
-    #asm { lock_dec.q [mutex]; }
+    write_string_callback(s);
 }
 
 write_strings :: (strings: ..string, to_standard_error := false) #no_context #compiler {
     for strings write_string(it, to_standard_error);
-}
-
-serial_mutex: u64;
-
-serial_out :: (data: string) #no_context {
-    COM1 :: 0x3f8;
-
-    for cast([] u8) data {
-        for 1..10_0000 {
-            status: u8;
-            port := COM1 + 5;
-
-            #asm {
-                status === a;
-                port   === d;
-                in.b status, port;
-            }
-
-            if status & 0x20 break;
-
-            #asm { pause; }
-        }
-
-        byte := it;
-        port := COM1;
-
-        #asm {
-            byte === a;
-            port === d;
-            out.b port, byte;
-        }
-    }
 }
 
 write_loc :: (loc: Source_Code_Location, to_standard_error := false) #no_context {

@@ -562,7 +562,7 @@ calibrate_tsc :: () -> hz: u64 {
         delta[1] = delta[0];
         delta[0] = cast(int, tsc1 - tsc0);
 
-        if it < 3 continue;
+        if it < 2 continue;
 
         abs :: (a: int) -> int {
             if a < 0 return -a;

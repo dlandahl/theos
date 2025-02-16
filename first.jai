@@ -33,7 +33,7 @@ main :: () {
         jai_command := tprint("%/bin/jai-linux first.jai", JAI_ROOT_DIR);
         process: HANDLE;
 
-        WslLaunch(utf8_to_wide_new(WSL_DISTRO_NAME), utf8_to_wide_new(jai_command), .TRUE, stdin, stdout, stderr, *process);
+        WslLaunch(utf8_to_wide(WSL_DISTRO_NAME), utf8_to_wide(jai_command), .TRUE, stdin, stdout, stderr, *process);
         WaitForSingleObject(process, INFINITE);
 
         return;
@@ -51,10 +51,10 @@ main :: () {
     if args {
         do_bootloader, do_kernel = false, false;
 
-        for args {
-            if      it == "kernel" do_kernel = true;
-            else if it == "boot" do_bootloader = true;
-            else log_error("Command line argument not understood: %", it);
+        for args if it == {
+            case "kernel"; do_kernel = true;
+            case "boot"; do_bootloader = true;
+            case; log_error("Command line argument not understood: %", it);
         }
     }
 

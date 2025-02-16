@@ -1,5 +1,6 @@
 
 #import "Basic";
+
 #import "Machine_X64";
 #import "Bit_Operations";
 
@@ -73,6 +74,17 @@ Kernel_Globals :: struct {
     // need are Invariant TSC, and for the frequency to be provided by CPUID. However, Boostibot on Discord
     // has said that TSC frequency is imprecise even if provided by CPUID, so will need to investigate that.
     tsc_deadline_support: bool;
+
+
+    temporary_text_drawing_state: struct {
+        cursor_x: int;
+        cursor_y: int;
+
+        font: Pnm;
+        spinlock: Spinlock;
+    }
+    
+    serial_port_spinlock: Spinlock;
 }
 
 kernel_globals: Kernel_Globals;
@@ -82,6 +94,8 @@ Interrupts :: #library,no_dll "../.build/interrupts";
 #program_export
 kernel_entry :: () #no_context {
     using kernel_globals;
+
+    write_string_callback = kernel_write_string;
 
     // We should avoid using the UEFI identity map because we'll need to get rid of it once we run user processes in low memory.
     boot_data = cast(*Boot_Data, Boot_Data.BASE_ADDRESS + DIRECT_MAPPING_BASE);
@@ -141,7 +155,8 @@ kernel_entry :: () #no_context {
                 red   := cast(int, 0xff * (1.0 / y_resolution) * y);
                 green := cast(int, 0xff * (1.0 / x_resolution) * x);
 
-                buffer[x + y * stride] = cast(u32, (red << 16) | (green << 8));
+                // buffer[x + y * stride] = cast(u32, (red << 16) | (green << 8));
+                buffer[x + y * stride] = 0;
             }
         }
 
@@ -201,6 +216,9 @@ kernel_entry :: () #no_context {
         boot_time = native_calendar_to_apollo(boot_calendar_time);
 
         init_tsc();
+
+        kernel_globals.temporary_text_drawing_state.font = parse_pnm(font_file);
+        draw_text("Hello, Sailor!\nWelcome to the operating system.\n");
 
         core_begin_multitasking();
 
@@ -513,7 +531,7 @@ allocate_large_page :: () -> u64 #no_context {
 }
 
 // These procs do a lot of hardcoded linked-list manipulation. It would be good to
-// move that into dedicated structs and procedures but not sure how to express it.
+// move that into dedicated structs and procedures.
 
 find_or_add_disk_cache_entry :: (disk_address: u64) -> u64 {
     using kernel_globals;
@@ -824,7 +842,7 @@ alloc_block :: (using allocator: *Block_Allocator, unaligned_bytes_wanted: u64, 
     return 0, .{};
 }
 
-free_block :: (using allocator: *Block_Allocator, address: u64) -> bool {
+free_block :: (using allocator: *Block_Allocator, address: u64) {
     Scoped_Acquire(*spinlock);
 
     // Find the block corresponding to that address using linear search
@@ -842,10 +860,17 @@ free_block :: (using allocator: *Block_Allocator, address: u64) -> bool {
     if m == -1 {
         print_stack_trace(context.stack_trace);
         bluescreen();
-        return false;
+        return;
     }
 
     block := *blocks[m];
+
+    if !block.used {
+        print_stack_trace(context.stack_trace);
+        bluescreen();
+        return;
+    }
+
     block.used = false;
 
     // Coalesce following block
@@ -867,8 +892,6 @@ free_block :: (using allocator: *Block_Allocator, address: u64) -> bool {
         }
         blocks.count -= 1;
     }
-
-    return true;
 }
 
 
@@ -931,9 +954,43 @@ find_acpi_table :: (signature: string) -> *Acpi_Table_Header {
 
 
 
-// This is implemented in Runtime_Support, so that write_string can go to serial
-// serial_out :: (data: string)
+serial_out :: (data: string) #no_context {
+    COM1 :: 0x3f8;
 
+    for cast([] u8) data {
+        for 1..10_0000 {
+            status: u8;
+            port := COM1 + 5;
+
+            #asm {
+                status === a;
+                port   === d;
+                in.b status, port;
+            }
+
+            if status & 0x20 break;
+
+            #asm { pause; }
+        }
+
+        byte := it;
+        port := COM1;
+
+        #asm {
+            byte === a;
+            port === d;
+            out.b port, byte;
+        }
+    }
+}
+
+kernel_write_string :: (text: string) #no_context {
+    acquire(*kernel_globals.serial_port_spinlock);
+    serial_out(text);
+    release(*kernel_globals.serial_port_spinlock);
+
+    draw_text(text);
+}
 
 
 load_fence :: () #expand {
@@ -1163,4 +1220,144 @@ Timeout :: (code: Code, message := "", time := 1000) #expand {
             bluescreen();
         }
     }
+}
+
+
+
+
+
+
+
+
+// Temporary debug text draw logic
+
+font_file :: #run,host -> [] u8 {
+    image := read_entire_file("font.pgm");
+    return add_global_data(cast([] u8) image, .WRITABLE);
+}
+
+draw_text :: (text: string) #no_context {
+    using kernel_globals.temporary_text_drawing_state;
+
+    Scoped_Acquire(*spinlock);
+
+    text_spacing :: 5;
+    char_width :: 9;
+    char_height :: 16;
+    margin :: 10;
+
+    framebuffer := kernel_globals.framebuffer;
+
+    for text {
+        if it == 0 continue;
+        if it == #char "\r" continue;
+        if it == #char "\n" {
+            cursor_y += 1;
+            cursor_x = 0;
+            continue;
+        }
+
+        if (cursor_x + 1) * char_width >= framebuffer.x_resolution {
+            cursor_y += 1;
+            cursor_x = 0;
+        }
+
+        max_y := (cursor_y+1) * (char_height + text_spacing) + margin * 2;
+        if max_y > framebuffer.y_resolution {
+            cursor_y = 0;
+        }
+
+        source_top_left := char_width * (cast(int) it - 0x20);
+
+        for y: 0..char_height-1 {
+            for x: 0..char_width-1 {
+                line := cursor_y * (char_height + text_spacing) * framebuffer.stride + margin * framebuffer.stride;
+                column := cursor_x * char_width + margin;
+
+                pixel := line + column + x + y * framebuffer.stride;
+                index := source_top_left + x + y * font.width;
+
+                c := cast(u32) font.data[index];
+
+                framebuffer.buffer[pixel] = (c) | (c << 8) | (c << 16) | (c << 24);
+            }
+        }
+
+        cursor_x += 1;
+    }
+}
+
+Pnm :: struct {
+    width: int;
+    height: int;
+
+    type: enum {
+        UNINITIALIZED :: 0;
+        ASCII_BITMAP;
+        ASCII_GRAYMAP;
+        ASCII_PIXMAP;
+        BITMAP;
+        GRAYMAP;
+        PIXMAP;
+    }
+
+    data: *u8;
+}
+
+parse_pnm :: (file: [] u8) -> Pnm {
+    buffer := file.data;
+    assert(buffer[0] == #char "P");
+
+    pnm: Pnm;
+    pnm.type = xx (buffer[1] - #char "0");
+    assert(pnm.type == .GRAYMAP || pnm.type == .PIXMAP);
+
+    is_whitespace :: (char: u8) -> bool {
+        return char == 0x20
+            || char == 0x09
+            || char == 0x0a
+            || char == 0x0b
+            || char == 0x0c
+            || char == 0x0d
+            || char == #char "#";
+    }
+
+    ConsumeWhitespaceAndComments :: () #expand {
+        while is_whitespace(buffer[`cursor]) {
+            if buffer[`cursor] == #char "#" {
+                while buffer[`cursor] != 0xa `cursor += 1;
+            }
+            cursor += 1;
+        }
+    }
+
+    ParseInt :: () -> int #expand {
+        digit := buffer[`cursor];
+        result: int;
+
+        while !is_whitespace(digit) {
+            assert(digit >= #char "0" && digit <= #char "9");
+            result *= 10;
+            result += digit - #char "0";
+            `cursor += 1;
+            digit = buffer[`cursor];
+        }
+        return result;
+    }
+
+    cursor := 2;
+    ConsumeWhitespaceAndComments();
+    pnm.width = ParseInt();
+
+    ConsumeWhitespaceAndComments();
+    pnm.height = ParseInt();
+
+    ConsumeWhitespaceAndComments();
+    max_value := ParseInt();
+    assert(max_value == 255);
+
+    ConsumeWhitespaceAndComments();
+    pnm.data = buffer + cursor;
+
+    return pnm;
 }
