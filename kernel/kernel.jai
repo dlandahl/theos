@@ -6,6 +6,7 @@
 
 #import "Bitfield";
 set :: bitfield_set;
+get :: bitfield_get;
 
 #load "../boot_data.jai";
 
@@ -178,7 +179,7 @@ kernel_entry :: () #no_context {
         next_free_interrupt_gate = 32;
 
 
-        rsdp := cast(*Acpi_RSDP__Root_System_Description_Pointer) boot_data.acpi_rsdp;
+        rsdp := cast(*Acpi_Rsdp) boot_data.acpi_rsdp;
         acpi_version = rsdp.revision;
 
         assert(acpi_version == 0 || acpi_version == 2);
@@ -226,7 +227,9 @@ kernel_entry :: () #no_context {
         for pci_devices {
             if it.class_code == .MASS_STORAGE && it.subclass == 0x6 {
 
-                controller := init_ahci_controller(it);
+                controller, success := init_ahci_controller(it);
+                if !success continue;
+
                 memory := allocate_large_page();
                 ahci_transfer(*controller, .READ, memory, 512, 0);
 
@@ -468,7 +471,7 @@ bluescreen :: (loc := #caller_location) #no_context {
     using kernel_globals.framebuffer;
 
     for y: 0..y_resolution-1 for x: 0..x_resolution-1 {
-        buffer[x + y * stride] = cast(u32) 0xff2138e7;
+        // buffer[x + y * stride] = cast(u32) 0xff2138e7;
     }
 
     write_string("Bluescreen!\nSource code location:\n");
@@ -704,6 +707,10 @@ free_4k_page :: (pool: *Physical_4k_Page_Pool, address: u64) #no_context {
     // Todo
 }
 
+free_4k_page :: (address: u64) #no_context {
+    free_4k_page(*kernel_globals.physical_page_pool, address);
+}
+
 
 
 get_or_create_page_table :: (table: *u64, entry: u64) -> *u64 {
@@ -903,28 +910,30 @@ free_block :: (using allocator: *Block_Allocator, address: u64) {
 
 
 
-Acpi_RSDP__Root_System_Description_Pointer :: struct {
+Acpi_Rsdp :: struct {
     signature: [8] u8;
-    checksum: u8;
-    oem_id: [6] u8;
-    revision: u8;
-    rsdt_address: u32;
+    checksum:      u8;
+    oem_id:    [6] u8;
+    revision:      u8;
+    rsdt_address:  u32;
 
-    length: u32;
-    xsdt_address: u64 #align 4;
-    checksum_2: u8;
-    reserved: [3] u8;
+    length:        u32;
+    xsdt_address:  u64 #align 4;
+    checksum_2:    u8;
+    reserved:  [3] u8;
 }
 
 Acpi_Table_Header :: struct {
-    signature: [4] u8;
-    length: u32;
-    revision: u8;
-    checksum: u8;
-    oem_id: [6] u8;
+    signature:    [4] u8;
+    length:           u32;
+    revision:         u8;
+    checksum:         u8;
+
+    oem_id:       [6] u8;
     oem_table_id: [8] u8;
-    oem_revision: u32;
-    creator_id: u32;
+    oem_revision:     u32;
+
+    creator_id:       u32;
     creator_revision: u32;
 
     // Note that this is only aligned to 4 bytes, so if you put this in a struct followed by a u64, it will be wrong.
@@ -1215,21 +1224,23 @@ align :: (alignment: int, value: int) -> int #no_context {
     return (value + (alignment - 1)) & -alignment;
 }
 
-Timeout_Block :: (code: Code, message := "", time := 1000) #expand {
+Timeout_Block :: (code: Code, message := "", time_ms := 1000) #expand {
     start := get_monotonic_system_time();
 
     while true {
         #insert code;
         elapsed := get_monotonic_system_time() - start;
 
-        if to_milliseconds(elapsed) > time {
+        if to_milliseconds(elapsed) > time_ms {
             log_error(message);
             bluescreen();
         }
+
+        #asm { pause; }
     }
 }
 
-Timeout :: (code: Code, message := "", time := 1000) #expand {
+Timeout :: (code: Code, message := "", time_ms := 1000) #expand {
     start := get_monotonic_system_time();
 
     while true {
@@ -1238,10 +1249,12 @@ Timeout :: (code: Code, message := "", time := 1000) #expand {
 
         elapsed := get_monotonic_system_time() - start;
 
-        if to_milliseconds(elapsed) > time {
+        if to_milliseconds(elapsed) > time_ms {
             log_error(message);
             bluescreen();
         }
+
+        #asm { pause; }
     }
 }
 

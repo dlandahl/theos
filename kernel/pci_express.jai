@@ -153,13 +153,13 @@ Ahci_Controller :: struct {
     port: *Ahci_Port;
 }
 
-init_ahci_controller :: (device: Pci_Device) -> Ahci_Controller {
+init_ahci_controller :: (device: Pci_Device) -> c: Ahci_Controller = .{}, success: bool {
     device.registers[1] |= cast(u32) Pci_Command.BUS_MASTER | .MEMORY_SPACE;
 
     bar := read_base_address_register(device, bar_index = 5);
     if !bar.base {
         log_error("AHCI controller has no base address set");
-        return .{};
+        return success = false;
     }
 
     ahci := cast(*Ahci_Memory_Region) map_base_address_register(bar);
@@ -168,7 +168,7 @@ init_ahci_controller :: (device: Pci_Device) -> Ahci_Controller {
 
     if !(ahci.CAP__host_capabilities & .S64A__64bit_addressing) {
         log_error("AHCI controller without 64-bit addressing not supported");
-        return .{};
+        return success = false;
     }
 
     if !(ahci.CAP__host_capabilities & .SAM__supports_ahci_only) {
@@ -211,7 +211,7 @@ init_ahci_controller :: (device: Pci_Device) -> Ahci_Controller {
         port := *ahci.ports[it];
         if !(port.CMD__command_status & .SUD__spin_up_device) {
             log_error("AHCI port not spun up");
-            return .{};
+            return success = false;
         }
 
         // if ahci.CAP__host_capabilities & .STAGGERED_SPIN_UP {
@@ -223,12 +223,12 @@ init_ahci_controller :: (device: Pci_Device) -> Ahci_Controller {
         ipm := port.SSTS__sata_status & .IPM_MASK;
         if ipm != .IPM_ACTIVE {
             log_error("AHCI port power management interface state is not active. See 3.3.10 (PxSSTS)");
-            return .{};
+            return success = false;
         }
 
         if port.SIG__signature != .ATA {
             log_error("AHCI We only handle the \"ATA\" device signature");
-            return .{};
+            return success = false;
         }
 
         // Need a better allocator for cache-disabled memory
@@ -285,11 +285,11 @@ init_ahci_controller :: (device: Pci_Device) -> Ahci_Controller {
             "AHCI port idle timeout (command list running)"
         );
 
-        return controller;
+        return controller, true;
     }
 
     bluescreen();
-    return .{};
+    return success = false;
 }
 
 ahci_port_is_running :: (port: *Ahci_Port) -> bool {
@@ -582,14 +582,14 @@ Nvme_Controller :: struct {
 Nvme_Property_Memory_Map :: struct {
     start_marker: void;
 
-    CAP__capabilities: u64;
+    CAP__capabilities:            Nvme_Controller_Capabilities;
     VS__version:                  Nvme_Specification_Version_Descriptor;
-    INTMS: u32;
-    INTMC: u32;
+    INTMS:                        u32;
+    INTMC:                        u32;
     CC__controller_config:        Nvme_Controller_Configuration;
-    __reserved__: u32;
+    __reserved__:                 u32;
     CSTS__controller_status:      Nvme_Controller_Status;
-    NSSR: u32;
+    NSSR:                         u32;
     AQA__admin_queue_attributes:  Nvme_Admin_Queue_Attributes;
     ASQ__admin_submission_queue:  u64;
     ACQ__admin_completion_queue:  u64;
@@ -601,15 +601,46 @@ Nvme_Property_Memory_Map :: struct {
     CQ0HDBL__completion_queue_0_head_doorbell: u32;
 }
 
+Nvme_Controller_Capabilities :: enum u64 {
+    MQES__maximum_queue_entries          :: 16;
+    CQR__contiguous_queue_entries        :: 1;
+    AMS__arbitration_mechanism_supported :: 2;
+    __reserved__                         :: 5;
+    TO__timeout                          :: 8;
+    DSTRD__doorbell_stride               :: 4;
+    NSSRS__nvm_subsystem_reset           :: 1;
+    NCSS__nvm_command_set_support        :: 1;
+    __reserved__2                        :: 5;
+    IOCSS__io_command_set_support        :: 1;
+    NOIOCSS__no_io_command_set_support   :: 1;
+
+    BPS    :: 1;
+    CPS    :: 2;
+    MPSMIN :: 4;
+    MPSMAX :: 4;
+    PMRS   :: 1;
+    CMBS   :: 1;
+    NSSS   :: 1;
+    CRMS   :: 2;
+    NSSES  :: 1;
+    __reserved__3 :: 2;
+} @Bitfield
+
 Nvme_Specification_Version_Descriptor :: struct {
     ter__teritary: u8;
     mnr__minor:    u8;
     mjr__major:    u16;
 }
 
-Nvme_Controller_Configuration :: enum_flags u32 {
-    EN__ENABLE :: 0x1;
-}
+Nvme_Controller_Configuration :: enum u32 {
+    EN__enable                   :: 0x1;
+    __reserved__                 :: 0x3;
+    CSS__io_command_set          :: 0x3;
+    MPS__memory_page_size        :: 0x4;
+    AMS__arbitration_mechanism   :: 0x3;
+
+    __rest_of_the_bits :: 18;
+} @Bitfield
 
 Nvme_Controller_Status :: enum_flags u32 {
     RDY__READY :: 0x1;
@@ -621,7 +652,7 @@ Nvme_Admin_Queue_Attributes :: struct {
 }
 
 Nvme_Submission_Queue_Entry :: struct {
-    OPC__opcode: u8;
+    OPC__opcode: Nvme_Admin_Opcode;
     FUSE_and_PSDT: u8;
     CID__command_identifier: u16;
     NSID__namespace_identifier: u32;
@@ -632,7 +663,35 @@ Nvme_Submission_Queue_Entry :: struct {
     MPTR__metadata_pointer: u64;
     DPTR__data_pointer:     [2] u64;
 
-    CDW__command_dwords_10_to_15: [6] u32;
+    union {
+        CDW__command_dwords_10_to_15: [6] u32;
+
+        // For IDENTIFY commands:
+        CNS__controller_or_namespace: Nvme_Controller_Or_Namespace_Structure;
+    }
+}
+
+Nvme_Controller_Or_Namespace_Structure :: enum u8 {
+    IDENTIFY_NAMESPACE       :: 0x0;
+    IDENTIFY_CONTROLLER      :: 0x1;
+    ACTIVE_NAMESPACE_ID_LIST :: 0x2;
+}
+
+Nvme_Admin_Opcode :: enum u8 {
+    DELETE_IO_SUBMISSION_QUEUE :: 0x0;
+    CREATE_IO_SUBMISSION_QUEUE :: 0x1;
+    GET_LOG_PAGE               :: 0x2;
+    DELETE_IO_COMPLETION_QUEUE :: 0x4;
+    CREATE_IO_COMPLETION_QUEUE :: 0x5;
+    IDENTIFY                   :: 0x6;
+    ABORT                      :: 0x8;
+}
+
+Nvme_Identify_Controller_Structure :: struct {
+    VID__pci_vendor_id: u16;
+    SSVID__pci_subsystem_vendor_id: u16;
+    SN__serial_number: [20] u8;
+    MN__model_number:  [40] u8;
 }
 
 #assert size_of(Nvme_Submission_Queue_Entry) == 64;
@@ -649,20 +708,14 @@ init_nvme_controller :: (device: Pci_Device) -> Nvme_Controller {
     bar := read_base_address_register(device, bar_index = 0);
     nvme.mmio = map_base_address_register(bar);
 
-    log("Initializing NVMe controller. Spec version: %\n", nvme.VS__version);
-
 
     // Reset the controller.
     ready :: nvme => nvme.CSTS__controller_status & .RDY__READY;
 
-    nvme.CC__controller_config &= ~.EN__ENABLE;
-    Timeout(!ready(nvme), "NVMe reset timeout (RDY is set.)");
-
-    // Todo: set CC.MPS, .IOSQES, .CSS here
-
-    nvme.CC__controller_config |= .EN__ENABLE;
-    Timeout(ready(nvme), "NVMe reset timeout (RDY is unset.)");
-
+    if ready(nvme) {
+        set(*nvme.CC__controller_config, .EN__enable, 0);
+        Timeout(!ready(nvme), "NVMe reset timeout (RDY is set.)");
+    }
 
     // Initialize admin queues.
     admin_sq := get_4k_page();
@@ -683,37 +736,64 @@ init_nvme_controller :: (device: Pci_Device) -> Nvme_Controller {
     nvme.admin_submission_queue.data = cast(*Nvme_Submission_Queue_Entry, admin_sq + DIRECT_MAPPING_BASE);
     nvme.admin_submission_queue.count = queue_size;
 
+    NOIOCSS := get(nvme.CAP__capabilities, .NOIOCSS__no_io_command_set_support);
+    IOCSS   := get(nvme.CAP__capabilities, .IOCSS__io_command_set_support);
+    NCSS    := get(nvme.CAP__capabilities, .NCSS__nvm_command_set_support);
+
+    if NOIOCSS        set(*nvme.CC__controller_config, .CSS__io_command_set, 0b111);
+    if IOCSS          set(*nvme.CC__controller_config, .CSS__io_command_set, 0b100);
+    if !IOCSS && NCSS set(*nvme.CC__controller_config, .CSS__io_command_set, 0b000);
+
+    set(*nvme.CC__controller_config, .AMS__arbitration_mechanism, 0);
+    set(*nvme.CC__controller_config, .MPS__memory_page_size, 0);
+
+    set(*nvme.CC__controller_config, .EN__enable, 1);
+    // For some reason this timeout trips on QEMU.
+    Timeout(ready(nvme), "NVMe reset timeout (RDY is unset.)");
+
 
     // Send IDENTIFY command.
     identify_command: *Nvme_Submission_Queue_Entry = nvme.admin_submission_queue.data;
     identify_command.* = .{};
-
-    identify_result_buffer := get_4k_page();
-    identify_command.DPTR__data_pointer[0] = identify_result_buffer;
-
-    // CNS, controller or namespace structure. 0x1 means identify the controller.
-    identify_command.CDW__command_dwords_10_to_15[0] = 0x1;
-    identify_command.OPC__opcode = 0x6;
-
-    completion_queue_base: *u64 = xx (admin_cq + DIRECT_MAPPING_BASE);
-
-    print("Completion queue entry: %\n", (completion_queue_base + 3).*);
+    identify_command.DPTR__data_pointer[0] = get_4k_page();
+    identify_command.CNS__controller_or_namespace = .IDENTIFY_CONTROLLER;
+    identify_command.OPC__opcode = .IDENTIFY;
 
     nvme.admin_submission_queue_tail = 1;
     nvme.SQ0TDBL__submission_queue_0_tail_doorbell = cast(u32) nvme.admin_submission_queue_tail;
 
-    while true {
-        for 0..511 {
-            byte := cast(*u8) identify_result_buffer + it + DIRECT_MAPPING_BASE;
-            print("% ", formatInt(byte.*, base=16, minimum_digits=2));
+    identify_result := identify_command.DPTR__data_pointer[0] + DIRECT_MAPPING_BASE;
+    while cast(*u8, identify_result).* == 0 {}
 
-            if !((it+1) % 16) print("\n");
-        }
+    identify := cast(*Nvme_Identify_Controller_Structure) identify_result;
 
-        print("Completion queue entry: %\n", (completion_queue_base + 3).*);
+    sn := cast(string) identify.SN__serial_number;
+    mn := cast(string) identify.MN__model_number;
+    for sn if it == #char " " { sn.count = it_index; break; }
+    for mn if it == #char " " { mn.count = it_index; break; }
 
-        print("=============================\n");
-        for 1..10_000_000 #asm { pause; }
+    log("Found NVMe controller with serial number '%' and model number '%'.", sn, mn);
+    free_4k_page(identify_command.DPTR__data_pointer[0]);
+
+
+    // Identify active namespace ID list.
+    identify_command = nvme.admin_submission_queue.data + 1;
+    identify_command.* = .{};
+    identify_command.DPTR__data_pointer[0] = get_4k_page();
+    identify_command.CNS__controller_or_namespace = .ACTIVE_NAMESPACE_ID_LIST;
+    identify_command.OPC__opcode = .IDENTIFY;
+
+    identify_result = identify_command.DPTR__data_pointer[0] + DIRECT_MAPPING_BASE;
+
+    nvme.admin_submission_queue_tail += 1;
+    nvme.SQ0TDBL__submission_queue_0_tail_doorbell = cast(u32) nvme.admin_submission_queue_tail;
+
+    while cast(*u8, identify_result).* == 0 {}
+
+    list := cast(*[1024] u32) identify_result;
+    for list.* {
+        if it == 0 continue;
+        log("Found NSID %.\n", it);
     }
 
     return nvme;
