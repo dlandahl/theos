@@ -74,6 +74,8 @@ read_configuration_space :: (base_address: u64, bus: int, device: int, function:
 }
 
 Pci_Configuration_Space :: struct {
+    start_marker: void;
+
     vendor_id:       u16;
     device_id:       u16;
     status:          u16;
@@ -86,6 +88,31 @@ Pci_Configuration_Space :: struct {
     latency_timer:   u8;
     header_type:     u8;
     bist:            u8;
+
+#place start_marker;
+    offset: [0x34] u8;
+    capability_pointer: u32;
+}
+
+Pci_Capability_List_Entry :: struct {
+    id: u8;
+    next: u8;
+
+    padding: u16;
+}
+
+traverse_pci_capability_list :: (device: *Pci_Device) {
+    capability: *Pci_Capability_List_Entry = cast(*void) device.configuration_space + device.capability_pointer;
+
+    while true {
+        log("Found capability with id %.", formatInt(capability.id, base=16));
+
+        if !capability.next {
+            break;
+        }
+
+        capability = cast(*void) device.configuration_space + capability.next;
+    }
 }
 
 PCI_VENDOR_ID_NO_DEVICE :: 0xffff;
@@ -594,6 +621,7 @@ Nvme_Property_Memory_Map :: struct {
     ASQ__admin_submission_queue:  u64;
     ACQ__admin_completion_queue:  u64;
 
+    // Would be nice to be able to give a constant to #place
 #place start_marker;
     offset_for_transport_specific_properties: [0x1000] u8;
 
@@ -699,6 +727,8 @@ Nvme_Identify_Controller_Structure :: struct {
 init_nvme_controller :: (device: Pci_Device) -> Nvme_Controller {
     if device.class_code != .MASS_STORAGE bluescreen();
     if device.subclass   != 0x8           bluescreen();
+
+    traverse_pci_capability_list(*device);
 
     device.registers[1] |= cast(u32) Pci_Command.BUS_MASTER | .MEMORY_SPACE;
     device.registers[1] &= cast(u32) ~Pci_Command.INTERRUPT_DISABLE;
