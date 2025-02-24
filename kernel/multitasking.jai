@@ -205,7 +205,6 @@ wake_sleeping_tasks :: (core: *X64_Core, time: Apollo_Time) {
         to_wake.sleeping = false;
         to_wake.next_sleeping = null;
         queue_push(*waiting_to_run, to_wake);
-
     }
 }
 
@@ -243,10 +242,9 @@ yield :: () {
     _current := *scheduler.current_task;
     core.task_state_segment.rsp[0] = next.kernel_stack;
 
-    // Todo: I don't think it makes sense to trigger a manual software interrupt in order to load the
-    // stack/RIP of the target task in cases where we called into the scheduler from the timer IRQ.
-    // Because in theory, we should be able to use that interrupt stack frame to do the same thing.
-    // It's not clear to me at the moment how to structure the code to do this.
+    // Todo: I think this software interrupt is completely vestigial. The code should be
+    // restructured so that the context switch happens in the interrupt handler that called
+    // this yield procedure.
 
     #asm {
         mov rax: gpr === a, _current;

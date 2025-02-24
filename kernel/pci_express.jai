@@ -33,7 +33,8 @@ find_all_pci_devices :: () {
                 header := read_configuration_space(it.base_address, bus, device, 0);
                 if !header continue;
 
-                array_add(*pci_devices, .{header});
+                new_device := array_add(*pci_devices);
+                new_device.configuration_space = header;
 
                 if header.header_type & 0x80 == 0 {
                     // Device is not multi-function.
@@ -42,7 +43,9 @@ find_all_pci_devices :: () {
 
                 for function: 1..7 {
                     header = read_configuration_space(it.base_address, bus, device, function);
-                    array_add(*pci_devices, .{header});
+
+                    new_device := array_add(*pci_devices);
+                    new_device.configuration_space = header;
                 }
             }
         }
@@ -51,9 +54,18 @@ find_all_pci_devices :: () {
 
 pci_devices: [..] Pci_Device;
 
-Pci_Device :: union {
+Pci_Device :: struct {
     using configuration_space: *Pci_Configuration_Space;
+
+#place configuration_space;
     registers: *u32;
+
+    union {
+        msi: *Pci_Capability_Msi;
+        msi64: *Pci_Capability_Msi64;
+    }
+
+    msi_64bit_address: bool;
 };
 
 read_configuration_space :: (base_address: u64, bus: int, device: int, function: int) -> *Pci_Configuration_Space {
@@ -94,18 +106,52 @@ Pci_Configuration_Space :: struct {
     capability_pointer: u32;
 }
 
-Pci_Capability_List_Entry :: struct {
-    id: u8;
-    next: u8;
+Pci_Capability :: struct {
+    id: enum u8 {
+        NULL;
+        POWER_MANAGEMENT_INTERFACE;
+        ACCELERATED_GRAPHICS_PORT;
+        VITAL_PRODUCT_DATA;
+        SLOT_ID;
+        MESSAGE_SIGNALLED_INTERRUPT;
 
-    padding: u16;
+        // More of these IDs listed at https://pcisig.com/sites/default/files/files/PCI_Code-ID_r_1_11__v24_Jan_2019.pdf
+    };
+
+    next: u8;
 }
 
-traverse_pci_capability_list :: (device: *Pci_Device) {
-    capability: *Pci_Capability_List_Entry = cast(*void) device.configuration_space + device.capability_pointer;
+Msi_Control_Flags :: enum_flags u16 {
+    ENABLE  :: 0x1;
+    _64_BIT :: 0x80;
+}
+
+Pci_Capability_Msi :: struct {
+    #as cap: Pci_Capability;
+
+    control: Msi_Control_Flags;
+    address: u32;
+    data: u16;
+}
+
+Pci_Capability_Msi64 :: struct {
+    #as cap: Pci_Capability;
+
+    control: Msi_Control_Flags;
+    address: u64 #align 1;
+    data: u16;
+}
+
+parse_pci_capability_list :: (device: *Pci_Device) {
+    capability: *Pci_Capability = cast(*void) device.configuration_space + device.capability_pointer;
 
     while true {
-        log("Found capability with id %.", formatInt(capability.id, base=16));
+        log("Found capability %.", capability.id);
+
+        if capability.id == .MESSAGE_SIGNALLED_INTERRUPT {
+            device.msi = cast(*Pci_Capability_Msi) capability;
+            device.msi_64bit_address = device.msi.control & ._64_BIT > 0;
+        }
 
         if !capability.next {
             break;
@@ -178,10 +224,38 @@ Ahci_Controller :: struct {
 
     received_fis: *Ahci_Received_Fis;
     port: *Ahci_Port;
+    ahci: *Ahci_Memory_Region;
 }
+
+#program_export
+ahci_interrupt :: (data: *void) {
+    write_string("Handling AHCI Interrupt.\n");
+} @InterruptRoutine
 
 init_ahci_controller :: (device: Pci_Device) -> c: Ahci_Controller = .{}, success: bool {
     device.registers[1] |= cast(u32) Pci_Command.BUS_MASTER | .MEMORY_SPACE;
+    device.registers[1] &= cast(u32) ~Pci_Command.INTERRUPT_DISABLE;
+
+    parse_pci_capability_list(*device);
+
+    if device.msi {
+        gate := allocate_interrupt_gate();
+        register_interrupt_gate(int__ahci_interrupt, gate);
+
+        write_string("Device has MSI.\n");
+
+        device.msi.control |= .ENABLE;
+        device.msi.address = 0x0fee_0000;
+
+        // core := get_current_core();
+        // device.msi.address |= core.local_apic_id << 12;
+
+        if device.msi.control & ._64_BIT {
+            device.msi64.data = xx gate;
+        } else {
+            device.msi.data = xx gate;
+        }
+    }
 
     bar := read_base_address_register(device, bar_index = 5);
     if !bar.base {
@@ -190,6 +264,8 @@ init_ahci_controller :: (device: Pci_Device) -> c: Ahci_Controller = .{}, succes
     }
 
     ahci := cast(*Ahci_Memory_Region) map_base_address_register(bar);
+
+    log("Interrupt status is %.\n", ahci.IS__interrupt_status);
 
     ahci.GHC__global_host_control |= .AE__ahci_enable;
 
@@ -230,6 +306,8 @@ init_ahci_controller :: (device: Pci_Device) -> c: Ahci_Controller = .{}, succes
                 "AHCI port not idle timeout (receive running)"
             );
         }
+
+        log("Interrupt status (port) is %.\n", port.IS__interrupt_status);
     }
 
     for 0..max_ports - 1 {
@@ -297,6 +375,7 @@ init_ahci_controller :: (device: Pci_Device) -> c: Ahci_Controller = .{}, succes
             it.CTBA__command_table_base = physical + cast(u64) offset;
         }
 
+        port.IE__interrupt_enable = 0xffff_ffff;
 
         port.CMD__command_status |= .FRE__fis_receive_enable;
 
@@ -312,6 +391,7 @@ init_ahci_controller :: (device: Pci_Device) -> c: Ahci_Controller = .{}, succes
             "AHCI port idle timeout (command list running)"
         );
 
+        controller.ahci = ahci;
         return controller, true;
     }
 
@@ -332,6 +412,7 @@ Transfer_Direction :: enum {
 }
 
 ahci_transfer :: (controller: *Ahci_Controller, direction: Transfer_Direction, memory_address: u64, number_of_bytes: u64, disk_address: u64) {
+
     assert(cast(u64) memory_address % 0x200 == 0);
 
     sector_count : u64 = (number_of_bytes + 0x1ff) / 0x200;
@@ -395,7 +476,7 @@ ahci_transfer_sectors :: (controller: *Ahci_Controller, direction: Transfer_Dire
     prdt := *table.PRDT__physical_region_descriptor_table[0];
     prdt.DBA__data_base_address = physical;
     prdt.DBC__data_byte_count = cast(u32) sector_count * 0x200 - 1;
-    // prdt.I__interrupt_on_completion = .NO;
+    prdt.I__interrupt_on_completion |= .YES;
 
     Timeout_Block(#code {
         if controller.port.SACT__sata_active & 1 continue;
@@ -416,6 +497,10 @@ ahci_transfer_sectors :: (controller: *Ahci_Controller, direction: Transfer_Dire
         !(controller.port.CI__command_issue & 1),
         "SATA command issue timeout"
     );
+
+    log("(Transfer) Interrupt status is %.\n", controller.ahci.IS__interrupt_status);
+    log("(Transfer) Interrupt status (port) is %.\n", controller.port.IS__interrupt_status);
+
 }
 
 Ata_Command :: enum u8 {
@@ -727,8 +812,6 @@ Nvme_Identify_Controller_Structure :: struct {
 init_nvme_controller :: (device: Pci_Device) -> Nvme_Controller {
     if device.class_code != .MASS_STORAGE bluescreen();
     if device.subclass   != 0x8           bluescreen();
-
-    traverse_pci_capability_list(*device);
 
     device.registers[1] |= cast(u32) Pci_Command.BUS_MASTER | .MEMORY_SPACE;
     device.registers[1] &= cast(u32) ~Pci_Command.INTERRUPT_DISABLE;
