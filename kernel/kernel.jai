@@ -82,7 +82,9 @@ Kernel_Globals :: struct {
         cursor_y: int;
 
         font: Pnm;
-        spinlock: Spinlock;
+
+        // Recursive, so that errors generated during text rendering can be displayed on the screen.
+        spinlock: Recursive_Spinlock;
     }
     
     serial_port_spinlock: Spinlock;
@@ -242,13 +244,13 @@ kernel_entry :: () #no_context {
             }
         }
 
+        while true {}
+
         for pci_devices {
             if it.class_code == .MASS_STORAGE && it.subclass == 0x8 {
                 init_nvme_controller(it);
             }
         }
-
-        while true {}
 
         startup_application_processors();
 
@@ -452,8 +454,8 @@ init_processor_core :: () #no_context {
         // According to https://www.felixcloutier.com/x86/sysret, sysret sets the privilege bits in the stack segment selector automatically, but this does not seem to happen in VirtualBox.
         star := (cast(u64) Segment_Selector.RING0_DATA | 3) << 48;
         star |= (cast(u64) Segment_Selector.RING0_CODE)     << 32;
-        write_msr(.STAR__syscall_segment, star);
 
+        write_msr(.STAR__syscall_segment, star);
         write_msr(.SFMASK__syscall_flags, 0);
 
         syscall_entry :: () #foreign Interrupts;
@@ -471,7 +473,9 @@ bluescreen :: (loc := #caller_location) #no_context {
     using kernel_globals.framebuffer;
 
     for y: 0..y_resolution-1 for x: 0..x_resolution-1 {
-        // buffer[x + y * stride] = cast(u32) 0xff2138e7;
+        t := cast(float, buffer[x + y * stride] & 0xff) / 0xff;
+
+        buffer[x + y * stride] = cast(u32) 0xff2138e7;
     }
 
     write_string("Bluescreen!\nSource code location:\n");
@@ -1115,7 +1119,7 @@ sequence_read :: (lock: *Sequence_Lock, body: Code) #expand {
         while true {
             sequence = lock.*;
 
-            if (sequence & 1) == 0 break;
+            if !(sequence & 1) break;
 
             #asm { pause; }
         }
@@ -1274,7 +1278,7 @@ draw_text :: (text: string) #no_context {
 
     Scoped_Acquire(*spinlock);
 
-    text_spacing :: 5;
+    line_spacing :: 5;
     char_width   :: 9;
     char_height  :: 16;
     margin       :: 10;
@@ -1296,19 +1300,19 @@ draw_text :: (text: string) #no_context {
         }
 
         screen_x := cursor_x * char_width + margin;
-        screen_y := cursor_y * (char_height + text_spacing) + margin;
+        screen_y := cursor_y * (char_height + line_spacing) + margin;
 
-        if screen_y + char_height + text_spacing + margin > framebuffer.y_resolution {
-            source := (char_height + text_spacing + margin) * framebuffer.stride;
+        if screen_y + char_height + line_spacing + margin > framebuffer.y_resolution {
+            source := (char_height + line_spacing + margin) * framebuffer.stride;
             target := margin * framebuffer.stride;
 
-            count := cursor_y * (char_height + text_spacing) * framebuffer.stride;
+            count := cursor_y * (char_height + line_spacing) * framebuffer.stride;
 
             // Inefficient when printing strings with many newlines.
             memcpy(framebuffer.buffer + target, framebuffer.buffer + source, count * size_of(u32));
 
             cursor_y -= 1;
-            screen_y -= char_height + text_spacing;
+            screen_y -= char_height + line_spacing;
         }
 
         source_top_left := char_width * (cast(int) it - 0x20);

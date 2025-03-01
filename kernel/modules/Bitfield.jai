@@ -41,17 +41,21 @@ bitfield_set :: (bitfield: *$B, flag: B, value: s64, $loc := #caller_location, $
         assert(value <= max_value, "The bitfield slot does not have enough bits to represent the value %. It can maximally represent %.", value, max_value);
     }
 
-    bitfield.* &= cast,no_check(B) (~bit_mask);
-    bitfield.* |= cast,no_check(B) ((value << bit_offset) & bit_mask);
+    // Don't dereference the pointer twice to mask out and set the new value.
+    // Can make a difference when the pointer directly refers to a memory-mapped hardware register.
+    temp := bitfield.*;
+    temp &= cast,no_check(B, ~bit_mask);
+    temp |= cast,no_check(B, value << bit_offset);
+    bitfield.* = temp;
 }
 
-bitfield_get :: (bitfield: $B, flag: B, $loc := #caller_location, $call := #caller_code) -> s64 {
+bitfield_get :: (bitfield: $B, flag: B, $loc := #caller_location, $call := #caller_code) -> B {
     bit_mask, bit_offset := #run calculate_mask_and_offset(B, loc, call);
 
-    value := cast(u64) bitfield;
-    value &= cast(u64) bit_mask;
-    value >>= cast(u64) bit_offset;
-    return cast(s64) value;
+    value := bitfield;
+    value &=  xx bit_mask;
+    value >>= xx bit_offset;
+    return value;
 }
 
 #scope_module

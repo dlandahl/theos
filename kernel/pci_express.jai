@@ -245,7 +245,7 @@ init_ahci_controller :: (device: Pci_Device) -> c: Ahci_Controller = .{}, succes
         write_string("Device has MSI.\n");
 
         device.msi.control |= .ENABLE;
-        device.msi.address = 0x0fee_0000;
+        device.msi.address = 0xfee0_0000;
 
         // core := get_current_core();
         // device.msi.address |= core.local_apic_id << 12;
@@ -267,7 +267,7 @@ init_ahci_controller :: (device: Pci_Device) -> c: Ahci_Controller = .{}, succes
 
     log("Interrupt status is %.\n", ahci.IS__interrupt_status);
 
-    ahci.GHC__global_host_control |= .AE__ahci_enable;
+    ahci.GHC__global_host_control |= .AE__ahci_enable | .IE__interrupt_enable;
 
     if !(ahci.CAP__host_capabilities & .S64A__64bit_addressing) {
         log_error("AHCI controller without 64-bit addressing not supported");
@@ -306,8 +306,6 @@ init_ahci_controller :: (device: Pci_Device) -> c: Ahci_Controller = .{}, succes
                 "AHCI port not idle timeout (receive running)"
             );
         }
-
-        log("Interrupt status (port) is %.\n", port.IS__interrupt_status);
     }
 
     for 0..max_ports - 1 {
@@ -335,6 +333,8 @@ init_ahci_controller :: (device: Pci_Device) -> c: Ahci_Controller = .{}, succes
             log_error("AHCI We only handle the \"ATA\" device signature");
             return success = false;
         }
+
+        log("Interrupt status (port) is %.\n", port.IS__interrupt_status);
 
         // Need a better allocator for cache-disabled memory
         list_size := align(4096, size_of(Ahci_Command_Header) * command_slot_count);
@@ -368,14 +368,14 @@ init_ahci_controller :: (device: Pci_Device) -> c: Ahci_Controller = .{}, succes
 
         controller.port = port;
 
-        for *controller.command_list {
+        for* controller.command_list {
             offset := list_size + fis_size + it_index * 4096;
             controller.command_table[it_index] = virtual + offset;
 
             it.CTBA__command_table_base = physical + cast(u64) offset;
         }
 
-        port.IE__interrupt_enable = 0xffff_ffff;
+        port.IE__interrupt_enable |= 1 << 5;
 
         port.CMD__command_status |= .FRE__fis_receive_enable;
 
@@ -466,17 +466,20 @@ ahci_transfer_sectors :: (controller: *Ahci_Controller, direction: Transfer_Dire
     // It needs to be generalised to access drives on any port, and should dynamically allocate command lists that
     // contain more physical region descriptors, to reduce software overhead of disk access.
     controller.command_list[0].PRDTL__prd_table_length = 1;
-    controller.command_list[0].PRDBC__prd_byte_count = size_of(Ahci_Physical_Region_Descriptor);
+    controller.command_list[0].PRDBC__prd_byte_count = 0;
     controller.command_list[0].flags = size_of(Ahci_Command_Fis) / 4;
 
     if direction == .WRITE {
-        controller.command_list[0].flags |= 0x40; // Todo magic number
+        controller.command_list[0].flags |= .WRITE;
     }
 
     prdt := *table.PRDT__physical_region_descriptor_table[0];
     prdt.DBA__data_base_address = physical;
-    prdt.DBC__data_byte_count = cast(u32) sector_count * 0x200 - 1;
-    prdt.I__interrupt_on_completion |= .YES;
+    prdt.DBC__data_byte_count = cast(u16) sector_count * 0x200 - 1;
+    prdt.I__interrupt_on_completion = .YES;
+
+    context.print_style.default_format_int.base = 16;
+    log("PRDT: %\n", prdt.*);
 
     Timeout_Block(#code {
         if controller.port.SACT__sata_active & 1 continue;
@@ -497,6 +500,9 @@ ahci_transfer_sectors :: (controller: *Ahci_Controller, direction: Transfer_Dire
         !(controller.port.CI__command_issue & 1),
         "SATA command issue timeout"
     );
+
+
+    for 1..1_000_000 #asm { pause; }
 
     log("(Transfer) Interrupt status is %.\n", controller.ahci.IS__interrupt_status);
     log("(Transfer) Interrupt status (port) is %.\n", controller.port.IS__interrupt_status);
@@ -526,11 +532,14 @@ Ata_Status :: enum_flags u8 {
 }
 
 Ahci_Command_Header :: struct {
-    flags: u16;
+    flags: enum u16 {
+        WRITE :: 0x40;
+    }
+
     PRDTL__prd_table_length: u16;
     PRDBC__prd_byte_count: u32;
     CTBA__command_table_base: u64;
-
+    
     reserved: [4] u32;
 }
 
@@ -546,10 +555,10 @@ Ahci_Command_Table :: struct {
 Ahci_Physical_Region_Descriptor :: struct {
     DBA__data_base_address: u64;
     reserved: u32;
-    DBC__data_byte_count: u32;
+    DBC__data_byte_count: u16;
 
-#place DBC__data_byte_count;
-    I__interrupt_on_completion: enum u32 { NO; YES :: 0x8000_0000; };
+// #place DBC__data_byte_count;
+    I__interrupt_on_completion: enum u16 { NO; YES :: 0x8000; };
 }
 
 Fis_Type :: enum u8 {
@@ -646,8 +655,8 @@ Ahci_Port :: struct {
 
 HBA_GHC__Ahci_Global_Host_Control :: enum_flags u32 {
     HR__hba_reset                      :: 0x1;
-    IE__interrrupt_enable              :: 0x2;
-    MSRM__msi_revert_to_single_message :: 0x4;
+    IE__interrupt_enable               :: 0x2;
+    MRSM__msi_revert_to_single_message :: 0x4;
     AE__ahci_enable                    :: 0x8000_0000;
 }
 
@@ -746,11 +755,11 @@ Nvme_Specification_Version_Descriptor :: struct {
 }
 
 Nvme_Controller_Configuration :: enum u32 {
-    EN__enable                   :: 0x1;
-    __reserved__                 :: 0x3;
-    CSS__io_command_set          :: 0x3;
-    MPS__memory_page_size        :: 0x4;
-    AMS__arbitration_mechanism   :: 0x3;
+    EN__enable                   :: 1;
+    __reserved__                 :: 3;
+    CSS__io_command_set          :: 3;
+    MPS__memory_page_size        :: 4;
+    AMS__arbitration_mechanism   :: 3;
 
     __rest_of_the_bits :: 18;
 } @Bitfield
@@ -784,12 +793,6 @@ Nvme_Submission_Queue_Entry :: struct {
     }
 }
 
-Nvme_Controller_Or_Namespace_Structure :: enum u8 {
-    IDENTIFY_NAMESPACE       :: 0x0;
-    IDENTIFY_CONTROLLER      :: 0x1;
-    ACTIVE_NAMESPACE_ID_LIST :: 0x2;
-}
-
 Nvme_Admin_Opcode :: enum u8 {
     DELETE_IO_SUBMISSION_QUEUE :: 0x0;
     CREATE_IO_SUBMISSION_QUEUE :: 0x1;
@@ -798,6 +801,12 @@ Nvme_Admin_Opcode :: enum u8 {
     CREATE_IO_COMPLETION_QUEUE :: 0x5;
     IDENTIFY                   :: 0x6;
     ABORT                      :: 0x8;
+}
+
+Nvme_Controller_Or_Namespace_Structure :: enum u8 {
+    IDENTIFY_NAMESPACE       :: 0x0;
+    IDENTIFY_CONTROLLER      :: 0x1;
+    ACTIVE_NAMESPACE_ID_LIST :: 0x2;
 }
 
 Nvme_Identify_Controller_Structure :: struct {

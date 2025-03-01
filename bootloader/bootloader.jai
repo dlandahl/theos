@@ -44,7 +44,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             framebuffer.data  = cast(*u32) gop.Mode.frame_buffer_base;
             framebuffer.count = cast(s64) gop.Mode.frame_buffer_size / size_of(u32);
 
-            for *framebuffer {
+            for* framebuffer {
                 it.* = 0x00ffff00;
             }
 
