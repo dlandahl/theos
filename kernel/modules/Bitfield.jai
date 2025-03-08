@@ -58,6 +58,70 @@ bitfield_get :: (bitfield: $B, flag: B, $loc := #caller_location, $call := #call
     return value;
 }
 
+print_bitfield :: (builder: *String_Builder, bitfield: $B, format: *FormatStruct = null, $loc := #caller_location) {
+    ti :: type_info(B);
+
+    #run validate_bitfield(ti, loc);
+
+    if !format format = *context.print_style.default_format_struct;
+
+    if format.draw_type_name {
+        append(builder, ti.name);
+    }
+
+    append(builder, format.begin_string);
+
+    use_newlines := false;
+    long_form := false;
+
+    long_form_limit := format.use_long_form_if_more_than_this_many_members;
+    if (long_form_limit < 0) || (ti.names.count > long_form_limit) {
+        long_form = true;
+        use_newlines = format.use_newlines_if_long_form;
+    }
+
+    if use_newlines append(builder, "\n");
+
+    context.print_style.indentation_depth += 1;
+
+    bit_offset: int;
+
+    for ti.names {
+        if use_newlines append_indentation(builder, format);
+
+        if long_form {
+            append(builder, it);
+            append(builder, format.separator_between_name_and_value);
+        }
+
+        bit_count := ti.values[it_index];
+        bit_mask := (1 << bit_count) - 1;
+
+        value :=  bitfield;
+        value >>= xx bit_offset;
+        value &=  xx bit_mask;
+
+        default := context.print_style.default_format_int;
+        default.value = cast(u64) value;
+        print_integer(builder, default);
+
+        if long_form {
+            append(builder, format.long_form_separator_between_fields);
+        } else {
+            if it_index < ti.names.count-1 append(builder, format.short_form_separator_between_fields);
+        }
+
+        if use_newlines append(builder, "\n");
+
+        bit_offset += bit_count;
+    }
+
+    context.print_style.indentation_depth -= 1;
+
+    if use_newlines append_indentation(builder, format);
+    append(builder, format.end_string);
+}
+
 #scope_module
 
 #import "Compiler";
@@ -92,7 +156,8 @@ calculate_mask_and_offset :: (bitfield: Type, loc: Source_Code_Location, call: C
     }
 
     if operator_type != #char "." || expression.kind != .IDENT {
-        error := tprint("Here, please pass a single field from the bitfield \"%\"", ti.name);
+        name := ifx ti.name else "(anonymous type)";
+        error := tprint("Here, please pass a single field from the bitfield \"%\"", name);
         compiler_report(error, make_location(expression));
     }
 
@@ -109,17 +174,16 @@ calculate_mask_and_offset :: (bitfield: Type, loc: Source_Code_Location, call: C
             break;
         }
 
-        bit_offset += ti.values[it_index] % 0x100;
+        bit_offset += ti.values[it_index];
     }
 
     if !found {
-        error := tprint("The name \"%\" is not a field of the bitfield \"%\". (You can't use variables as the second argument to bitfield_set.)", field_name, ti.name);
+        name := ifx ti.name else "(anonymous type)";
+        error := tprint("The name \"%\" is not a field of the bitfield \"%\". (You can't use variables as the second argument to bitfield_set.)", field_name, name);
         compiler_report(error, make_location(expression));
     }
 
-    bit_mask: int = 1;
-    for 1..bit_count bit_mask *= 2;
-    bit_mask -= 1;
+    bit_mask := (1 << bit_count) - 1;
 
     bit_mask <<= bit_offset;
     return bit_mask, bit_offset;
@@ -127,7 +191,7 @@ calculate_mask_and_offset :: (bitfield: Type, loc: Source_Code_Location, call: C
 
 validate_bitfield :: (bitfield: *Type_Info, loc: Source_Code_Location) {
     if bitfield.type != .ENUM {
-        compiler_report("Argument to bitfield_set is not an enum.", loc);
+        compiler_report("Argument to bitfield routine is not an enum.", loc);
         return;
     }
 
@@ -142,7 +206,8 @@ validate_bitfield :: (bitfield: *Type_Info, loc: Source_Code_Location) {
     expected_width := bitfield.runtime_size*8;
 
     if total_width != expected_width {
-        error_message := tprint("Bitfield \"%\" values do not sum to the width of its integer type. The total width was %, expected %", ti.name, total_width, expected_width);
+        name := ifx ti.name else "(anonymous type)";
+        error_message := tprint("Bitfield \"%\" values do not sum to the width of its integer type. The total width was %, expected %", name, total_width, expected_width);
         compiler_report(error_message, loc);
     }
 }
