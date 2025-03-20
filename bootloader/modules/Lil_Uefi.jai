@@ -1,6 +1,6 @@
 
 //
-// Generated from the Lil_Uefi library by Ryan J Fleury
+// Generated from the Lil_Uefi library by Ryan Fleury
 //
 
 
