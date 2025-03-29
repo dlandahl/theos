@@ -34,7 +34,7 @@ Todo: would like to have this syntax:
 #scope_export
 
 bitfield_set :: (bitfield: *$B, flag: B, value: s64, $loc := #caller_location, $call := #caller_code) {
-    bit_mask, bit_offset := #run calculate_mask_and_offset(B, loc, call);
+    bit_mask, bit_offset :: #run calculate_mask_and_offset(B, loc, call);
 
     #if ENABLE_RUNTIME_ERROR_CHECKS {
         max_value := bit_mask >> bit_offset;
@@ -50,7 +50,7 @@ bitfield_set :: (bitfield: *$B, flag: B, value: s64, $loc := #caller_location, $
 }
 
 bitfield_get :: (bitfield: $B, flag: B, $loc := #caller_location, $call := #caller_code) -> B {
-    bit_mask, bit_offset := #run calculate_mask_and_offset(B, loc, call);
+    bit_mask, bit_offset :: #run calculate_mask_and_offset(B, loc, call);
 
     value := bitfield;
     value &=  xx bit_mask;

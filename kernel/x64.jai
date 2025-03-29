@@ -1,18 +1,20 @@
 
 X64_Flags :: enum_flags u64 {
-    CF__carry  :: 0x1;
-    PF__parity :: 0x4;
-    AF__adjust :: 0x10;
-    ZF__zero   :: 0x40;
-    SF__sign   :: 0x80;
-    TF__trap   :: 0x100;
+    CF__carry     :: 0x1;
+    PF__parity    :: 0x4;
+    AF__adjust    :: 0x10;
+    ZF__zero      :: 0x40;
+    SF__sign      :: 0x80;
+    TF__trap      :: 0x100;
     IF__interrupt :: 0x200;
     DF__direction :: 0x400;
     OF__overflow  :: 0x800;
     RF__resume    :: 0x10000;
 }
 
-Syscall_Stack :: struct {
+General_Registers :: struct {
+    // The stack layout resulting from the push_all assembly macro defined in first.jai
+
     r15:  u64;
     r14:  u64;
     r13:  u64;
@@ -30,22 +32,10 @@ Syscall_Stack :: struct {
     rax:  u64;
 }
 
+Syscall_Stack :: General_Registers;
+
 Interrupt_Stack :: struct (with_error_code := false) {
-    r15:  u64;
-    r14:  u64;
-    r13:  u64;
-    r12:  u64;
-    r11:  u64;
-    r10:  u64;
-    r9:   u64;
-    r8:   u64;
-    rbp:  u64;
-    rdi:  u64;
-    rsi:  u64;
-    rdx:  u64;
-    rcx:  u64;
-    rbx:  u64;
-    rax:  u64;
+    using registers: General_Registers;
 
     Architectural_Part :: struct {
         #if with_error_code {
@@ -97,10 +87,10 @@ register_interrupt_gate :: (handler: () #c_call, index: int, trap := false) {
 
 Global_Descriptor_Table :: struct {
     null_entry: u64;
-    ring0_code: Gdt_Entry_Flags;
-    ring0_data: Gdt_Entry_Flags;
-    ring3_data: Gdt_Entry_Flags;
-    ring3_code: Gdt_Entry_Flags;
+    ring0_code: Gdt_Entry;
+    ring0_data: Gdt_Entry;
+    ring3_data: Gdt_Entry;
+    ring3_code: Gdt_Entry;
     task_state: System_Segment_Descriptor;
     terminator: u64;
 }
@@ -112,7 +102,7 @@ Segment_Selector :: enum u16 {
     RING3_CODE :: 0x20|3;
 }
 
-Gdt_Entry_Flags :: enum u64 {
+Gdt_Entry :: enum u64 {
     AVAILABLE       :: 0x01 << 52;
     LONG_MODE_CODE  :: 0x02 << 52;
     SIZE            :: 0x04 << 52;

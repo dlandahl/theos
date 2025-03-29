@@ -4,7 +4,7 @@
 #import "Machine_X64";
 #import "Bit_Operations";
 
-#import "Bitfield";
+#import "Bitfield"(false);
 set :: bitfield_set;
 get :: bitfield_get;
 
@@ -223,9 +223,13 @@ kernel_entry :: () #no_context {
         kernel_globals.temporary_text_drawing_state.font = parse_pnm(font_file);
         draw_text("Hello, Sailor!\nWelcome to the operating system.\n");
 
+        time := get_monotonic_system_time();
+        calendar := native_apollo_to_calendar(time);
+        print("Time: %\n", calendar_to_string(calendar));
+
         core_begin_multitasking();
 
-        find_all_pci_devices();
+        // find_all_pci_devices();
         for pci_devices {
             if it.class_code == .MASS_STORAGE && it.subclass == 0x6 {
 
@@ -243,8 +247,6 @@ kernel_entry :: () #no_context {
                 }
             }
         }
-
-        while true {}
 
         for pci_devices {
             if it.class_code == .MASS_STORAGE && it.subclass == 0x8 {
@@ -403,7 +405,7 @@ init_processor_core :: () #no_context {
         tss_desc.base_address_3 = cast(u32, tss_address >> 32);
         tss_desc.flags_0        = 0b1_00_0_1001; // type=TSS non-busy | PRESENT
 
-        using Gdt_Entry_Flags;
+        using Gdt_Entry;
 
         core.global_descriptor_table = Global_Descriptor_Table.{
             0x0,
@@ -475,7 +477,7 @@ bluescreen :: (loc := #caller_location) #no_context {
     for y: 0..y_resolution-1 for x: 0..x_resolution-1 {
         t := cast(float, buffer[x + y * stride] & 0xff) / 0xff;
 
-        buffer[x + y * stride] = cast(u32) 0xff2138e7;
+        // buffer[x + y * stride] = cast(u32) 0xff2138e7;
     }
 
     write_string("Bluescreen!\nSource code location:\n");
@@ -549,6 +551,7 @@ allocate_large_page :: () -> u64 #no_context {
 
 find_or_add_disk_cache_entry :: (disk_address: u64) -> u64 {
     using kernel_globals;
+
     Scoped_Acquire(*large_page_allocator.spinlock);
 
     block_index := disk_address / 0x20_0000;

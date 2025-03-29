@@ -315,16 +315,17 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
                 monotonic := last_region.address < region.address;
                 if !monotonic {
-                    display("Error: Firmware memory map is not in order.\n\r");
-                    display("Last region: ", last_region.address, "|", last_region.pages, "|", last_region.type, "\n\r");
-                    display("This region: ",      region.address, "|",      region.pages, "|",      region.type, "\n\r");
-                    while true {}
+                    display("Error: Firmware memory map is not in order.\r\n");
+                    display("Last region: ", last_region.address, "|", last_region.pages, "|", last_region.type, "\r\n");
+                    display("This region: ",      region.address, "|",      region.pages, "|",      region.type, "\r\n");
+
+                    break;
                 }
 
                 if !contiguous {
                     gap_base := limit(last_region.*);
 
-                    display("Warning: Firmware memory map is not contiguous: ", gap_base, " <-> ", region.address, "\n");
+                    display("Warning: Firmware memory map is not contiguous: ", gap_base, " <-> ", region.address, "\r\n");
 
                     gap_region: Boot_Data.Memory_Region;
                     gap_region.type    = .NOT_REPORTED;
@@ -340,7 +341,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             bd.memory_map_entries_used += 1;
 
             if bd.memory_map_entries_used == bd.memory_map.count {
-                display("Ran out of memory map entries.\n\r");
+                display("Ran out of memory map entries.\r\n");
                 break;
             }
         }
@@ -408,12 +409,12 @@ check_efi_status :: (status: EFI_STATUS, loc := #caller_location) {
 
     for ti.values if it == cast(int) status {
         enum_name := ti.names[it_index];
-        display("UEFI call failed on line ", loc.line_number, " with status ", enum_name, "\n\r");
+        display("UEFI call failed on line ", loc.line_number, " with status ", enum_name, "\r\n");
 
         return;
     }
 
-    display("UEFI call failed on line ", loc.line_number, " with unknown status code 0x", cast(u64) status, "\n\r");
+    display("UEFI call failed on line ", loc.line_number, " with unknown status code 0x", cast(u64) status, "\r\n");
 }
 
 display :: (args: .. Any) {
@@ -493,7 +494,7 @@ serial_out :: (data: string) #no_context {
 
 write_number :: (n: u64, base := 16) {
     if n == 0 {
-        serial_out("0\n");
+        serial_out("0\r\n");
         return;
     }
 
@@ -527,5 +528,5 @@ write_number :: (n: u64, base := 16) {
     s.data  = buf.data + cursor;
     s.count = starting_cursor - cursor;
     serial_out(s);
-    serial_out("\n");
+    serial_out("\r\n");
 }

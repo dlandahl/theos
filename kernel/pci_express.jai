@@ -66,7 +66,7 @@ Pci_Device :: struct {
     }
 
     msi_64bit_address: bool;
-};
+}
 
 read_configuration_space :: (base_address: u64, bus: int, device: int, function: int) -> *Pci_Configuration_Space {
     device_offset := cast(u64, bus * 256 + device * 8 + function);
@@ -428,7 +428,8 @@ ahci_transfer :: (controller: *Ahci_Controller, direction: Transfer_Direction, m
     sector_count -= first_sector_count;
 
     ahci_transfer_sectors(controller, direction, memory_address, cast(u32) lba, xx first_sector_count);
-    lba += first_sector_count;
+
+    lba            += first_sector_count;
     memory_address += first_sector_count * 0x200;
 
     while sector_count > 128 {

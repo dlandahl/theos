@@ -119,15 +119,15 @@ initialize_apic :: () {
     acpi_header := cast(*Acpi_Madt) find_acpi_table("APIC");
 
     Apic_Base_Flags :: enum_flags {
-        BSC__Boot_Strap_Core :: 1 << 8;
-        EXTD__2xApic_Mode    :: 1 << 10;
-        AE__Apic_Enable      :: 1 << 11;
+        BSC__boot_strap_core :: 1 << 8;
+        EXTD__2xapic_mode    :: 1 << 10;
+        AE__apic_enable      :: 1 << 11;
     }
 
     apic_base := << cast(*Apic_Base_Flags) *read_msr(.APIC_BASE);
-    assert(apic_base & .BSC__Boot_Strap_Core > 0);
+    assert(apic_base & .BSC__boot_strap_core > 0);
 
-    apic_base |= .AE__Apic_Enable;
+    apic_base |= .AE__apic_enable;
     write_msr(.APIC_BASE, cast(u64) apic_base);
 
     {

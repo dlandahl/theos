@@ -94,7 +94,7 @@ core_begin_multitasking :: () {
 
         register_interrupt_gate(int__spurious_interrupt, 0xff);
         spurious := read_apic_register(.SPURIOUS_INTERRUPT);
-        write_apic_register(.SPURIOUS_INTERRUPT, spurious | 0x1ff);
+        write_apic_register(.SPURIOUS_INTERRUPT, spurious | 0x1ff); // Todo magic number
 
         lapic_timer: Apic_Lvt_Timer;
 
@@ -412,7 +412,8 @@ spurious_interrupt :: (stack: Interrupt_Stack()) #c_call {
 
 
 Queue :: struct (Item_Type: Type) {
-    // Using a resizeable array to hold the underlying data, to get the resizing logic from Basic/Array.jai. It means we need to keep saying items.count = items.allocated.
+    // Using a resizeable array to hold the underlying data, to get the resizing logic from Basic/Array.jai.
+    // items.count does not have any meaning (because count is tail - head), so it only gets set such that maybe_grow does the right thing.
     items: [..] Item_Type;
     head: int;
     tail: int;
@@ -423,18 +424,22 @@ queue_push :: (using queue: *Queue) -> *queue.Item_Type {
     item := *items[tail];
     tail += 1;
 
-    if tail >= items.count {
+    if tail >= items.allocated {
         tail = 0;
     }
 
     if tail == head {
         old_count := items.allocated;
 
-        items.count += 1;
+        items.count = items.allocated + 1;
         maybe_grow(cast(*Resizable_Array) *queue.items, size_of(queue.Item_Type));
         items.count = items.allocated;
 
-        memcpy(items.data + items.count - head - 1, items.data + head, (old_count - head + 1) * size_of(Item_Type));
+        memcpy(
+            items.data + items.allocated - head - 1,
+            items.data + head,
+            (old_count - head + 1) * size_of(Item_Type)
+        );
 
         tail = old_count;
         item = *items[tail-1];
@@ -449,7 +454,7 @@ queue_pop :: (using queue: *Queue) -> queue.Item_Type {
     item := items[head];
     head += 1;
 
-    if head >= items.count {
+    if head >= items.allocated {
         head = 0;
     }
 
@@ -468,7 +473,7 @@ queue_reserve :: (using queue: *Queue, capacity: int) {
 queue_length :: (using queue: Queue) -> int {
     if tail > head return tail - head;
 
-    return tail + items.count - head;
+    return tail + items.allocated - head;
 }
 
 queue_is_empty :: (using queue: Queue) -> bool {
