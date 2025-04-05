@@ -11,17 +11,18 @@
 
     command := break_command_into_strings(#string QEMU_CMD
         qemu-system-x86_64
-            -machine q35
-            -cpu qemu64,apic,fsgsbase,tsc-deadline
+            -machine q35 -accel kvm
+            -cpu max,+apic,+fsgsbase,+tsc-deadline,+invtsc
             -bios OVMF.fd
-            -drive format=raw,file=disk_image.img
+            -drive format=raw,file=disk_image.img,id=nvm,if=none
+            -device nvme,serial=cafebabe,drive=nvm
             -chardev stdio,id=char0,logfile=logs/qemu_serial.txt,signal=off
             -serial chardev:char0
             -m 256M 
             -smp 4 
     QEMU_CMD);
-        // -d int 
 
+    // -d int 
 
     run_command(.. command);
 }
