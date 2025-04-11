@@ -58,7 +58,9 @@ get_monotonic_system_time :: () -> Apollo_Time {
 }
 
 native_calendar_to_apollo :: (ct: Calendar_Time) -> Apollo_Time {
-    leap_year_count := leap_years_before(cast(s64) ct.year - 1) - #run leap_years_before(1970);
+    LEAP_YEARS_BEFORE_1970 :: 477;
+
+    leap_year_count := leap_years_before(cast(s64) ct.year - 1) - LEAP_YEARS_BEFORE_1970;
     year_difference := cast(s64) ct.year - 1970;
 
     seconds := 31536000 * (year_difference - leap_year_count);
@@ -92,11 +94,13 @@ native_calendar_to_apollo :: (ct: Calendar_Time) -> Apollo_Time {
 // https://git.musl-libc.org/cgit/musl/tree/src/time/__secs_to_tm.c
 
 native_apollo_to_calendar :: (apollo: Apollo_Time) -> Calendar_Time {
-    LEAPOCH :: #run calendar_to_apollo(.{year=2000, month_starting_at_0=2, day_of_month_starting_at_0=0});
 
-    DAYS_PER_QUAD_CENTURY :: 146097;
-    DAYS_PER_CENTURY      :: 36524;
-    DAYS_PER_QUADRENNIUM  :: 1461;
+    // Apollo Time for March 1st 2000
+    LEAPOCH :: Apollo_Time.{14200603904491421696, 52369};
+
+    DAYS_PER_QUATERCENTENARY :: 146097;
+    DAYS_PER_CENTURY         :: 36524;
+    DAYS_PER_QUADRENNIUM     :: 1461;
 
     seconds := to_seconds(apollo - LEAPOCH);
 
@@ -118,11 +122,11 @@ native_apollo_to_calendar :: (apollo: Apollo_Time) -> Calendar_Time {
     weekday := (days + 3) % 7;
     if weekday < 0 weekday += 7;
 
-    quad_centuries := days / DAYS_PER_QUAD_CENTURY;
-    days %= DAYS_PER_QUAD_CENTURY;
+    quad_centuries := days / DAYS_PER_QUATERCENTENARY;
+    days %= DAYS_PER_QUATERCENTENARY;
 
     if days < 0 {
-        days += DAYS_PER_QUAD_CENTURY;
+        days += DAYS_PER_QUATERCENTENARY;
         quad_centuries -= 1;
     }
 

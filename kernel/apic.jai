@@ -208,7 +208,7 @@ initialize_apic :: () {
     timer_gate := allocate_interrupt_gate();
     register_interrupt_gate(int__local_apic_timer_interrupt, timer_gate);
 
-    // Store this, to be able to configure the APIC timer of all CPUs to use the same interrupt handler.
+    // Store this, to be able to configure the APIC timer of all cores to use the same interrupt handler.
     // In the future we might not need the APIC timer if we only support CPUs with the TSC deadline feature.
     kernel_globals.local_apic_timer_interrupt_gate = timer_gate;
 }

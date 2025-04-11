@@ -413,7 +413,7 @@ spurious_interrupt :: (stack: Interrupt_Stack()) #c_call {
 
 Queue :: struct (Item_Type: Type) {
     // Using a resizeable array to hold the underlying data, to get the resizing logic from Basic/Array.jai.
-    // items.count does not have any meaning (because count is tail - head), so it only gets set such that maybe_grow does the right thing.
+    // items.count does not have any meaning (because count is tail - head), so it gets set such that maybe_grow does the right thing and bounds checking doesn't fail.
     items: [..] Item_Type;
     head: int;
     tail: int;

@@ -29,7 +29,17 @@ X64_Core :: struct {
     id: int;
 
     scheduler: Scheduler;
+
+    // This struct represents a logical core. The architecture doesn't seem to distinguish between logical and physical cores.
 }
+
+// This can't be in kernel_globals, or else, due to the size of the IOPB, the compiler will
+// reserve 9Mb in the executable, all of which is zero.
+space_for_processor_cores: [1024] X64_Core;
+
+// For the same reason this struct shouldn't have default values.
+#assert initializer_of(X64_Core) == null;
+
 
 Kernel_Globals :: struct {
     using boot_data: *Boot_Data;
@@ -46,9 +56,6 @@ Kernel_Globals :: struct {
     interrupt_descriptor_table: [256] Interrupt_Gate_Descriptor #align 16;
     next_free_interrupt_gate: int;
 
-    // This takes up a lot of static memory, as each core contains an 8Kb IO permission bitmap.
-    // We could use the same IOPB, but it's addressed by a 16-bit relative pointer in the TSS, which needs to be per core.
-    space_for_processor_cores: [64] X64_Core;
     processor_cores: [] X64_Core;
 
     apic: *void;
