@@ -34,7 +34,7 @@ X64_Core :: struct {
 }
 
 // This can't be in kernel_globals, or else, due to the size of the IOPB, the compiler will
-// reserve 9Mb in the executable, all of which is zero.
+// reserve 8Mb in the executable, all of which is zero.
 space_for_processor_cores: [1024] X64_Core;
 
 // For the same reason this struct shouldn't have default values.
@@ -237,7 +237,7 @@ kernel_entry :: () #no_context {
         core_begin_multitasking();
 
         find_all_pci_devices();
-        if false for pci_devices {
+        if false for* pci_devices {
             if it.class_code == .MASS_STORAGE && it.subclass == 0x6 {
 
                 controller, success := init_ahci_controller(it);
@@ -255,7 +255,7 @@ kernel_entry :: () #no_context {
             }
         }
 
-        for pci_devices {
+        for* pci_devices {
             if it.class_code == .MASS_STORAGE && it.subclass == 0x8 {
                 init_nvme_controller(it);
             }

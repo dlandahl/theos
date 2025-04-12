@@ -64,8 +64,11 @@ Pci_Device :: struct {
         msi: *Pci_Capability_Msi;
         msi64: *Pci_Capability_Msi64;
     }
-
     msi_64bit_address: bool;
+
+    msi_x: *Pci_Capability_Msi_X;
+    msi_x_table: [] Msi_X_Table_Entry;
+    msi_x_pba: [] u64;
 }
 
 read_configuration_space :: (base_address: u64, bus: int, device: int, function: int) -> *Pci_Configuration_Space {
@@ -108,12 +111,15 @@ Pci_Configuration_Space :: struct {
 
 Pci_Capability :: struct {
     id: enum u8 {
-        NULL;
-        POWER_MANAGEMENT_INTERFACE;
-        ACCELERATED_GRAPHICS_PORT;
-        VITAL_PRODUCT_DATA;
-        SLOT_ID;
-        MESSAGE_SIGNALLED_INTERRUPT;
+        NULL                           :: 0x0;
+        POWER_MANAGEMENT_INTERFACE     :: 0x1;
+        ACCELERATED_GRAPHICS_PORT      :: 0x2;
+        VITAL_PRODUCT_DATA             :: 0x3;
+        SLOT_ID                        :: 0x4;
+        MESSAGE_SIGNALLED_INTERRUPT    :: 0x5;
+
+        PCI_EXPRESS                    :: 0x10;
+        MSI_X                          :: 0x11;
 
         // More of these IDs listed at https://pcisig.com/sites/default/files/files/PCI_Code-ID_r_1_11__v24_Jan_2019.pdf
     };
@@ -142,15 +148,46 @@ Pci_Capability_Msi64 :: struct {
     data: u16;
 }
 
+Msi_X_Control :: enum u16 {
+    table_size    :: 11;
+    reserved      :: 3;
+    function_mask :: 1;
+    enable        :: 1;
+} @Bitfield
+
+Pci_Capability_Msi_X :: struct {
+    #as cap: Pci_Capability;
+
+    control: Msi_X_Control;
+    table_offset: u32;
+    pba_offset: u32;
+}
+
+Msi_X_Table_Entry :: struct {
+    message_address: u64;
+    message_data: u32;
+
+    vector_control: enum_flags u32 {
+        mask :: 0x1;
+    };
+}
+
 parse_pci_capability_list :: (device: *Pci_Device) {
+
+    // Todo: this code (and probably code in other places) will likely generate non-DWORD or QWORD aligned and sized accesses to PCI memory space, which is not necessarily supported by the hardware.
+
     capability: *Pci_Capability = cast(*void) device.configuration_space + device.capability_pointer;
 
     while true {
         log("Found capability %.", capability.id);
 
-        if capability.id == .MESSAGE_SIGNALLED_INTERRUPT {
+        if capability.id == {
+          case .MESSAGE_SIGNALLED_INTERRUPT;
             device.msi = cast(*Pci_Capability_Msi) capability;
             device.msi_64bit_address = device.msi.control & ._64_BIT > 0;
+
+          case .MSI_X;
+            device.msi_x = cast(*Pci_Capability_Msi_X) capability;
         }
 
         if !capability.next {
@@ -158,6 +195,52 @@ parse_pci_capability_list :: (device: *Pci_Device) {
         }
 
         capability = cast(*void) device.configuration_space + capability.next;
+    }
+}
+
+enable_msi_or_msi_x :: (device: *Pci_Device, handler: () #c_call) {
+
+    if device.msi_x {
+        log("Enabling MSI-X");
+
+        table_bar_index := device.msi_x.table_offset & 0b111;
+        pba_bar_index   := device.msi_x.pba_offset   & 0b111;
+
+        table_offset    := device.msi_x.table_offset & ~0b111;
+        pba_offset      := device.msi_x.pba_offset   & ~0b111;
+
+        // Todo: this BAR might be one that has already been mapped, or will be mapped for other purposes by the driver.
+        // Need to add a general system for detecting when a BAR is already mapped and returning the existing memory region.
+        // Mapping a BAR twice should in theory not cause errors, it just "wastes" virtual memory. Maybe all base address
+        // registers that have valid addresses should just be mapped during device detection?
+
+        bar := read_base_address_register(device, table_bar_index);
+        device.msi_x_table.data = map_base_address_register(bar) + table_offset;
+
+        bar = read_base_address_register(device, pba_bar_index);
+        device.msi_x_pba.data = map_base_address_register(bar) + pba_offset;
+
+        table_size := get(device.msi_x.control, .table_size);
+        device.msi_x_table.count = table_size + 1;
+        device.msi_x_pba.count = table_size / size_of(u64) + 1;
+
+    } else if device.msi {
+        log("Enabling MSI");
+
+        gate := allocate_interrupt_gate();
+        register_interrupt_gate(handler, gate);
+
+        device.msi.control |= .ENABLE;
+        device.msi.address = 0x0fee_0000;
+
+        // core := get_current_core();
+        // device.msi.address |= core.local_apic_id << 12;
+
+        if device.msi.control & ._64_BIT {
+            device.msi64.data = xx gate;
+        } else {
+            device.msi.data = xx gate;
+        }
     }
 }
 
@@ -207,6 +290,7 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
     }
 
     virtual := alloc_block(*kernel_globals.virtual_block_allocator, bar.limit);
+
     context.print_style.default_format_int.base=16;
     log("Mapping BAR % to address %", bar, virtual);
 
@@ -217,6 +301,288 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
 
     return cast(*void) virtual;
 }
+
+
+
+
+Nvme_Controller :: struct {
+    using mmio: *Nvme_Property_Memory_Map;
+
+    admin_submission_queue_tail: int;
+    admin_submission_queue: [] Nvme_Submission_Queue_Entry;
+
+    // A namespace ID addresses a drive.
+    nsid: u32;
+}
+
+Nvme_Property_Memory_Map :: struct {
+    start_marker: void;
+
+    CAP__capabilities:            Nvme_Controller_Capabilities;
+    VS__version:                  Nvme_Specification_Version_Descriptor;
+    INTMS:                        u32;
+    INTMC:                        u32;
+    CC__controller_config:        Nvme_Controller_Configuration;
+    __reserved__:                 u32;
+    CSTS__controller_status:      Nvme_Controller_Status;
+    NSSR:                         u32;
+    AQA__admin_queue_attributes:  Nvme_Admin_Queue_Attributes;
+    ASQ__admin_submission_queue:  u64;
+    ACQ__admin_completion_queue:  u64;
+
+    // Would be nice to be able to give a constant to #place
+#place start_marker;
+    offset_for_transport_specific_properties: [0x1000] u8;
+
+    SQ0TDBL__submission_queue_0_tail_doorbell: u32;
+    CQ0HDBL__completion_queue_0_head_doorbell: u32;
+}
+
+Nvme_Controller_Capabilities :: enum u64 {
+    MQES__maximum_queue_entries          :: 16;
+    CQR__contiguous_queue_entries        :: 1;
+    AMS__arbitration_mechanism_supported :: 2;
+    __reserved__                         :: 5;
+    TO__timeout                          :: 8;
+    DSTRD__doorbell_stride               :: 4;
+    NSSRS__nvm_subsystem_reset           :: 1;
+    NCSS__nvm_command_set_support        :: 1;
+    __reserved__2                        :: 5;
+    IOCSS__io_command_set_support        :: 1;
+    NOIOCSS__no_io_command_set_support   :: 1;
+
+    BPS    :: 1;
+    CPS    :: 2;
+    MPSMIN :: 4;
+    MPSMAX :: 4;
+    PMRS   :: 1;
+    CMBS   :: 1;
+    NSSS   :: 1;
+    CRMS   :: 2;
+    NSSES  :: 1;
+    __reserved__3 :: 2;
+} @Bitfield
+
+Nvme_Specification_Version_Descriptor :: struct {
+    ter__teritary: u8;
+    mnr__minor:    u8;
+    mjr__major:    u16;
+}
+
+Nvme_Controller_Configuration :: enum u32 {
+    EN__enable                   :: 1;
+    __reserved__                 :: 3;
+    CSS__io_command_set          :: 3;
+    MPS__memory_page_size        :: 4;
+    AMS__arbitration_mechanism   :: 3;
+    SHN__shutdown_notification   :: 2;
+    IOSQES__io_submission_entry_size :: 4;
+    IOCQES__io_completion_entry_size :: 4;
+
+    __rest_of_the_bits :: 8;
+} @Bitfield
+
+Nvme_Controller_Status :: enum_flags u32 {
+    RDY__READY                   :: 0x1;
+    CFS__CONTROLLER_FATAL_STATUS :: 0x2;
+    SHST__SHUTDOWN_STATUS0       :: 0x4;
+    SHST__SHUTDOWN_STATUS1       :: 0x8;
+    ST__SHUTDOWN_TYPE            :: 0x40;
+}
+
+Nvme_Admin_Queue_Attributes :: struct {
+    ASQS__submission_queue_size: u16;
+    ACQS__completion_queue_size: u16;
+}
+
+Nvme_Submission_Queue_Entry :: struct {
+    OPC__opcode: Nvme_Admin_Opcode;
+    FUSE_and_PSDT: u8;
+    CID__command_identifier: u16;
+    NSID__namespace_identifier: u32;
+
+    CDW2__command_dword_2: u32;
+    CDW3__command_dword_3: u32;
+
+    MPTR__metadata_pointer: u64;
+    DPTR__data_pointer:     [2] u64;
+
+    union {
+        CDW__command_dwords_10_to_15: [6] u32;
+
+        // For IDENTIFY commands:
+        CNS__controller_or_namespace: Nvme_Controller_Or_Namespace_Structure;
+    }
+}
+
+Nvme_Admin_Opcode :: enum u8 {
+    DELETE_IO_SUBMISSION_QUEUE :: 0x0;
+    CREATE_IO_SUBMISSION_QUEUE :: 0x1;
+    GET_LOG_PAGE               :: 0x2;
+    DELETE_IO_COMPLETION_QUEUE :: 0x4;
+    CREATE_IO_COMPLETION_QUEUE :: 0x5;
+    IDENTIFY                   :: 0x6;
+    ABORT                      :: 0x8;
+}
+
+Nvme_Controller_Or_Namespace_Structure :: enum u8 {
+    IDENTIFY_NAMESPACE       :: 0x0;
+    IDENTIFY_CONTROLLER      :: 0x1;
+    ACTIVE_NAMESPACE_ID_LIST :: 0x2;
+}
+
+Nvme_Identify_Controller_Structure :: struct {
+    VID__pci_vendor_id: u16;
+    SSVID__pci_subsystem_vendor_id: u16;
+    SN__serial_number: [20] u8;
+    MN__model_number:  [40] u8;
+}
+
+#assert size_of(Nvme_Submission_Queue_Entry) == 64;
+
+#program_export
+nvme_interrupt :: (stack: *void) {
+    write_string("NVMe interrupt recieved.\n");
+} @InterruptRoutine
+
+init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
+    if device.class_code != .MASS_STORAGE bluescreen();
+    if device.subclass   != 0x8           bluescreen();
+
+    device.registers[1] |= cast(u32) Pci_Command.BUS_MASTER | .MEMORY_SPACE;
+    device.registers[1] &= cast(u32) ~Pci_Command.INTERRUPT_DISABLE;
+
+    nvme: Nvme_Controller;
+
+    bar := read_base_address_register(device, bar_index = 0);
+    nvme.mmio = map_base_address_register(bar);
+
+    parse_pci_capability_list(device);
+    enable_msi_or_msi_x(device, int__nvme_interrupt);
+
+    // Reset the controller.
+    if (nvme.CSTS__controller_status & .SHST__SHUTDOWN_STATUS0) || (nvme.CSTS__controller_status & .SHST__SHUTDOWN_STATUS1) {
+        log("NVMe shutdown status.");
+    }
+
+    if nvme.CC__controller_config & .EN__enable {
+        set(*nvme.CC__controller_config, .EN__enable, 0);
+    }
+
+    Timeout(!(nvme.CSTS__controller_status & .RDY__READY), "NVMe reset timeout (RDY is set.)");
+
+    // Initialize admin queues.
+    admin_sq := get_4k_page();
+    admin_cq := get_4k_page();
+
+    // Subtract one, because the field is zero based.
+    queue_size := 4096 / size_of(Nvme_Submission_Queue_Entry) - 1;
+
+    // Don't write these fields individually, since 16-bit access is not necessarily supported on 32-bit registers.
+    nvme.AQA__admin_queue_attributes = .{
+        cast(u16) queue_size,
+        cast(u16) queue_size
+    };
+
+    nvme.ASQ__admin_submission_queue = admin_sq;
+    nvme.ACQ__admin_completion_queue = admin_cq;
+
+    nvme.admin_submission_queue.data = cast(*Nvme_Submission_Queue_Entry, admin_sq + DIRECT_MAPPING_BASE);
+    nvme.admin_submission_queue.count = queue_size;
+
+    NOIOCSS := get(nvme.CAP__capabilities, .NOIOCSS__no_io_command_set_support);
+    IOCSS   := get(nvme.CAP__capabilities, .IOCSS__io_command_set_support);
+    NCSS    := get(nvme.CAP__capabilities, .NCSS__nvm_command_set_support);
+
+    if NOIOCSS           set(*nvme.CC__controller_config, .CSS__io_command_set, 0b111);
+    if IOCSS && !NOIOCSS set(*nvme.CC__controller_config, .CSS__io_command_set, 0b100); // Todo why is !NOIOCSS needed on QEMU
+    if !IOCSS && NCSS    set(*nvme.CC__controller_config, .CSS__io_command_set, 0b000);
+
+    set(*nvme.CC__controller_config, .AMS__arbitration_mechanism, 0);
+    set(*nvme.CC__controller_config, .MPS__memory_page_size, 0);
+
+    // Todo, detect these values
+    set(*nvme.CC__controller_config, .IOSQES__io_submission_entry_size, 6);
+    set(*nvme.CC__controller_config, .IOCQES__io_completion_entry_size, 4);
+
+    set(*nvme.CC__controller_config, .EN__enable, 1);
+
+    Timeout_Block(#code {
+        if nvme.CSTS__controller_status & .RDY__READY break;
+
+        fatal := nvme.CSTS__controller_status & .CFS__CONTROLLER_FATAL_STATUS;
+        if fatal {
+            log_error("Nvme controller fatal status during reset.");
+            bluescreen();
+        }
+    }, "NVMe reset timeout (RDY is unset.)");
+
+    // Send IDENTIFY command.
+    identify_command: *Nvme_Submission_Queue_Entry = nvme.admin_submission_queue.data;
+    identify_command.* = .{};
+    identify_command.DPTR__data_pointer[0] = get_4k_page();
+    identify_command.CNS__controller_or_namespace = .IDENTIFY_CONTROLLER;
+    identify_command.OPC__opcode = .IDENTIFY;
+
+    nvme.admin_submission_queue_tail = 1;
+    nvme.SQ0TDBL__submission_queue_0_tail_doorbell = cast(u32) nvme.admin_submission_queue_tail;
+
+    identify_result := identify_command.DPTR__data_pointer[0] + DIRECT_MAPPING_BASE;
+
+    while !cast(*u8, identify_result).* #asm {
+        pause;
+    }
+
+    identify := cast(*Nvme_Identify_Controller_Structure) identify_result;
+
+    sn := cast(string) identify.SN__serial_number;
+    mn := cast(string) identify.MN__model_number;
+    for sn if it == #char " " { sn.count = it_index; break; }
+    for mn if it == #char " " { mn.count = it_index; break; }
+
+    log("Found NVMe controller with serial number '%' and model number '%'.", sn, mn);
+    free_4k_page(identify_command.DPTR__data_pointer[0]);
+
+
+    // Identify active namespace ID list.
+    identify_command = nvme.admin_submission_queue.data + 1;
+    identify_command.* = .{};
+    identify_command.DPTR__data_pointer[0] = get_4k_page();
+    identify_command.CNS__controller_or_namespace = .ACTIVE_NAMESPACE_ID_LIST;
+    identify_command.OPC__opcode = .IDENTIFY;
+
+    identify_result = identify_command.DPTR__data_pointer[0] + DIRECT_MAPPING_BASE;
+
+    nvme.admin_submission_queue_tail += 1;
+    nvme.SQ0TDBL__submission_queue_0_tail_doorbell = cast(u32) nvme.admin_submission_queue_tail;
+
+    for 1..100_000 #asm { pause; }
+
+    nsid_list := cast(*[1024] u32) identify_result;
+    
+    for nsid_list.* if it != 0 {
+        nvme.nsid = it;
+        break;
+    }
+
+    if nvme.nsid == 0 {
+        log_error("NVMe no active namespace ID found");
+        bluescreen();
+    }
+
+    log("Found NSID %.", nvme.nsid);
+
+    // Create IO queues.
+
+    
+
+    return nvme;
+}
+
+Nvme_Send_Admin_Command :: (nvme: *Nvme_Controller) {
+
+}
+
 
 
 
@@ -235,30 +601,12 @@ ahci_interrupt :: (data: *void) {
     write_string("Handling AHCI Interrupt.\n");
 } @InterruptRoutine
 
-init_ahci_controller :: (device: Pci_Device) -> c: Ahci_Controller = .{}, success: bool {
+init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, success: bool {
     device.registers[1] |= cast(u32) Pci_Command.BUS_MASTER | .MEMORY_SPACE;
     device.registers[1] &= cast(u32) ~Pci_Command.INTERRUPT_DISABLE;
 
-    parse_pci_capability_list(*device);
-
-    if device.msi {
-        gate := allocate_interrupt_gate();
-        register_interrupt_gate(int__ahci_interrupt, gate);
-
-        write_string("Device has MSI.\n");
-
-        device.msi.control |= .ENABLE;
-        device.msi.address = 0xfee0_0000;
-
-        // core := get_current_core();
-        // device.msi.address |= core.local_apic_id << 12;
-
-        if device.msi.control & ._64_BIT {
-            device.msi64.data = xx gate;
-        } else {
-            device.msi.data = xx gate;
-        }
-    }
+    parse_pci_capability_list(device);
+    enable_msi_or_msi_x(device, int__ahci_interrupt);
 
     bar := read_base_address_register(device, bar_index = 5);
     if !bar.base {
@@ -693,259 +1041,6 @@ HBA_PxSIG__Ahci_Port_Signature :: enum u32 {
     PM    :: 0x9669_0101;
 }
 
-
-
-
-
-Nvme_Controller :: struct {
-    using mmio: *Nvme_Property_Memory_Map;
-
-    admin_submission_queue_tail: int;
-    admin_submission_queue: [] Nvme_Submission_Queue_Entry;
-}
-
-Nvme_Property_Memory_Map :: struct {
-    start_marker: void;
-
-    CAP__capabilities:            Nvme_Controller_Capabilities;
-    VS__version:                  Nvme_Specification_Version_Descriptor;
-    INTMS:                        u32;
-    INTMC:                        u32;
-    CC__controller_config:        Nvme_Controller_Configuration;
-    __reserved__:                 u32;
-    CSTS__controller_status:      Nvme_Controller_Status;
-    NSSR:                         u32;
-    AQA__admin_queue_attributes:  Nvme_Admin_Queue_Attributes;
-    ASQ__admin_submission_queue:  u64;
-    ACQ__admin_completion_queue:  u64;
-
-    // Would be nice to be able to give a constant to #place
-#place start_marker;
-    offset_for_transport_specific_properties: [0x1000] u8;
-
-    SQ0TDBL__submission_queue_0_tail_doorbell: u32;
-    CQ0HDBL__completion_queue_0_head_doorbell: u32;
-}
-
-Nvme_Controller_Capabilities :: enum u64 {
-    MQES__maximum_queue_entries          :: 16;
-    CQR__contiguous_queue_entries        :: 1;
-    AMS__arbitration_mechanism_supported :: 2;
-    __reserved__                         :: 5;
-    TO__timeout                          :: 8;
-    DSTRD__doorbell_stride               :: 4;
-    NSSRS__nvm_subsystem_reset           :: 1;
-    NCSS__nvm_command_set_support        :: 1;
-    __reserved__2                        :: 5;
-    IOCSS__io_command_set_support        :: 1;
-    NOIOCSS__no_io_command_set_support   :: 1;
-
-    BPS    :: 1;
-    CPS    :: 2;
-    MPSMIN :: 4;
-    MPSMAX :: 4;
-    PMRS   :: 1;
-    CMBS   :: 1;
-    NSSS   :: 1;
-    CRMS   :: 2;
-    NSSES  :: 1;
-    __reserved__3 :: 2;
-} @Bitfield
-
-Nvme_Specification_Version_Descriptor :: struct {
-    ter__teritary: u8;
-    mnr__minor:    u8;
-    mjr__major:    u16;
-}
-
-Nvme_Controller_Configuration :: enum u32 {
-    EN__enable                   :: 1;
-    __reserved__                 :: 3;
-    CSS__io_command_set          :: 3;
-    MPS__memory_page_size        :: 4;
-    AMS__arbitration_mechanism   :: 3;
-    SHN__shutdown_notification   :: 2;
-    IOSQES__io_submission_entry_size :: 4;
-    IOCQES__io_completion_entry_size :: 4;
-
-    __rest_of_the_bits :: 8;
-} @Bitfield
-
-Nvme_Controller_Status :: enum_flags u32 {
-    RDY__READY                   :: 0x1;
-    CFS__CONTROLLER_FATAL_STATUS :: 0x2;
-    SHST__SHUTDOWN_STATUS0       :: 0x4;
-    SHST__SHUTDOWN_STATUS1       :: 0x8;
-    ST__SHUTDOWN_TYPE            :: 0x40;
-}
-
-Nvme_Admin_Queue_Attributes :: struct {
-    ASQS__submission_queue_size: u16;
-    ACQS__completion_queue_size: u16;
-}
-
-Nvme_Submission_Queue_Entry :: struct {
-    OPC__opcode: Nvme_Admin_Opcode;
-    FUSE_and_PSDT: u8;
-    CID__command_identifier: u16;
-    NSID__namespace_identifier: u32;
-
-    CDW2__command_dword_2: u32;
-    CDW3__command_dword_3: u32;
-
-    MPTR__metadata_pointer: u64;
-    DPTR__data_pointer:     [2] u64;
-
-    union {
-        CDW__command_dwords_10_to_15: [6] u32;
-
-        // For IDENTIFY commands:
-        CNS__controller_or_namespace: Nvme_Controller_Or_Namespace_Structure;
-    }
-}
-
-Nvme_Admin_Opcode :: enum u8 {
-    DELETE_IO_SUBMISSION_QUEUE :: 0x0;
-    CREATE_IO_SUBMISSION_QUEUE :: 0x1;
-    GET_LOG_PAGE               :: 0x2;
-    DELETE_IO_COMPLETION_QUEUE :: 0x4;
-    CREATE_IO_COMPLETION_QUEUE :: 0x5;
-    IDENTIFY                   :: 0x6;
-    ABORT                      :: 0x8;
-}
-
-Nvme_Controller_Or_Namespace_Structure :: enum u8 {
-    IDENTIFY_NAMESPACE       :: 0x0;
-    IDENTIFY_CONTROLLER      :: 0x1;
-    ACTIVE_NAMESPACE_ID_LIST :: 0x2;
-}
-
-Nvme_Identify_Controller_Structure :: struct {
-    VID__pci_vendor_id: u16;
-    SSVID__pci_subsystem_vendor_id: u16;
-    SN__serial_number: [20] u8;
-    MN__model_number:  [40] u8;
-}
-
-#assert size_of(Nvme_Submission_Queue_Entry) == 64;
-
-init_nvme_controller :: (device: Pci_Device) -> Nvme_Controller {
-    if device.class_code != .MASS_STORAGE bluescreen();
-    if device.subclass   != 0x8           bluescreen();
-
-    device.registers[1] |= cast(u32) Pci_Command.BUS_MASTER | .MEMORY_SPACE;
-    device.registers[1] &= cast(u32) ~Pci_Command.INTERRUPT_DISABLE;
-
-    nvme: Nvme_Controller;
-
-    bar := read_base_address_register(device, bar_index = 0);
-    nvme.mmio = map_base_address_register(bar);
-
-    // Reset the controller.
-    if (nvme.CSTS__controller_status & .SHST__SHUTDOWN_STATUS0) || (nvme.CSTS__controller_status & .SHST__SHUTDOWN_STATUS1) {
-        write_string("Shutdown status.\n");
-    }
-
-    if nvme.CC__controller_config & .EN__enable {
-        write_string("Controller is enabled.\n");
-        set(*nvme.CC__controller_config, .EN__enable, 0);
-    }
-
-    Timeout(!(nvme.CSTS__controller_status & .RDY__READY), "NVMe reset timeout (RDY is set.)");
-
-    // Initialize admin queues.
-    admin_sq := get_4k_page();
-    admin_cq := get_4k_page();
-
-    // Subtract one, because the field is zero based.
-    queue_size := 4096 / size_of(Nvme_Submission_Queue_Entry) - 1;
-
-    // Don't write these fields individually, since 16-bit access is not necessarily supported on 32-bit registers.
-    nvme.AQA__admin_queue_attributes = .{
-        cast(u16) queue_size,
-        cast(u16) queue_size
-    };
-
-    nvme.ASQ__admin_submission_queue = admin_sq;
-    nvme.ACQ__admin_completion_queue = admin_cq;
-
-    nvme.admin_submission_queue.data = cast(*Nvme_Submission_Queue_Entry, admin_sq + DIRECT_MAPPING_BASE);
-    nvme.admin_submission_queue.count = queue_size;
-
-    NOIOCSS := get(nvme.CAP__capabilities, .NOIOCSS__no_io_command_set_support);
-    IOCSS   := get(nvme.CAP__capabilities, .IOCSS__io_command_set_support);
-    NCSS    := get(nvme.CAP__capabilities, .NCSS__nvm_command_set_support);
-
-    if NOIOCSS           set(*nvme.CC__controller_config, .CSS__io_command_set, 0b111);
-    if IOCSS && !NOIOCSS set(*nvme.CC__controller_config, .CSS__io_command_set, 0b100); // Todo why is !NOIOCSS needed on QEMU
-    if !IOCSS && NCSS    set(*nvme.CC__controller_config, .CSS__io_command_set, 0b000);
-
-    set(*nvme.CC__controller_config, .AMS__arbitration_mechanism, 0);
-    set(*nvme.CC__controller_config, .MPS__memory_page_size, 0);
-
-    // Todo, detect these values
-    set(*nvme.CC__controller_config, .IOSQES__io_submission_entry_size, 6);
-    set(*nvme.CC__controller_config, .IOCQES__io_completion_entry_size, 4);
-
-    set(*nvme.CC__controller_config, .EN__enable, 1);
-
-    Timeout_Block(#code {
-        if nvme.CSTS__controller_status & .RDY__READY break;
-
-        fatal := nvme.CSTS__controller_status & .CFS__CONTROLLER_FATAL_STATUS;
-        if fatal {
-            write_string("CFS\n");
-            bluescreen();
-        }
-    }, "NVMe reset timeout (RDY is unset.)");
-
-    // Send IDENTIFY command.
-    identify_command: *Nvme_Submission_Queue_Entry = nvme.admin_submission_queue.data;
-    identify_command.* = .{};
-    identify_command.DPTR__data_pointer[0] = get_4k_page();
-    identify_command.CNS__controller_or_namespace = .IDENTIFY_CONTROLLER;
-    identify_command.OPC__opcode = .IDENTIFY;
-
-    nvme.admin_submission_queue_tail = 1;
-    nvme.SQ0TDBL__submission_queue_0_tail_doorbell = cast(u32) nvme.admin_submission_queue_tail;
-
-    identify_result := identify_command.DPTR__data_pointer[0] + DIRECT_MAPPING_BASE;
-
-    while !cast(*u8, identify_result).* #asm {
-        pause;
-    }
-
-    identify := cast(*Nvme_Identify_Controller_Structure) identify_result;
-
-    sn := cast(string) identify.SN__serial_number;
-    mn := cast(string) identify.MN__model_number;
-    for sn if it == #char " " { sn.count = it_index; break; }
-    for mn if it == #char " " { mn.count = it_index; break; }
-
-    log("Found NVMe controller with serial number '%' and model number '%'.", sn, mn);
-    free_4k_page(identify_command.DPTR__data_pointer[0]);
-
-
-    // Identify active namespace ID list.
-    identify_command = nvme.admin_submission_queue.data + 1;
-    identify_command.* = .{};
-    identify_command.DPTR__data_pointer[0] = get_4k_page();
-    identify_command.CNS__controller_or_namespace = .ACTIVE_NAMESPACE_ID_LIST;
-    identify_command.OPC__opcode = .IDENTIFY;
-
-    identify_result = identify_command.DPTR__data_pointer[0] + DIRECT_MAPPING_BASE;
-
-    nvme.admin_submission_queue_tail += 1;
-    nvme.SQ0TDBL__submission_queue_0_tail_doorbell = cast(u32) nvme.admin_submission_queue_tail;
-
-    list := cast(*[1024] u32) identify_result;
-    for list.* {
-        if it == 0 continue;
-        log("Found NSID %.\n", it);
-    }
-
-    return nvme;
-}
 
 
 

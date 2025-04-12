@@ -58,9 +58,16 @@ get_monotonic_system_time :: () -> Apollo_Time {
 }
 
 native_calendar_to_apollo :: (ct: Calendar_Time) -> Apollo_Time {
+    // Todo: Doesn't work with dates before 1 AD. It doesn't seem to work on Linux either, but I feel like it should definitely be made to work.
+
+    // We calculate Apollo Time relative to 1.1.1970 and then add the offset at the end, to make everything easier to think about.
     LEAP_YEARS_BEFORE_1970 :: 477;
 
-    leap_year_count := leap_years_before(cast(s64) ct.year - 1) - LEAP_YEARS_BEFORE_1970;
+    last_year := cast(s64) ct.year - 1;
+    leap_years_before := last_year/4 - last_year/100 + last_year/400;
+
+    leap_year_count := leap_years_before - LEAP_YEARS_BEFORE_1970;
+
     year_difference := cast(s64) ct.year - 1970;
 
     seconds := 31536000 * (year_difference - leap_year_count);
@@ -104,7 +111,7 @@ native_apollo_to_calendar :: (apollo: Apollo_Time) -> Calendar_Time {
 
     seconds := to_seconds(apollo - LEAPOCH);
 
-    // Is there an easier way to do this
+    // Convert seconds back to Apollo to get the value rounded down to the nearest second. Is there a way to simplify this.
     milliseconds := to_milliseconds(apollo - seconds_to_apollo(seconds) - LEAPOCH);
     if milliseconds < 0 {
         milliseconds += 1000;
@@ -170,16 +177,6 @@ native_apollo_to_calendar :: (apollo: Apollo_Time) -> Calendar_Time {
     ct.millisecond = cast(s16, milliseconds);
 
     return ct;
-}
-
-leap_years_before :: (year: s64) -> s64 {
-    floor_div :: (dividend: int, $ divisor: int) -> int {
-        offset := cast(int, dividend <= 0 && dividend % divisor);
-        return dividend / divisor - offset;
-    }
-
-    result := floor_div(year, 4) - floor_div(year, 100) + floor_div(year, 400);
-    return result;
 }
 
 

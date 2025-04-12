@@ -49,13 +49,13 @@ bitfield_set :: (bitfield: *$B, flag: B, value: s64, $loc := #caller_location, $
     bitfield.* = temp;
 }
 
-bitfield_get :: (bitfield: $B, flag: B, $loc := #caller_location, $call := #caller_code) -> B {
+bitfield_get :: (bitfield: $B, flag: B, $loc := #caller_location, $call := #caller_code) -> s64 {
     bit_mask, bit_offset :: #run calculate_mask_and_offset(B, loc, call);
 
     value := bitfield;
     value &=  xx bit_mask;
     value >>= xx bit_offset;
-    return value;
+    return cast(s64) value;
 }
 
 print_bitfield :: (builder: *String_Builder, bitfield: $B, format: *FormatStruct = null, $loc := #caller_location) {
