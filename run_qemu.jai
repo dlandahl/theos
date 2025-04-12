@@ -22,6 +22,7 @@
             -smp 4 
     QEMU_CMD);
 
+    // --trace "*nvme*" 
     // -d int 
 
     run_command(.. command);

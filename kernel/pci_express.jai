@@ -184,7 +184,7 @@ read_base_address_register :: (device: Pci_Device, bar_index: int) -> Pci_Bar {
 
     if _64bit {
         bar1 := device.registers[0x4 + bar_index + 1];
-        base |= bar1 << 32;
+        base |= (cast(u64) bar1) << 32;
     }
 
     device.registers[0x4 + bar_index] = 0xffffffff;
@@ -193,6 +193,7 @@ read_base_address_register :: (device: Pci_Device, bar_index: int) -> Pci_Bar {
     device.registers[0x4 + bar_index] = bar;
 
     limit = cast(u32) ~(limit & mask) + 1;
+
     return .{base, limit};
 }
 
@@ -206,6 +207,8 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
     }
 
     virtual := alloc_block(*kernel_globals.virtual_block_allocator, bar.limit);
+    context.print_style.default_format_int.base=16;
+    log("Mapping BAR % to address %", bar, virtual);
 
     for 0..(bar.limit-1) / 4096 {
         offset := it * 4096;
@@ -375,7 +378,7 @@ init_ahci_controller :: (device: Pci_Device) -> c: Ahci_Controller = .{}, succes
             it.CTBA__command_table_base = physical + cast(u64) offset;
         }
 
-        port.IE__interrupt_enable |= 1 << 5;
+        port.IE__interrupt_enable = 0xffff_ffff;
 
         port.CMD__command_status |= .FRE__fis_receive_enable;
 
@@ -761,12 +764,19 @@ Nvme_Controller_Configuration :: enum u32 {
     CSS__io_command_set          :: 3;
     MPS__memory_page_size        :: 4;
     AMS__arbitration_mechanism   :: 3;
+    SHN__shutdown_notification   :: 2;
+    IOSQES__io_submission_entry_size :: 4;
+    IOCQES__io_completion_entry_size :: 4;
 
-    __rest_of_the_bits :: 18;
+    __rest_of_the_bits :: 8;
 } @Bitfield
 
 Nvme_Controller_Status :: enum_flags u32 {
-    RDY__READY :: 0x1;
+    RDY__READY                   :: 0x1;
+    CFS__CONTROLLER_FATAL_STATUS :: 0x2;
+    SHST__SHUTDOWN_STATUS0       :: 0x4;
+    SHST__SHUTDOWN_STATUS1       :: 0x8;
+    ST__SHUTDOWN_TYPE            :: 0x40;
 }
 
 Nvme_Admin_Queue_Attributes :: struct {
@@ -831,14 +841,17 @@ init_nvme_controller :: (device: Pci_Device) -> Nvme_Controller {
     bar := read_base_address_register(device, bar_index = 0);
     nvme.mmio = map_base_address_register(bar);
 
-
     // Reset the controller.
-    ready :: nvme => nvme.CSTS__controller_status & .RDY__READY;
-
-    if ready(nvme) {
-        set(*nvme.CC__controller_config, .EN__enable, 0);
-        Timeout(!ready(nvme), "NVMe reset timeout (RDY is set.)");
+    if (nvme.CSTS__controller_status & .SHST__SHUTDOWN_STATUS0) || (nvme.CSTS__controller_status & .SHST__SHUTDOWN_STATUS1) {
+        write_string("Shutdown status.\n");
     }
+
+    if nvme.CC__controller_config & .EN__enable {
+        write_string("Controller is enabled.\n");
+        set(*nvme.CC__controller_config, .EN__enable, 0);
+    }
+
+    Timeout(!(nvme.CSTS__controller_status & .RDY__READY), "NVMe reset timeout (RDY is set.)");
 
     // Initialize admin queues.
     admin_sq := get_4k_page();
@@ -863,17 +876,28 @@ init_nvme_controller :: (device: Pci_Device) -> Nvme_Controller {
     IOCSS   := get(nvme.CAP__capabilities, .IOCSS__io_command_set_support);
     NCSS    := get(nvme.CAP__capabilities, .NCSS__nvm_command_set_support);
 
-    if NOIOCSS        set(*nvme.CC__controller_config, .CSS__io_command_set, 0b111);
-    if IOCSS          set(*nvme.CC__controller_config, .CSS__io_command_set, 0b100);
-    if !IOCSS && NCSS set(*nvme.CC__controller_config, .CSS__io_command_set, 0b000);
+    if NOIOCSS           set(*nvme.CC__controller_config, .CSS__io_command_set, 0b111);
+    if IOCSS && !NOIOCSS set(*nvme.CC__controller_config, .CSS__io_command_set, 0b100); // Todo why is !NOIOCSS needed on QEMU
+    if !IOCSS && NCSS    set(*nvme.CC__controller_config, .CSS__io_command_set, 0b000);
 
     set(*nvme.CC__controller_config, .AMS__arbitration_mechanism, 0);
     set(*nvme.CC__controller_config, .MPS__memory_page_size, 0);
 
-    set(*nvme.CC__controller_config, .EN__enable, 1);
-    // For some reason this timeout trips on QEMU.
-    Timeout(ready(nvme), "NVMe reset timeout (RDY is unset.)");
+    // Todo, detect these values
+    set(*nvme.CC__controller_config, .IOSQES__io_submission_entry_size, 6);
+    set(*nvme.CC__controller_config, .IOCQES__io_completion_entry_size, 4);
 
+    set(*nvme.CC__controller_config, .EN__enable, 1);
+
+    Timeout_Block(#code {
+        if nvme.CSTS__controller_status & .RDY__READY break;
+
+        fatal := nvme.CSTS__controller_status & .CFS__CONTROLLER_FATAL_STATUS;
+        if fatal {
+            write_string("CFS\n");
+            bluescreen();
+        }
+    }, "NVMe reset timeout (RDY is unset.)");
 
     // Send IDENTIFY command.
     identify_command: *Nvme_Submission_Queue_Entry = nvme.admin_submission_queue.data;
@@ -886,7 +910,10 @@ init_nvme_controller :: (device: Pci_Device) -> Nvme_Controller {
     nvme.SQ0TDBL__submission_queue_0_tail_doorbell = cast(u32) nvme.admin_submission_queue_tail;
 
     identify_result := identify_command.DPTR__data_pointer[0] + DIRECT_MAPPING_BASE;
-    while cast(*u8, identify_result).* == 0 {}
+
+    while !cast(*u8, identify_result).* #asm {
+        pause;
+    }
 
     identify := cast(*Nvme_Identify_Controller_Structure) identify_result;
 
@@ -910,8 +937,6 @@ init_nvme_controller :: (device: Pci_Device) -> Nvme_Controller {
 
     nvme.admin_submission_queue_tail += 1;
     nvme.SQ0TDBL__submission_queue_0_tail_doorbell = cast(u32) nvme.admin_submission_queue_tail;
-
-    while cast(*u8, identify_result).* == 0 {}
 
     list := cast(*[1024] u32) identify_result;
     for list.* {

@@ -236,8 +236,8 @@ kernel_entry :: () #no_context {
 
         core_begin_multitasking();
 
-        // find_all_pci_devices();
-        for pci_devices {
+        find_all_pci_devices();
+        if false for pci_devices {
             if it.class_code == .MASS_STORAGE && it.subclass == 0x6 {
 
                 controller, success := init_ahci_controller(it);
@@ -260,6 +260,8 @@ kernel_entry :: () #no_context {
                 init_nvme_controller(it);
             }
         }
+
+        while true {}
 
         startup_application_processors();
 
@@ -319,9 +321,11 @@ make_kernel_context :: (c: *#Context) #no_context {
 
     c.logger = (message: string, data: *void, info: Log_Info) {
         write_string(message);
+
         if message[message.count-1] != #char "\n" {
             write_string("\n");
         }
+
     };
 
     c.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = 2;
@@ -1238,7 +1242,7 @@ align :: (alignment: int, value: int) -> int #no_context {
     return (value + (alignment - 1)) & -alignment;
 }
 
-Timeout_Block :: (code: Code, message := "", time_ms := 1000) #expand {
+Timeout_Block :: (code: Code, message := "", time_ms := 1000, call := #caller_location) #expand {
     start := get_monotonic_system_time();
 
     while true {
@@ -1247,14 +1251,14 @@ Timeout_Block :: (code: Code, message := "", time_ms := 1000) #expand {
 
         if to_milliseconds(elapsed) > time_ms {
             log_error(message);
-            bluescreen();
+            bluescreen(call);
         }
 
         #asm { pause; }
     }
 }
 
-Timeout :: (code: Code, message := "", time_ms := 1000) #expand {
+Timeout :: (code: Code, message := "", time_ms := 1000, call := #caller_location) #expand {
     start := get_monotonic_system_time();
 
     while true {
@@ -1265,7 +1269,7 @@ Timeout :: (code: Code, message := "", time_ms := 1000) #expand {
 
         if to_milliseconds(elapsed) > time_ms {
             log_error(message);
-            bluescreen();
+            bluescreen(call);
         }
 
         #asm { pause; }
