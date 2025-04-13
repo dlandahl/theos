@@ -43,6 +43,7 @@ find_all_pci_devices :: () {
 
                 for function: 1..7 {
                     header = read_configuration_space(it.base_address, bus, device, function);
+                    if !header continue;
 
                     new_device := array_add(*pci_devices);
                     new_device.configuration_space = header;
@@ -174,7 +175,7 @@ Msi_X_Table_Entry :: struct {
 
 parse_pci_capability_list :: (device: *Pci_Device) {
 
-    // Todo: this code (and probably code in other places) will likely generate non-DWORD or QWORD aligned and sized accesses to PCI memory space, which is not necessarily supported by the hardware.
+    // Todo: this code (and probably code in other places) will likely generate non-DWORD aligned and sized accesses to PCI registers, which is not necessarily supported by the hardware.
 
     capability: *Pci_Capability = cast(*void) device.configuration_space + device.capability_pointer;
 
@@ -198,7 +199,7 @@ parse_pci_capability_list :: (device: *Pci_Device) {
     }
 }
 
-enable_msi_or_msi_x :: (device: *Pci_Device, handler: () #c_call) {
+enable_msi_or_msi_x :: (device: *Pci_Device, interrupt_handler: () #c_call) {
 
     if device.msi_x {
         log("Enabling MSI-X");
@@ -224,14 +225,26 @@ enable_msi_or_msi_x :: (device: *Pci_Device, handler: () #c_call) {
         device.msi_x_table.count = table_size + 1;
         device.msi_x_pba.count = table_size / size_of(u64) + 1;
 
+        gate := allocate_interrupt_gate();
+        register_interrupt_gate(interrupt_handler, gate);
+
+        for* device.msi_x_table {
+            it.message_address = 0xfee0_0000;
+            it.message_data    = xx gate;
+            it.vector_control &= ~.mask;
+        }
+
+        set(*device.msi_x.control, .enable, 1);
+        set(*device.msi_x.control, .function_mask, 0);
+
     } else if device.msi {
         log("Enabling MSI");
 
         gate := allocate_interrupt_gate();
-        register_interrupt_gate(handler, gate);
+        register_interrupt_gate(interrupt_handler, gate);
 
         device.msi.control |= .ENABLE;
-        device.msi.address = 0x0fee_0000;
+        device.msi.address = 0xfee0_0000;
 
         // core := get_current_core();
         // device.msi.address |= core.local_apic_id << 12;
@@ -311,7 +324,7 @@ Nvme_Controller :: struct {
     admin_submission_queue_tail: int;
     admin_submission_queue: [] Nvme_Submission_Queue_Entry;
 
-    // A namespace ID addresses a drive.
+    // A namespace ID identifies a drive.
     nsid: u32;
 }
 
@@ -443,6 +456,8 @@ Nvme_Identify_Controller_Structure :: struct {
 #program_export
 nvme_interrupt :: (stack: *void) {
     write_string("NVMe interrupt recieved.\n");
+
+    write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 } @InterruptRoutine
 
 init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
@@ -452,13 +467,13 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
     device.registers[1] |= cast(u32) Pci_Command.BUS_MASTER | .MEMORY_SPACE;
     device.registers[1] &= cast(u32) ~Pci_Command.INTERRUPT_DISABLE;
 
+    parse_pci_capability_list(device);
+    enable_msi_or_msi_x(device, int__nvme_interrupt);
+
     nvme: Nvme_Controller;
 
     bar := read_base_address_register(device, bar_index = 0);
     nvme.mmio = map_base_address_register(bar);
-
-    parse_pci_capability_list(device);
-    enable_msi_or_msi_x(device, int__nvme_interrupt);
 
     // Reset the controller.
     if (nvme.CSTS__controller_status & .SHST__SHUTDOWN_STATUS0) || (nvme.CSTS__controller_status & .SHST__SHUTDOWN_STATUS1) {
@@ -529,9 +544,7 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
 
     identify_result := identify_command.DPTR__data_pointer[0] + DIRECT_MAPPING_BASE;
 
-    while !cast(*u8, identify_result).* #asm {
-        pause;
-    }
+    Timeout(cast(*u64, identify_result).*);
 
     identify := cast(*Nvme_Identify_Controller_Structure) identify_result;
 

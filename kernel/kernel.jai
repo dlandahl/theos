@@ -30,7 +30,7 @@ X64_Core :: struct {
 
     scheduler: Scheduler;
 
-    // This struct represents a logical core. The architecture doesn't seem to distinguish between logical and physical cores.
+    // This struct represents a logical core.
 }
 
 // This can't be in kernel_globals, or else, due to the size of the IOPB, the compiler will
