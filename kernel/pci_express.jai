@@ -1,4 +1,6 @@
 
+#import "Bit_Array";
+
 Acpi_Mcfg :: struct {
     using header: Acpi_Table_Header;
     reserved: u64 #align 4;
@@ -69,7 +71,7 @@ Pci_Device :: struct {
 
     msi_x: *Pci_Capability_Msi_X;
     msi_x_table: [] Msi_X_Table_Entry;
-    msi_x_pba: [] u64;
+    msi_x_pending: Bit_Array;
 }
 
 read_configuration_space :: (base_address: u64, bus: int, device: int, function: int) -> *Pci_Configuration_Space {
@@ -161,7 +163,7 @@ Pci_Capability_Msi_X :: struct {
 
     control: Msi_X_Control;
     table_offset: u32;
-    pba_offset: u32;
+    pending_offset: u32;
 }
 
 Msi_X_Table_Entry :: struct {
@@ -169,7 +171,7 @@ Msi_X_Table_Entry :: struct {
     message_data: u32;
 
     vector_control: enum_flags u32 {
-        mask :: 0x1;
+        MASK :: 0x1;
     };
 }
 
@@ -199,16 +201,16 @@ parse_pci_capability_list :: (device: *Pci_Device) {
     }
 }
 
-enable_msi_or_msi_x :: (device: *Pci_Device, interrupt_handler: () #c_call) {
+enable_msi_or_msi_x :: (device: *Pci_Device, interrupt_handler: () #c_call) -> enum { NONE; MSI; MSI_X; } {
 
     if device.msi_x {
         log("Enabling MSI-X");
 
-        table_bar_index := device.msi_x.table_offset & 0b111;
-        pba_bar_index   := device.msi_x.pba_offset   & 0b111;
+        table_bar_index   := device.msi_x.table_offset & 0b111;
+        pending_bar_index := device.msi_x.pending_offset   & 0b111;
 
-        table_offset    := device.msi_x.table_offset & ~0b111;
-        pba_offset      := device.msi_x.pba_offset   & ~0b111;
+        table_offset      := device.msi_x.table_offset & ~0b111;
+        pending_offset    := device.msi_x.pending_offset   & ~0b111;
 
         // Todo: this BAR might be one that has already been mapped, or will be mapped for other purposes by the driver.
         // Need to add a general system for detecting when a BAR is already mapped and returning the existing memory region.
@@ -218,12 +220,14 @@ enable_msi_or_msi_x :: (device: *Pci_Device, interrupt_handler: () #c_call) {
         bar := read_base_address_register(device, table_bar_index);
         device.msi_x_table.data = map_base_address_register(bar) + table_offset;
 
-        bar = read_base_address_register(device, pba_bar_index);
-        device.msi_x_pba.data = map_base_address_register(bar) + pba_offset;
+        bar = read_base_address_register(device, pending_bar_index);
+        device.msi_x_pending.slots.data = map_base_address_register(bar) + pending_offset;
 
-        table_size := get(device.msi_x.control, .table_size);
-        device.msi_x_table.count = table_size + 1;
-        device.msi_x_pba.count = table_size / size_of(u64) + 1;
+        table_size := get(device.msi_x.control, .table_size) + 1;
+
+        device.msi_x_table.count = table_size;
+        device.msi_x_pending.count = table_size;
+        device.msi_x_pending.slots.count = table_size / size_of(s64) + 1;
 
         gate := allocate_interrupt_gate();
         register_interrupt_gate(interrupt_handler, gate);
@@ -231,13 +235,16 @@ enable_msi_or_msi_x :: (device: *Pci_Device, interrupt_handler: () #c_call) {
         for* device.msi_x_table {
             it.message_address = 0xfee0_0000;
             it.message_data    = xx gate;
-            it.vector_control &= ~.mask;
+            it.vector_control &= ~.MASK;
         }
 
         set(*device.msi_x.control, .enable, 1);
         set(*device.msi_x.control, .function_mask, 0);
 
-    } else if device.msi {
+        return .MSI_X;
+    }
+
+    if device.msi {
         log("Enabling MSI");
 
         gate := allocate_interrupt_gate();
@@ -254,7 +261,11 @@ enable_msi_or_msi_x :: (device: *Pci_Device, interrupt_handler: () #c_call) {
         } else {
             device.msi.data = xx gate;
         }
+
+        return .MSI;
     }
+
+    return .NONE;
 }
 
 PCI_VENDOR_ID_NO_DEVICE :: 0xffff;
@@ -317,12 +328,14 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
 
 
 
-
 Nvme_Controller :: struct {
     using mmio: *Nvme_Property_Memory_Map;
 
-    admin_submission_queue_tail: int;
+    admin_submission_queue_tail: u32;
     admin_submission_queue: [] Nvme_Submission_Queue_Entry;
+
+    admin_completion_queue_head: u32;
+    admin_completion_queue: [] Nvme_Completion_Queue_Entry;
 
     // A namespace ID identifies a drive.
     nsid: u32;
@@ -428,6 +441,17 @@ Nvme_Submission_Queue_Entry :: struct {
     }
 }
 
+Nvme_Completion_Queue_Entry :: struct {
+    DW0: u32;
+    DW1: u32;
+
+    SQHD__sq_head_pointer: u16;
+    SQID__sq_identifier: u16;
+
+    CID__command_identifier: u16;
+    STATUS__status: u16;
+}
+
 Nvme_Admin_Opcode :: enum u8 {
     DELETE_IO_SUBMISSION_QUEUE :: 0x0;
     CREATE_IO_SUBMISSION_QUEUE :: 0x1;
@@ -468,14 +492,69 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
     device.registers[1] &= cast(u32) ~Pci_Command.INTERRUPT_DISABLE;
 
     parse_pci_capability_list(device);
-    enable_msi_or_msi_x(device, int__nvme_interrupt);
+    enabled := enable_msi_or_msi_x(device, int__nvme_interrupt);
+
+    assert(enabled == .MSI_X);
+
+    // Mask out the admin queue interrupt. Just spin on the phase bit for now
+    device.msi_x_table[0].vector_control |= .MASK;
 
     nvme: Nvme_Controller;
 
     bar := read_base_address_register(device, bar_index = 0);
     nvme.mmio = map_base_address_register(bar);
 
-    // Reset the controller.
+    nvme_reset_controller(*nvme);
+
+    // Send IDENTIFY command.
+    identify_command: Nvme_Submission_Queue_Entry;
+    identify_command.OPC__opcode = .IDENTIFY;
+    identify_command.CNS__controller_or_namespace = .IDENTIFY_CONTROLLER;
+    identify_command.DPTR__data_pointer[0] = get_4k_page();
+
+    nvme_send_admin_command(*nvme, identify_command);
+
+    identify := cast(*Nvme_Identify_Controller_Structure, identify_command.DPTR__data_pointer[0] + DIRECT_MAPPING_BASE);
+
+    sn := cast(string) identify.SN__serial_number;
+    mn := cast(string) identify.MN__model_number;
+    for sn if it == #char " " { sn.count = it_index; break; }
+    for mn if it == #char " " { mn.count = it_index; break; }
+
+    log("Found NVMe controller with serial number '%' and model number '%'.", sn, mn);
+    free_4k_page(identify_command.DPTR__data_pointer[0]);
+
+
+    // Identify active namespace ID list.
+    identify_command = .{};
+    identify_command.OPC__opcode = .IDENTIFY;
+    identify_command.CNS__controller_or_namespace = .ACTIVE_NAMESPACE_ID_LIST;
+    identify_command.DPTR__data_pointer[0] = get_4k_page();
+
+    nvme_send_admin_command(*nvme, identify_command);
+
+    nsid_list := cast(*[1024] u32, identify_command.DPTR__data_pointer[0] + DIRECT_MAPPING_BASE);
+
+    for nsid_list.* if it != 0 {
+        nvme.nsid = it;
+        break;
+    }
+
+    if nvme.nsid == 0 {
+        log_error("NVMe no active namespace ID found");
+        bluescreen();
+    }
+
+    log("Found NSID %.", nvme.nsid);
+
+    // Create IO queues.
+
+    
+
+    return nvme;
+}
+
+nvme_reset_controller :: (nvme: *Nvme_Controller) {
     if (nvme.CSTS__controller_status & .SHST__SHUTDOWN_STATUS0) || (nvme.CSTS__controller_status & .SHST__SHUTDOWN_STATUS1) {
         log("NVMe shutdown status.");
     }
@@ -505,6 +584,9 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
     nvme.admin_submission_queue.data = cast(*Nvme_Submission_Queue_Entry, admin_sq + DIRECT_MAPPING_BASE);
     nvme.admin_submission_queue.count = queue_size;
 
+    nvme.admin_completion_queue.data = cast(*Nvme_Completion_Queue_Entry, admin_cq + DIRECT_MAPPING_BASE);
+    nvme.admin_completion_queue.count = queue_size;
+
     NOIOCSS := get(nvme.CAP__capabilities, .NOIOCSS__no_io_command_set_support);
     IOCSS   := get(nvme.CAP__capabilities, .IOCSS__io_command_set_support);
     NCSS    := get(nvme.CAP__capabilities, .NCSS__nvm_command_set_support);
@@ -531,69 +613,22 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
             bluescreen();
         }
     }, "NVMe reset timeout (RDY is unset.)");
-
-    // Send IDENTIFY command.
-    identify_command: *Nvme_Submission_Queue_Entry = nvme.admin_submission_queue.data;
-    identify_command.* = .{};
-    identify_command.DPTR__data_pointer[0] = get_4k_page();
-    identify_command.CNS__controller_or_namespace = .IDENTIFY_CONTROLLER;
-    identify_command.OPC__opcode = .IDENTIFY;
-
-    nvme.admin_submission_queue_tail = 1;
-    nvme.SQ0TDBL__submission_queue_0_tail_doorbell = cast(u32) nvme.admin_submission_queue_tail;
-
-    identify_result := identify_command.DPTR__data_pointer[0] + DIRECT_MAPPING_BASE;
-
-    Timeout(cast(*u64, identify_result).*);
-
-    identify := cast(*Nvme_Identify_Controller_Structure) identify_result;
-
-    sn := cast(string) identify.SN__serial_number;
-    mn := cast(string) identify.MN__model_number;
-    for sn if it == #char " " { sn.count = it_index; break; }
-    for mn if it == #char " " { mn.count = it_index; break; }
-
-    log("Found NVMe controller with serial number '%' and model number '%'.", sn, mn);
-    free_4k_page(identify_command.DPTR__data_pointer[0]);
-
-
-    // Identify active namespace ID list.
-    identify_command = nvme.admin_submission_queue.data + 1;
-    identify_command.* = .{};
-    identify_command.DPTR__data_pointer[0] = get_4k_page();
-    identify_command.CNS__controller_or_namespace = .ACTIVE_NAMESPACE_ID_LIST;
-    identify_command.OPC__opcode = .IDENTIFY;
-
-    identify_result = identify_command.DPTR__data_pointer[0] + DIRECT_MAPPING_BASE;
-
-    nvme.admin_submission_queue_tail += 1;
-    nvme.SQ0TDBL__submission_queue_0_tail_doorbell = cast(u32) nvme.admin_submission_queue_tail;
-
-    for 1..100_000 #asm { pause; }
-
-    nsid_list := cast(*[1024] u32) identify_result;
-    
-    for nsid_list.* if it != 0 {
-        nvme.nsid = it;
-        break;
-    }
-
-    if nvme.nsid == 0 {
-        log_error("NVMe no active namespace ID found");
-        bluescreen();
-    }
-
-    log("Found NSID %.", nvme.nsid);
-
-    // Create IO queues.
-
-    
-
-    return nvme;
 }
 
-Nvme_Send_Admin_Command :: (nvme: *Nvme_Controller) {
+nvme_send_admin_command :: (using nvme: *Nvme_Controller, command: Nvme_Submission_Queue_Entry) {
+    admin_submission_queue[admin_submission_queue_tail] = command;
 
+    start_phase := admin_completion_queue[admin_completion_queue_head].STATUS__status & 1;
+
+    admin_submission_queue_tail += 1;
+    SQ0TDBL__submission_queue_0_tail_doorbell = admin_submission_queue_tail;
+
+    Timeout((admin_completion_queue[admin_completion_queue_head].STATUS__status & 1) != start_phase);
+
+    admin_completion_queue_head += 1;
+    CQ0HDBL__completion_queue_0_head_doorbell = admin_completion_queue_head;
+
+    // Todo: check completion queue entry status
 }
 
 
