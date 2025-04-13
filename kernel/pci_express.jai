@@ -337,6 +337,12 @@ Nvme_Controller :: struct {
     admin_completion_queue_head: u32;
     admin_completion_queue: [] Nvme_Completion_Queue_Entry;
 
+    io_submission_queue_tail: u32;
+    io_submission_queue: [] Nvme_Submission_Queue_Entry;
+
+    io_completion_queue_head: u32;
+    io_completion_queue: [] Nvme_Completion_Queue_Entry;
+
     // A namespace ID identifies a drive.
     nsid: u32;
 }
@@ -424,8 +430,8 @@ Nvme_Admin_Queue_Attributes :: struct {
 Nvme_Submission_Queue_Entry :: struct {
     OPC__opcode: Nvme_Admin_Opcode;
     FUSE_and_PSDT: u8;
-    CID__command_identifier: u16;
-    NSID__namespace_identifier: u32;
+    CID__command_id: u16;
+    NSID__namespace_id: u32;
 
     CDW2__command_dword_2: u32;
     CDW3__command_dword_3: u32;
@@ -438,6 +444,15 @@ Nvme_Submission_Queue_Entry :: struct {
 
         // For IDENTIFY commands:
         CNS__controller_or_namespace: Nvme_Controller_Or_Namespace_Structure;
+
+        struct {
+            // For create IO queue:
+            QID__queue_identifier: u16;
+            QSIZE__queue_size: u16;
+
+            PC__physically_contiguous: u16;
+            CQID__completion_queue_identifier: u16;
+        }
     }
 }
 
@@ -460,6 +475,12 @@ Nvme_Admin_Opcode :: enum u8 {
     CREATE_IO_COMPLETION_QUEUE :: 0x5;
     IDENTIFY                   :: 0x6;
     ABORT                      :: 0x8;
+}
+
+Nvme_Io_Opcode :: enum u8 {
+    FLUSH :: 0x0;
+    WRITE :: 0x1;
+    READ  :: 0x2;
 }
 
 Nvme_Controller_Or_Namespace_Structure :: enum u8 {
@@ -506,50 +527,84 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
 
     nvme_reset_controller(*nvme);
 
-    // Send IDENTIFY command.
-    identify_command: Nvme_Submission_Queue_Entry;
-    identify_command.OPC__opcode = .IDENTIFY;
-    identify_command.CNS__controller_or_namespace = .IDENTIFY_CONTROLLER;
-    identify_command.DPTR__data_pointer[0] = get_4k_page();
+    {
+        // Send IDENTIFY command.
+        admin_command: Nvme_Submission_Queue_Entry;
+        admin_command.OPC__opcode = .IDENTIFY;
+        admin_command.CNS__controller_or_namespace = .IDENTIFY_CONTROLLER;
+        admin_command.DPTR__data_pointer[0] = get_4k_page();
 
-    nvme_send_admin_command(*nvme, identify_command);
+        nvme_send_admin_command(*nvme, admin_command);
 
-    identify := cast(*Nvme_Identify_Controller_Structure, identify_command.DPTR__data_pointer[0] + DIRECT_MAPPING_BASE);
+        identify := cast(*Nvme_Identify_Controller_Structure, admin_command.DPTR__data_pointer[0] + DIRECT_MAPPING_BASE);
 
-    sn := cast(string) identify.SN__serial_number;
-    mn := cast(string) identify.MN__model_number;
-    for sn if it == #char " " { sn.count = it_index; break; }
-    for mn if it == #char " " { mn.count = it_index; break; }
+        sn := cast(string) identify.SN__serial_number;
+        mn := cast(string) identify.MN__model_number;
+        for sn if it == #char " " { sn.count = it_index; break; }
+        for mn if it == #char " " { mn.count = it_index; break; }
 
-    log("Found NVMe controller with serial number '%' and model number '%'.", sn, mn);
-    free_4k_page(identify_command.DPTR__data_pointer[0]);
-
-
-    // Identify active namespace ID list.
-    identify_command = .{};
-    identify_command.OPC__opcode = .IDENTIFY;
-    identify_command.CNS__controller_or_namespace = .ACTIVE_NAMESPACE_ID_LIST;
-    identify_command.DPTR__data_pointer[0] = get_4k_page();
-
-    nvme_send_admin_command(*nvme, identify_command);
-
-    nsid_list := cast(*[1024] u32, identify_command.DPTR__data_pointer[0] + DIRECT_MAPPING_BASE);
-
-    for nsid_list.* if it != 0 {
-        nvme.nsid = it;
-        break;
+        log("Found NVMe controller with serial number '%' and model number '%'.", sn, mn);
+        free_4k_page(admin_command.DPTR__data_pointer[0]);
     }
 
-    if nvme.nsid == 0 {
-        log_error("NVMe no active namespace ID found");
-        bluescreen();
+    {
+        // Get active namespace ID list.
+        admin_command: Nvme_Submission_Queue_Entry;
+        admin_command.OPC__opcode = .IDENTIFY;
+        admin_command.CNS__controller_or_namespace = .ACTIVE_NAMESPACE_ID_LIST;
+        admin_command.DPTR__data_pointer[0] = get_4k_page();
+
+        nvme_send_admin_command(*nvme, admin_command);
+
+        nsid_list := cast(*[1024] u32, admin_command.DPTR__data_pointer[0] + DIRECT_MAPPING_BASE);
+
+        for nsid_list.* if it != 0 {
+            nvme.nsid = it;
+            break;
+        }
+
+        if nvme.nsid == 0 {
+            log_error("NVMe no active namespace ID found");
+            bluescreen();
+        }
+
+        log("Found NSID %.", nvme.nsid);
+        free_4k_page(admin_command.DPTR__data_pointer[0]);
     }
 
-    log("Found NSID %.", nvme.nsid);
+    {
+        // Create IO queues.
+        io_cq_base := get_4k_page();
+        io_sq_base := get_4k_page();
 
-    // Create IO queues.
+        queue_size := 4096 / size_of(Nvme_Submission_Queue_Entry) - 1;
 
-    
+        admin_command: Nvme_Submission_Queue_Entry;
+        admin_command.OPC__opcode = .CREATE_IO_COMPLETION_QUEUE;
+        admin_command.DPTR__data_pointer[0] = io_cq_base;
+        admin_command.NSID__namespace_id = nvme.nsid;
+        admin_command.QSIZE__queue_size = cast(u16) queue_size;
+        admin_command.QID__queue_identifier = 1;
+        admin_command.PC__physically_contiguous = 1;
+
+        nvme_send_admin_command(*nvme, admin_command);
+
+        admin_command.OPC__opcode = .CREATE_IO_SUBMISSION_QUEUE;
+        admin_command.DPTR__data_pointer[0] = io_sq_base;
+        admin_command.CQID__completion_queue_identifier = 1;
+
+        nvme_send_admin_command(*nvme, admin_command);
+
+        nvme.io_submission_queue.data = xx (io_sq_base + DIRECT_MAPPING_BASE);
+        nvme.io_completion_queue.data = xx (io_cq_base + DIRECT_MAPPING_BASE);
+
+        nvme.io_submission_queue.count = queue_size;
+        nvme.io_completion_queue.count = queue_size;
+    }
+
+    {
+        // Read bootsector.
+    }
 
     return nvme;
 }
@@ -625,10 +680,15 @@ nvme_send_admin_command :: (using nvme: *Nvme_Controller, command: Nvme_Submissi
 
     Timeout((admin_completion_queue[admin_completion_queue_head].STATUS__status & 1) != start_phase);
 
+    status := admin_completion_queue[admin_completion_queue_head].STATUS__status;
+    status &= 0xfffe;
+
+    if status != 0 {
+        log_error("NVMe command failed with status %", status);
+    }
+
     admin_completion_queue_head += 1;
     CQ0HDBL__completion_queue_0_head_doorbell = admin_completion_queue_head;
-
-    // Todo: check completion queue entry status
 }
 
 
