@@ -1,60 +1,19 @@
 
-Kernel_Timestamp :: struct {
-    counter: u64;
-    ticks:   u64;
-}
-
-get_kernel_timestamp :: () -> Kernel_Timestamp {
-    using kernel_globals;
-    ts: Kernel_Timestamp;
-
-    sequence_read(*high_precision_timer.seq_lock, #code {
-        // Todo: HPET might be worse than TSC or LAPIC for system time
-        // This could also just use 16-byte compare exchange instead of a seqlock
-
-        ts.counter = high_precision_timer.timers[0].counter;
-        ts.ticks   = high_precision_timer.timers[0].ticks_at_last_interrupt;
-    });
-
-    // Todo: figure out the performace characteristics of reading this register.
-    // Apparently its not very good.
-    ticks_now := cast(u64) read(.COUNTER);
-
-    if ticks_now < ts.ticks {
-        counter_max: u64 = 0xffff_ffff;
-        if high_precision_timer.timers[0].counter_is_64_bit {
-            counter_max = 0xffff_ffff_ffff_ffff;
-        }
-
-        ts.ticks = ticks_now + (counter_max - ts.ticks);
-    } else {
-        ts.ticks = ticks_now - ts.ticks;
-    }
-
-    return ts;
-}
-
-kernel_timestamp_to_apollo :: (ts: Kernel_Timestamp) -> Apollo_Time {
+get_kernel_timestamp :: () -> Apollo_Time {
     using kernel_globals;
 
-    time_represented_by_ticks: Apollo_Time;
-    time_represented_by_ticks.low = cast(u64) ts.ticks;
-    time_represented_by_ticks *= cast(s64) high_precision_timer.tick_period_femtoseconds;
+    timestamp: Apollo_Time;
+    timestamp.low = rdtsc();
 
-    femtoseconds_per_millisecond := 1_000_000_000_000;
-    time_represented_by_counter: Apollo_Time;
-    time_represented_by_counter.low = ts.counter;
-    time_represented_by_counter *= 100 * femtoseconds_per_millisecond;
+    FEMTOSECONDS_PER_SECOND :: 1_000_000_000_000_000;
+    timestamp *= FEMTOSECONDS_PER_SECOND;
+    timestamp /= cast(s64) tsc_frequency;
 
-    return time_represented_by_counter + time_represented_by_ticks;
+    return timestamp;
 }
 
 get_monotonic_system_time :: () -> Apollo_Time {
-    using kernel_globals;
-
-    ts := get_kernel_timestamp();
-
-    return boot_time + kernel_timestamp_to_apollo(ts);
+    return get_kernel_timestamp() + kernel_globals.boot_time;
 }
 
 native_calendar_to_apollo :: (ct: Calendar_Time) -> Apollo_Time {
@@ -464,6 +423,44 @@ hpet_restart :: () {
     write_apic_register(.EOI__END_OF_INTERRUPT, 0);
 } @InterruptRoutine
 
+hpet_get_monotonic_time :: () -> Apollo_Time {
+    using kernel_globals;
+
+    counter, ticks: u64;
+
+    sequence_read(*high_precision_timer.seq_lock, #code {
+        // This could also just use 16-byte compare exchange instead of a seqlock
+
+        counter = high_precision_timer.timers[0].counter;
+        ticks   = high_precision_timer.timers[0].ticks_at_last_interrupt;
+    });
+
+    // Apparently reading this register can have high latency
+    ticks_now := cast(u64) read(.COUNTER);
+
+    if ticks_now < ticks {
+        counter_max: u64 = 0xffff_ffff;
+        if high_precision_timer.timers[0].counter_is_64_bit {
+            counter_max = 0xffff_ffff_ffff_ffff;
+        }
+
+        ticks = ticks_now + (counter_max - ticks);
+    } else {
+        ticks = ticks_now - ticks;
+    }
+
+    time_represented_by_ticks: Apollo_Time;
+    time_represented_by_ticks.low = cast(u64) ticks;
+    time_represented_by_ticks *= cast(s64) high_precision_timer.tick_period_femtoseconds;
+
+    FEMTOSECONDS_PER_MILLISECOND :: 1_000_000_000_000;
+    time_represented_by_counter: Apollo_Time;
+    time_represented_by_counter.low = counter;
+    time_represented_by_counter *= 100 * FEMTOSECONDS_PER_MILLISECOND;
+
+    return boot_time + time_represented_by_counter + time_represented_by_ticks;
+}
+
 
 
 init_tsc :: () {
@@ -499,6 +496,7 @@ init_tsc :: () {
 }
 
 calibrate_tsc :: () -> hz: u64 {
+
     // Try to read TSC frequency from CPUID. Modern CPUs support it, but even fairly recent ones don't, so fallback to manual timing using HPET.
     eax, ebx, ecx, edx: u64;
 
@@ -513,8 +511,11 @@ calibrate_tsc :: () -> hz: u64 {
     }
 
     if eax != 0 {
-        return ecx * (ebx / eax);
+        frequency := ecx * (ebx / eax);
+        log("TSC Frequency is % (CPUID)", frequency);
+        return frequency;
     }
+
 
 
     // If the TSC frequency is not provided by CPUID, it can in practice be derived from the processor base frequency.
@@ -524,8 +525,12 @@ calibrate_tsc :: () -> hz: u64 {
     }
 
     if eax != 0 {
-        return eax;
+        // It looks like this value is not too accurate. Manual calibration might be better.
+        frequency := eax * 1_000_000;
+        log("TSC Frequency is % (CPUID)", frequency);
+        return frequency;
     }
+
 
 
     log("Calibrating TSC...");
@@ -535,7 +540,7 @@ calibrate_tsc :: () -> hz: u64 {
     ticks_per_calibration_run := cast(u32, calibration_time_fs / hpet.tick_period_femtoseconds);
 
     // Run until we get three consecutive results within a certain error
-    max_error := 1000; // Todo: this value might need to be dynamically estimated, since any specific value will not be reasonable for all possible TSC frequencies.
+    max_error := 5000; // Todo: this value might need to be dynamically estimated, since any specific value will not be reasonable for all possible TSC frequencies.
     delta: [3] int;
 
     counter_register := cast(*u32, hpet.base_address + cast(u64) Hpet_Register.COUNTER);
@@ -562,6 +567,8 @@ calibrate_tsc :: () -> hz: u64 {
         delta[2] = delta[1];
         delta[1] = delta[0];
         delta[0] = cast(int, tsc1 - tsc0);
+
+        log("Run % delta %", it, delta[0]);
 
         if it < 2 continue;
 
@@ -611,12 +618,14 @@ calibrate_tsc_interrupt :: () {
 }
 
 debug_measure_tsc_drift :: () {
+    context.print_style.default_format_int.base = 10;
+
     #asm { cli; }
 
     tsc_start := rdtsc();
     tsc_frequency := cast(float) kernel_globals.tsc_frequency;
 
-    time := get_monotonic_system_time();
+    time := hpet_get_monotonic_time();
 
     for 1..1_000_000 {
         time += seconds_to_apollo(1);
@@ -627,5 +636,26 @@ debug_measure_tsc_drift :: () {
         seconds_according_to_tsc := cast(float, tsc_now - tsc_start) / tsc_frequency;
 
         print("[%] TSC: % | Error: %\n", it, seconds_according_to_tsc, cast(float) it - seconds_according_to_tsc);
+    }
+}
+
+debug_run_tsc_timer :: () {
+    context.print_style.default_format_int.base = 10;
+
+    #asm { cli; }
+
+    tsc_start := rdtsc();
+    tsc_frequency := cast(float) kernel_globals.tsc_frequency;
+
+    seconds: int;
+
+    while true {
+        tsc_now := rdtsc();
+
+        seconds_according_to_tsc := cast(float, tsc_now - tsc_start) / tsc_frequency;
+
+        print("%\n", seconds_according_to_tsc);
+
+        for 1..1_000_000 #asm {pause;}
     }
 }

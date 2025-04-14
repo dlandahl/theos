@@ -351,7 +351,7 @@ page_fault :: (stack: *Interrupt_Stack(true)) #c_call {
     core := get_current_core();
     task := core.scheduler.current_task;
 
-    print("Page Fault    (On core %, running thread %)\n", core.id, task.id);
+    print("Page Fault (On core %, running thread %)\n", core.id, task.id);
 
     _cr2: u64;
     #asm { get_cr2 _cr2; }

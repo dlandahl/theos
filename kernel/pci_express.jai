@@ -327,6 +327,9 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
 }
 
 
+
+
+
 Nvme_Controller :: struct {
     using mmio: *Nvme_Property_Memory_Map;
 
@@ -491,9 +494,6 @@ Nvme_Opcode :: enum u8 {
     READ                       :: 0x2;
 }
 
-Nvme_Io_Opcode :: enum u8 {
-}
-
 Nvme_Controller_Or_Namespace_Structure :: enum u8 {
     IDENTIFY_NAMESPACE       :: 0x0;
     IDENTIFY_CONTROLLER      :: 0x1;
@@ -622,7 +622,7 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
         io_command.NLB__number_of_logical_blocks = 0; // This means 1 block
 
         nvme_send_io_command(*nvme, io_command);
-
+        
         if cast(*u16, buffer + 510 + DIRECT_MAPPING_BASE).* == 0xaa55 {
             log("Success :)");
         } else {

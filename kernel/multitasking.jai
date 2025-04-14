@@ -362,7 +362,6 @@ task_do_work :: () #c_call {
 }
 
 task_do_work_in_ring_3 :: () #c_call {
-
     push_context {
         make_kernel_context(*context);
 

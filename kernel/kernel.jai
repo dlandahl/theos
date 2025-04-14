@@ -199,6 +199,8 @@ kernel_entry :: () #no_context {
             root_acpi_table = xx (rsdp.rsdt_address + DIRECT_MAPPING_BASE);
         }
 
+        kernel_globals.temporary_text_drawing_state.font = parse_pnm(font_file);
+
 
         initialize_apic();
 
@@ -227,7 +229,6 @@ kernel_entry :: () #no_context {
 
         init_tsc();
 
-        kernel_globals.temporary_text_drawing_state.font = parse_pnm(font_file);
         draw_text("Hello, Sailor!\nWelcome to the operating system.\n");
 
         time := get_monotonic_system_time();
@@ -261,7 +262,7 @@ kernel_entry :: () #no_context {
             }
         }
 
-        while true {}
+        context.print_style.default_format_int.base = 10;
 
         startup_application_processors();
 
