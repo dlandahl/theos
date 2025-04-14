@@ -155,6 +155,7 @@ initialize_apic :: () {
     };
 
     register_interrupt_gate(int__general_protection_fault,      13, true);
+    register_interrupt_gate(int__page_fault,                    14, true);
     register_interrupt_gate(int__simd_floating_point_exception, 19, true);
 
     //
@@ -342,6 +343,43 @@ DEFAULT_ISA_FAULT_HANDLER :: #string END
     bluescreen();
 } @InterruptRoutine
 END;
+
+#program_export
+page_fault :: (stack: *Interrupt_Stack(true)) #c_call {
+    push_context,defer_pop;
+
+    core := get_current_core();
+    task := core.scheduler.current_task;
+
+    print("Page Fault    (On core %, running thread %)\n", core.id, task.id);
+
+    _cr2: u64;
+    #asm { get_cr2 _cr2; }
+    cr2 := _cr2;
+
+    context.print_style.default_format_int.base = 16;
+    print("Virtual Address: 0x%\n\n", cr2);
+
+    Flags :: enum_flags u32 {
+        PRESENT;
+        WRITE;
+        USER;
+        RESERVED_WRITE;
+        INSTRUCTION_FETCH;
+        PROTECTION_KEY;
+        SHADOW_STACK;
+    }
+    flags := << cast(*Flags) *stack.error_code;
+    print("Error flags: %\n\n", flags);
+
+    print("RIP: 0x%\n", stack.ip);
+    print("RSP: 0x%\n", stack.sp);
+    print("SS: %\n", stack.ss);
+    print("CS: %\n", stack.cs);
+
+    bluescreen();
+
+} @InterruptRoutineWithErrorCode
 
 #program_export
 general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c_call {

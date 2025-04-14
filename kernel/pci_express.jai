@@ -331,17 +331,19 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
 Nvme_Controller :: struct {
     using mmio: *Nvme_Property_Memory_Map;
 
-    admin_submission_queue_tail: u32;
-    admin_submission_queue: [] Nvme_Submission_Queue_Entry;
+    queue_size: u32;
 
-    admin_completion_queue_head: u32;
-    admin_completion_queue: [] Nvme_Completion_Queue_Entry;
+    admin_sq_tail: u32;
+    admin_sq: *Nvme_Submission_Queue_Entry;
+
+    admin_cq_head: u32;
+    admin_cq: *Nvme_Completion_Queue_Entry;
 
     io_submission_queue_tail: u32;
-    io_submission_queue: [] Nvme_Submission_Queue_Entry;
+    io_submission_queue: *Nvme_Submission_Queue_Entry;
 
     io_completion_queue_head: u32;
-    io_completion_queue: [] Nvme_Completion_Queue_Entry;
+    io_completion_queue: *Nvme_Completion_Queue_Entry;
 
     // A namespace ID identifies a drive.
     nsid: u32;
@@ -359,8 +361,8 @@ Nvme_Property_Memory_Map :: struct {
     CSTS__controller_status:      Nvme_Controller_Status;
     NSSR:                         u32;
     AQA__admin_queue_attributes:  Nvme_Admin_Queue_Attributes;
-    ASQ__admin_submission_queue:  u64;
-    ACQ__admin_completion_queue:  u64;
+    ASQ__admin_sq:  u64;
+    ACQ__admin_cq:  u64;
 
     // Would be nice to be able to give a constant to #place
 #place start_marker;
@@ -525,6 +527,8 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
     bar := read_base_address_register(device, bar_index = 0);
     nvme.mmio = map_base_address_register(bar);
 
+    nvme.queue_size = 4096 / size_of(Nvme_Submission_Queue_Entry);
+
     nvme_reset_controller(*nvme);
 
     {
@@ -577,13 +581,11 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
         io_cq_base := get_4k_page();
         io_sq_base := get_4k_page();
 
-        queue_size := 4096 / size_of(Nvme_Submission_Queue_Entry) - 1;
-
         admin_command: Nvme_Submission_Queue_Entry;
         admin_command.OPC__opcode = .CREATE_IO_COMPLETION_QUEUE;
         admin_command.DPTR__data_pointer[0] = io_cq_base;
         admin_command.NSID__namespace_id = nvme.nsid;
-        admin_command.QSIZE__queue_size = cast(u16) queue_size;
+        admin_command.QSIZE__queue_size = cast(u16) nvme.queue_size;
         admin_command.QID__queue_identifier = 1;
         admin_command.PC__physically_contiguous = 1;
 
@@ -595,11 +597,8 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
 
         nvme_send_admin_command(*nvme, admin_command);
 
-        nvme.io_submission_queue.data = xx (io_sq_base + DIRECT_MAPPING_BASE);
-        nvme.io_completion_queue.data = xx (io_cq_base + DIRECT_MAPPING_BASE);
-
-        nvme.io_submission_queue.count = queue_size;
-        nvme.io_completion_queue.count = queue_size;
+        nvme.io_submission_queue = xx (io_sq_base + DIRECT_MAPPING_BASE);
+        nvme.io_completion_queue = xx (io_cq_base + DIRECT_MAPPING_BASE);
     }
 
     {
@@ -625,7 +624,7 @@ nvme_reset_controller :: (nvme: *Nvme_Controller) {
     admin_cq := get_4k_page();
 
     // Subtract one, because the field is zero based.
-    queue_size := 4096 / size_of(Nvme_Submission_Queue_Entry) - 1;
+    queue_size := nvme.queue_size - 1;
 
     // Don't write these fields individually, since 16-bit access is not necessarily supported on 32-bit registers.
     nvme.AQA__admin_queue_attributes = .{
@@ -633,14 +632,11 @@ nvme_reset_controller :: (nvme: *Nvme_Controller) {
         cast(u16) queue_size
     };
 
-    nvme.ASQ__admin_submission_queue = admin_sq;
-    nvme.ACQ__admin_completion_queue = admin_cq;
+    nvme.ASQ__admin_sq = admin_sq;
+    nvme.ACQ__admin_cq = admin_cq;
 
-    nvme.admin_submission_queue.data = cast(*Nvme_Submission_Queue_Entry, admin_sq + DIRECT_MAPPING_BASE);
-    nvme.admin_submission_queue.count = queue_size;
-
-    nvme.admin_completion_queue.data = cast(*Nvme_Completion_Queue_Entry, admin_cq + DIRECT_MAPPING_BASE);
-    nvme.admin_completion_queue.count = queue_size;
+    nvme.admin_sq = cast(*Nvme_Submission_Queue_Entry, admin_sq + DIRECT_MAPPING_BASE);
+    nvme.admin_cq = cast(*Nvme_Completion_Queue_Entry, admin_cq + DIRECT_MAPPING_BASE);
 
     NOIOCSS := get(nvme.CAP__capabilities, .NOIOCSS__no_io_command_set_support);
     IOCSS   := get(nvme.CAP__capabilities, .IOCSS__io_command_set_support);
@@ -671,24 +667,26 @@ nvme_reset_controller :: (nvme: *Nvme_Controller) {
 }
 
 nvme_send_admin_command :: (using nvme: *Nvme_Controller, command: Nvme_Submission_Queue_Entry) {
-    admin_submission_queue[admin_submission_queue_tail] = command;
+    admin_sq[admin_sq_tail] = command;
 
-    start_phase := admin_completion_queue[admin_completion_queue_head].STATUS__status & 1;
+    start_phase := admin_cq[admin_cq_head].STATUS__status & 1;
 
-    admin_submission_queue_tail += 1;
-    SQ0TDBL__submission_queue_0_tail_doorbell = admin_submission_queue_tail;
+    admin_sq_tail += 1;
+    if admin_sq_tail == queue_size then admin_sq_tail = 0;
 
-    Timeout((admin_completion_queue[admin_completion_queue_head].STATUS__status & 1) != start_phase);
+    SQ0TDBL__submission_queue_0_tail_doorbell = admin_sq_tail;
 
-    status := admin_completion_queue[admin_completion_queue_head].STATUS__status;
-    status &= 0xfffe;
+    Timeout((admin_cq[admin_cq_head].STATUS__status & 1) != start_phase);
 
+    status := admin_cq[admin_cq_head].STATUS__status & 0xfffe;
     if status != 0 {
         log_error("NVMe command failed with status %", status);
     }
 
-    admin_completion_queue_head += 1;
-    CQ0HDBL__completion_queue_0_head_doorbell = admin_completion_queue_head;
+    admin_cq_head += 1;
+    if admin_cq_head == queue_size then admin_cq_head = 0;
+
+    CQ0HDBL__completion_queue_0_head_doorbell = admin_cq_head;
 }
 
 
@@ -767,7 +765,7 @@ init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, succe
         }
     }
 
-    for 0..max_ports - 1 {
+    for 0..max_ports-1 {
         if !(ahci.PI__ports_implemented & (1 << it)) continue;
 
         port := *ahci.ports[it];
