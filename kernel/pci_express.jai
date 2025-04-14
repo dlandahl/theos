@@ -327,7 +327,6 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
 }
 
 
-
 Nvme_Controller :: struct {
     using mmio: *Nvme_Property_Memory_Map;
 
@@ -339,11 +338,11 @@ Nvme_Controller :: struct {
     admin_cq_head: u32;
     admin_cq: *Nvme_Completion_Queue_Entry;
 
-    io_submission_queue_tail: u32;
-    io_submission_queue: *Nvme_Submission_Queue_Entry;
+    io_sq_tail: u32;
+    io_sq: *Nvme_Submission_Queue_Entry;
 
-    io_completion_queue_head: u32;
-    io_completion_queue: *Nvme_Completion_Queue_Entry;
+    io_cq_head: u32;
+    io_cq: *Nvme_Completion_Queue_Entry;
 
     // A namespace ID identifies a drive.
     nsid: u32;
@@ -367,6 +366,7 @@ Nvme_Property_Memory_Map :: struct {
     // Would be nice to be able to give a constant to #place
 #place start_marker;
     offset_for_transport_specific_properties: [0x1000] u8;
+    doorbell_base: void;
 
     SQ0TDBL__submission_queue_0_tail_doorbell: u32;
     CQ0HDBL__completion_queue_0_head_doorbell: u32;
@@ -430,7 +430,7 @@ Nvme_Admin_Queue_Attributes :: struct {
 }
 
 Nvme_Submission_Queue_Entry :: struct {
-    OPC__opcode: Nvme_Admin_Opcode;
+    OPC__opcode: Nvme_Opcode;
     FUSE_and_PSDT: u8;
     CID__command_id: u16;
     NSID__namespace_id: u32;
@@ -455,6 +455,12 @@ Nvme_Submission_Queue_Entry :: struct {
             PC__physically_contiguous: u16;
             CQID__completion_queue_identifier: u16;
         }
+
+        struct {
+            // For IO READ:
+            SLBA__starting_lba: u64;
+            NLB__number_of_logical_blocks: u16;
+        }
     }
 }
 
@@ -469,7 +475,8 @@ Nvme_Completion_Queue_Entry :: struct {
     STATUS__status: u16;
 }
 
-Nvme_Admin_Opcode :: enum u8 {
+Nvme_Opcode :: enum u8 {
+    // Admin opcodes
     DELETE_IO_SUBMISSION_QUEUE :: 0x0;
     CREATE_IO_SUBMISSION_QUEUE :: 0x1;
     GET_LOG_PAGE               :: 0x2;
@@ -477,12 +484,14 @@ Nvme_Admin_Opcode :: enum u8 {
     CREATE_IO_COMPLETION_QUEUE :: 0x5;
     IDENTIFY                   :: 0x6;
     ABORT                      :: 0x8;
+
+    // IO opcodes
+    FLUSH                      :: 0x0;
+    WRITE                      :: 0x1;
+    READ                       :: 0x2;
 }
 
 Nvme_Io_Opcode :: enum u8 {
-    FLUSH :: 0x0;
-    WRITE :: 0x1;
-    READ  :: 0x2;
 }
 
 Nvme_Controller_Or_Namespace_Structure :: enum u8 {
@@ -597,12 +606,28 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
 
         nvme_send_admin_command(*nvme, admin_command);
 
-        nvme.io_submission_queue = xx (io_sq_base + DIRECT_MAPPING_BASE);
-        nvme.io_completion_queue = xx (io_cq_base + DIRECT_MAPPING_BASE);
+        nvme.io_sq = xx (io_sq_base + DIRECT_MAPPING_BASE);
+        nvme.io_cq = xx (io_cq_base + DIRECT_MAPPING_BASE);
     }
 
     {
-        // Read bootsector.
+        // Read bootsector test.
+        buffer := get_4k_page();
+
+        io_command: Nvme_Submission_Queue_Entry;
+        io_command.OPC__opcode = .READ;
+        io_command.DPTR__data_pointer[0] = buffer;
+        io_command.NSID__namespace_id = nvme.nsid;
+        io_command.SLBA__starting_lba = 0;
+        io_command.NLB__number_of_logical_blocks = 0; // This means 1 block
+
+        nvme_send_io_command(*nvme, io_command);
+
+        if cast(*u16, buffer + 510 + DIRECT_MAPPING_BASE).* == 0xaa55 {
+            log("Success :)");
+        } else {
+            log("Failure :(");
+        }
     }
 
     return nvme;
@@ -642,9 +667,9 @@ nvme_reset_controller :: (nvme: *Nvme_Controller) {
     IOCSS   := get(nvme.CAP__capabilities, .IOCSS__io_command_set_support);
     NCSS    := get(nvme.CAP__capabilities, .NCSS__nvm_command_set_support);
 
-    if NOIOCSS           set(*nvme.CC__controller_config, .CSS__io_command_set, 0b111);
-    if IOCSS && !NOIOCSS set(*nvme.CC__controller_config, .CSS__io_command_set, 0b100); // Todo why is !NOIOCSS needed on QEMU
-    if !IOCSS && NCSS    set(*nvme.CC__controller_config, .CSS__io_command_set, 0b000);
+    if NOIOCSS         set(*nvme.CC__controller_config, .CSS__io_command_set, 0b111);
+    if IOCSS           set(*nvme.CC__controller_config, .CSS__io_command_set, 0b110);
+    if !IOCSS && NCSS  set(*nvme.CC__controller_config, .CSS__io_command_set, 0b000);
 
     set(*nvme.CC__controller_config, .AMS__arbitration_mechanism, 0);
     set(*nvme.CC__controller_config, .MPS__memory_page_size, 0);
@@ -678,7 +703,7 @@ nvme_send_admin_command :: (using nvme: *Nvme_Controller, command: Nvme_Submissi
 
     Timeout((admin_cq[admin_cq_head].STATUS__status & 1) != start_phase);
 
-    status := admin_cq[admin_cq_head].STATUS__status & 0xfffe;
+    status := admin_cq[admin_cq_head].STATUS__status >> 1;
     if status != 0 {
         log_error("NVMe command failed with status %", status);
     }
@@ -687,6 +712,33 @@ nvme_send_admin_command :: (using nvme: *Nvme_Controller, command: Nvme_Submissi
     if admin_cq_head == queue_size then admin_cq_head = 0;
 
     CQ0HDBL__completion_queue_0_head_doorbell = admin_cq_head;
+}
+
+nvme_send_io_command :: (using nvme: *Nvme_Controller, command: Nvme_Submission_Queue_Entry) {
+    io_sq[io_sq_tail] = command;
+
+    start_phase := io_cq[io_cq_head].STATUS__status & 1;
+
+    io_sq_tail += 1;
+    if io_sq_tail == queue_size then io_sq_tail = 0;
+
+    sq_tail_doorbell := *doorbell_base;
+    sq_tail_doorbell += 2 * (4 << get(CAP__capabilities, .DSTRD__doorbell_stride));
+    cast(*u32, sq_tail_doorbell).* = io_sq_tail;
+
+    Timeout((io_cq[io_cq_head].STATUS__status & 1) != start_phase);
+
+    status := io_cq[io_cq_head].STATUS__status >> 1;
+    if status != 0 {
+        log_error("NVMe command failed with status %", status);
+    }
+
+    io_cq_head += 1;
+    if io_cq_head == queue_size then io_cq_head = 0;
+
+    cq_head_doorbell := *doorbell_base;
+    cq_head_doorbell += 3 * (4 << get(CAP__capabilities, .DSTRD__doorbell_stride));
+    cast(*u32, cq_head_doorbell).* = io_cq_head;
 }
 
 
