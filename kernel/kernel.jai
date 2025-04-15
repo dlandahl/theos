@@ -258,9 +258,15 @@ kernel_entry :: () #no_context {
 
         for* pci_devices {
             if it.class_code == .MASS_STORAGE && it.subclass == 0x8 {
-                init_nvme_controller(it);
+                // init_nvme_controller(it);
+            }
+
+            if it.class_code == .NETWORK && it.subclass == 0x0 {
+                init_i8254x(it);
             }
         }
+
+        while true {}
 
         context.print_style.default_format_int.base = 10;
 
@@ -1277,6 +1283,10 @@ Timeout :: (code: Code, message := "", time_ms := 1000, call := #caller_location
     }
 }
 
+Temp_Context :: () #expand {
+    newc := context;
+    `push_context,defer_pop newc;
+}
 
 
 

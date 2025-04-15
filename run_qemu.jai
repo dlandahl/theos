@@ -10,7 +10,7 @@
     make_directory_if_it_does_not_exist("logs");
 
     command := break_command_into_strings(#string QEMU_CMD
-        qemu-system-x86_64
+        sudo qemu-system-x86_64
             -machine q35 -accel kvm
             -cpu max,+apic,+fsgsbase,+tsc-deadline,+invtsc
             -bios OVMF.fd
@@ -18,13 +18,15 @@
             -device nvme,serial=cafebabe,drive=nvm
             -chardev stdio,id=char0,logfile=logs/qemu_serial.txt,signal=off
             -serial chardev:char0
+            -nic tap
             -m 256M 
+            --trace "*e1000*" 
             -smp 4 
     QEMU_CMD);
 
-    // --trace "*nvme*" 
+    // -s -S 
     // -d int 
-
+    // user,mac=02:ca:fe:f0:0d:01,id=n0
     run_command(.. command);
 }
 

@@ -328,6 +328,206 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
 
 
 
+mac_address_print_style: struct {
+    #as using mac: Print_Style;
+
+    mac.default_format_int.base = 16;
+    mac.default_format_int.minimum_digits = 2;
+    mac.default_format_array.separator = ":";
+    mac.default_format_array.begin_string = "";
+    mac.default_format_array.end_string = "";
+}
+
+I8254x_Registers :: struct {
+    start: void;
+
+    CTRL__Device_Control :: enum_flags u32 {
+        LRST__link_reset                   :: 0x8;
+        ASDE__auto_speed_detection         :: 0x20;
+        SLU__set_link_up                   :: 0x40;
+        ILOS__invert_los                   :: 0x80;
+        RST__device_reset                  :: 0x400_0000;
+        RFCE__receive_flow_control_enable  :: 0x800_0000;
+        TFCE__transmit_flow_control_enable :: 0x1000_0000;
+        VME__vlan_mode_enable              :: 0x4000_0000;
+        PHY_RST__phy_reset                 :: 0x8000_0000;
+    }
+
+    CTRL__device_control: CTRL__Device_Control;
+    _: u32;
+    STATUS__device_status: u32;
+
+#place start; _: [0x28] u8;
+    FCAL: u32;
+    FCAH: u32;
+    FCT:  u32;
+
+#place start; _: [0x100] u8;
+    RCTL__receive_control: RCTL__Receive_Control;
+
+    RCTL__Receive_Control :: enum_flags u32 {
+        __reserved                         :: 0x1;
+
+        EN__enable                         :: 0x2;
+        SBP__store_bad_packets             :: 0x4;
+        UPE__unicast_promiscuous_enabled   :: 0x8;
+        MPE__multicast_promiscuous_enabled :: 0x10;
+
+        RDMTS0__minimum_threshold_0        :: 0x100;
+        RDMTS1__minimum_threshold_1        :: 0x200;
+
+        BAM__broadcast_accept_mode         :: 0x8000;
+        BSIZE0__buffer_size_bit_0          :: 0x1_0000;
+        BSIZE1__buffer_size_bit_1          :: 0x2_0000;
+        BSEX__buffer_size_extension        :: 0x200_0000;
+    }
+
+#place start; _: [0x2800] u8;
+    RDBAL__receive_descriptor_base_low: u32;
+    RDBAH__receive_descriptor_base_high: u32;
+    RDLEN__receive_descriptor_length: u32;
+    _: u32;
+    RDH__receive_descriptor_head: u32;
+    _: u32;
+    RDT__receive_descriptor_tail: u32;
+    _: u32;
+
+    RDTR__receive_delay_timer_register: enum_flags {
+        FPD__flush_partial_descriptor_block :: 0x8000_0000;
+    };
+
+#place start; _: [0x5200] u8;
+    MTA__multicast_table_array: [128] u32;
+
+    RAL__receive_address_low: u32;
+    RAH__receive_address_high: u32;
+}
+
+I8254x_Receive_Descriptor :: struct {
+    buffer_address: u64;
+    length: u16;
+    checksum: u16;
+    status: u8;
+    errors: u8;
+    special: u16;
+}
+
+init_i8254x :: (device: *Pci_Device) {
+
+    Temp_Context();
+    context.print_style.default_format_int.base = 16;
+
+    log(
+        "Vendor ID: %\nDevice ID: %",
+        device.vendor_id,
+        device.device_id
+    );
+
+    device.registers[1] |= cast(u32) Pci_Command.BUS_MASTER | .MEMORY_SPACE;
+    device.registers[1] &= cast(u32) ~Pci_Command.INTERRUPT_DISABLE;
+
+    parse_pci_capability_list(device);
+
+    bar0 := read_base_address_register(device, 0);
+    nic := cast(*I8254x_Registers) map_base_address_register(bar0);
+
+    {
+        // Reset
+        nic.CTRL__device_control |= .PHY_RST__phy_reset;
+        for 1..10_000 #asm {pause;}
+
+        nic.CTRL__device_control |= .RST__device_reset;
+        for 1..10_000 #asm {pause;}
+    }
+
+    {
+        // Get MAC address
+        mac: union {
+            struct { low, high: u32; }
+            array: [6] u8;
+        };
+
+        mac.low  = nic.RAL__receive_address_low;
+        mac.high = nic.RAH__receive_address_high;
+
+        Temp_Context();
+        context.print_style = mac_address_print_style;
+        log("MAC address: %", mac.array);
+    }
+
+    {
+        // General configuration (Section 14.3)
+        ctrl := nic.CTRL__device_control;
+
+        ctrl &= ~.LRST__link_reset;
+        ctrl &= ~.ILOS__invert_los;
+        ctrl &= ~.VME__vlan_mode_enable;
+        ctrl &= ~.RFCE__receive_flow_control_enable;
+        ctrl &= ~.TFCE__transmit_flow_control_enable;
+
+        ctrl |= .ASDE__auto_speed_detection;
+        ctrl |= .SLU__set_link_up;
+
+        nic.CTRL__device_control = ctrl;
+
+        // Disable flow control
+        nic.FCAL = 0;
+        nic.FCAH = 0;
+        nic.FCT = 0;
+
+        // Clear multicast table
+        for* nic.MTA__multicast_table_array it.* = 0;
+    }
+
+    {
+        // Receive packets
+
+        // Allocate receive descriptor queue
+        receive_desc_buffer := get_4k_page();
+
+        nic.RDBAL__receive_descriptor_base_low  = cast(u32, receive_desc_buffer & 0xffff_ffff);
+        nic.RDBAH__receive_descriptor_base_high = cast(u32, receive_desc_buffer >> 32);
+
+        nic.RDLEN__receive_descriptor_length = 4096;
+
+        // Enable promiscuous mode so that the controller gives packets to the host even if they aren't addressed to us.
+        receive_everything: I8254x_Registers.RCTL__Receive_Control =
+              .SBP__store_bad_packets
+            | .UPE__unicast_promiscuous_enabled
+            | .MPE__multicast_promiscuous_enabled
+            | .EN__enable
+            | .BAM__broadcast_accept_mode;
+
+        buffer_size_4k: I8254x_Registers.RCTL__Receive_Control =
+              .BSIZE0__buffer_size_bit_0
+            | .BSIZE1__buffer_size_bit_1
+            | .BSEX__buffer_size_extension;
+
+        nic.RCTL__receive_control = receive_everything | buffer_size_4k | .RDMTS1__minimum_threshold_1;
+
+        queue := cast(*I8254x_Receive_Descriptor, receive_desc_buffer + DIRECT_MAPPING_BASE);
+        desc_count := 4096 / size_of(I8254x_Receive_Descriptor);
+
+        for 0..desc_count-1 {
+            queue[it].buffer_address = get_4k_page();
+        }
+
+        nic.RDH__receive_descriptor_head = 0;
+        nic.RDT__receive_descriptor_tail = cast(u32, desc_count-1);
+
+        context.print_style.default_format_int.base = 10;
+
+        head := 0;
+
+        while true {
+            while head == nic.RDH__receive_descriptor_head #asm {pause;}
+            log("%", nic.RDH__receive_descriptor_head);
+            head = nic.RDH__receive_descriptor_head;
+        }
+    }
+}
+
+
 
 
 Nvme_Controller :: struct {

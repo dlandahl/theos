@@ -496,6 +496,7 @@ init_tsc :: () {
 }
 
 calibrate_tsc :: () -> hz: u64 {
+    verbose := false;
 
     // Try to read TSC frequency from CPUID. Modern CPUs support it, but even fairly recent ones don't, so fallback to manual timing using HPET.
     eax, ebx, ecx, edx: u64;
@@ -512,7 +513,7 @@ calibrate_tsc :: () -> hz: u64 {
 
     if eax != 0 {
         frequency := ecx * (ebx / eax);
-        log("TSC Frequency is % (CPUID)", frequency);
+        if verbose log("TSC Frequency is % (CPUID)", frequency);
         return frequency;
     }
 
@@ -527,13 +528,11 @@ calibrate_tsc :: () -> hz: u64 {
     if eax != 0 {
         // It looks like this value is not too accurate. Manual calibration might be better.
         frequency := eax * 1_000_000;
-        log("TSC Frequency is % (CPUID)", frequency);
+        if verbose log("TSC Frequency is % (CPUID)", frequency);
         return frequency;
     }
 
-
-
-    log("Calibrating TSC...");
+    if verbose log("Calibrating TSC...");
     hpet := kernel_globals.high_precision_timer;
 
     calibration_time_fs: u64 = 50_000_000_000_000; // 50ms expressed as femtoseconds
@@ -568,7 +567,7 @@ calibrate_tsc :: () -> hz: u64 {
         delta[1] = delta[0];
         delta[0] = cast(int, tsc1 - tsc0);
 
-        log("Run % delta %", it, delta[0]);
+        if verbose log("Run % delta %", it, delta[0]);
 
         if it < 2 continue;
 
@@ -584,7 +583,7 @@ calibrate_tsc :: () -> hz: u64 {
             average_delta := (delta[0] + delta[1] + delta[2]) / 3;
             frequency := cast(u64) average_delta * 20; // Convert ticks per 50ms timing run to ticks per second
 
-            log("Calibrating TSC took % 50ms calibration runs, frequency is %", it, frequency);
+            if verbose log("Calibrating TSC took % 50ms calibration runs, frequency is %", it, frequency);
             return frequency;
         }
     }
