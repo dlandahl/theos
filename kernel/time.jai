@@ -491,8 +491,16 @@ init_tsc :: () {
         kernel_globals.tsc_deadline_support = true;
     }
 
-
     kernel_globals.tsc_frequency = calibrate_tsc();
+}
+
+spin_for_nanoseconds :: (ns: u64) {
+    start := rdtsc();
+    end   := start + kernel_globals.tsc_frequency * ns / 1_000_000_000;
+
+    assert(end > start);
+
+    while rdtsc() < end #asm { pause; }
 }
 
 calibrate_tsc :: () -> hz: u64 {

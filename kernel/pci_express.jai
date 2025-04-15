@@ -206,11 +206,11 @@ enable_msi_or_msi_x :: (device: *Pci_Device, interrupt_handler: () #c_call) -> e
     if device.msi_x {
         log("Enabling MSI-X");
 
-        table_bar_index   := device.msi_x.table_offset & 0b111;
-        pending_bar_index := device.msi_x.pending_offset   & 0b111;
+        table_bar_index   := device.msi_x.table_offset   & 0b111;
+        pending_bar_index := device.msi_x.pending_offset & 0b111;
 
-        table_offset      := device.msi_x.table_offset & ~0b111;
-        pending_offset    := device.msi_x.pending_offset   & ~0b111;
+        table_offset      := device.msi_x.table_offset   & ~0b111;
+        pending_offset    := device.msi_x.pending_offset & ~0b111;
 
         // Todo: this BAR might be one that has already been mapped, or will be mapped for other purposes by the driver.
         // Need to add a general system for detecting when a BAR is already mapped and returning the existing memory region.
@@ -305,8 +305,8 @@ read_base_address_register :: (device: Pci_Device, bar_index: int) -> Pci_Bar {
 }
 
 map_base_address_register :: (bar: Pci_Bar) -> *void {
-    using Page_Flags;
-    uncacheable_flags := READ_WRITE | PRESENT | CACHE_DISABLE;
+
+    uncacheable_flags := Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE;
 
     if bar.base & 0xfff {
         // Doesn't currently handle BARs with unaligned base addresses.
@@ -315,8 +315,7 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
 
     virtual := alloc_block(*kernel_globals.virtual_block_allocator, bar.limit);
 
-    context.print_style.default_format_int.base=16;
-    log("Mapping BAR % to address %", bar, virtual);
+    log("Mapping BAR % to address %", bar, cast(*void)virtual);
 
     for 0..(bar.limit-1) / 4096 {
         offset := it * 4096;
@@ -333,6 +332,7 @@ mac_address_print_style: struct {
 
     mac.default_format_int.base = 16;
     mac.default_format_int.minimum_digits = 2;
+
     mac.default_format_array.separator = ":";
     mac.default_format_array.begin_string = "";
     mac.default_format_array.end_string = "";
@@ -341,50 +341,22 @@ mac_address_print_style: struct {
 I8254x_Registers :: struct {
     start: void;
 
-    CTRL__Device_Control :: enum_flags u32 {
-        LRST__link_reset                   :: 0x8;
-        ASDE__auto_speed_detection         :: 0x20;
-        SLU__set_link_up                   :: 0x40;
-        ILOS__invert_los                   :: 0x80;
-        RST__device_reset                  :: 0x400_0000;
-        RFCE__receive_flow_control_enable  :: 0x800_0000;
-        TFCE__transmit_flow_control_enable :: 0x1000_0000;
-        VME__vlan_mode_enable              :: 0x4000_0000;
-        PHY_RST__phy_reset                 :: 0x8000_0000;
-    }
-
-    CTRL__device_control: CTRL__Device_Control;
+    CTRL__device_control: I8254x_CTRL__Device_Control;
     _: u32;
     STATUS__device_status: u32;
 
 #place start; _: [0x28] u8;
-    FCAL: u32;
-    FCAH: u32;
-    FCT:  u32;
+    FCAL__flow_control_address_low: u32;
+    FCAH__flow_control_address_high: u32;
+    FCT__flow_control_type:  u32;
 
 #place start; _: [0x100] u8;
-    RCTL__receive_control: RCTL__Receive_Control;
-
-    RCTL__Receive_Control :: enum_flags u32 {
-        __reserved                         :: 0x1;
-
-        EN__enable                         :: 0x2;
-        SBP__store_bad_packets             :: 0x4;
-        UPE__unicast_promiscuous_enabled   :: 0x8;
-        MPE__multicast_promiscuous_enabled :: 0x10;
-
-        RDMTS0__minimum_threshold_0        :: 0x100;
-        RDMTS1__minimum_threshold_1        :: 0x200;
-
-        BAM__broadcast_accept_mode         :: 0x8000;
-        BSIZE0__buffer_size_bit_0          :: 0x1_0000;
-        BSIZE1__buffer_size_bit_1          :: 0x2_0000;
-        BSEX__buffer_size_extension        :: 0x200_0000;
-    }
+    RCTL__receive_control: I8254x_RCTL__Receive_Control;
 
 #place start; _: [0x2800] u8;
     RDBAL__receive_descriptor_base_low: u32;
     RDBAH__receive_descriptor_base_high: u32;
+
     RDLEN__receive_descriptor_length: u32;
     _: u32;
     RDH__receive_descriptor_head: u32;
@@ -403,6 +375,35 @@ I8254x_Registers :: struct {
     RAH__receive_address_high: u32;
 }
 
+I8254x_CTRL__Device_Control :: enum_flags u32 {
+    LRST__link_reset                   :: 0x8;
+    ASDE__auto_speed_detection         :: 0x20;
+    SLU__set_link_up                   :: 0x40;
+    ILOS__invert_los                   :: 0x80;
+    RST__device_reset                  :: 0x400_0000;
+    RFCE__receive_flow_control_enable  :: 0x800_0000;
+    TFCE__transmit_flow_control_enable :: 0x1000_0000;
+    VME__vlan_mode_enable              :: 0x4000_0000;
+    PHY_RST__phy_reset                 :: 0x8000_0000;
+}
+
+I8254x_RCTL__Receive_Control :: enum_flags u32 {
+    __reserved                         :: 0x1;
+
+    EN__enable                         :: 0x2;
+    SBP__store_bad_packets             :: 0x4;
+    UPE__unicast_promiscuous_enabled   :: 0x8;
+    MPE__multicast_promiscuous_enabled :: 0x10;
+
+    RDMTS0__minimum_threshold_0        :: 0x100;
+    RDMTS1__minimum_threshold_1        :: 0x200;
+
+    BAM__broadcast_accept_mode         :: 0x8000;
+    BSIZE0__buffer_size_bit_0          :: 0x1_0000;
+    BSIZE1__buffer_size_bit_1          :: 0x2_0000;
+    BSEX__buffer_size_extension        :: 0x200_0000;
+}
+
 I8254x_Receive_Descriptor :: struct {
     buffer_address: u64;
     length: u16;
@@ -411,6 +412,11 @@ I8254x_Receive_Descriptor :: struct {
     errors: u8;
     special: u16;
 }
+
+#program_export
+i8254x_interrupt :: () #c_call {
+
+} @InterruptRoutine
 
 init_i8254x :: (device: *Pci_Device) {
 
@@ -427,17 +433,26 @@ init_i8254x :: (device: *Pci_Device) {
     device.registers[1] &= cast(u32) ~Pci_Command.INTERRUPT_DISABLE;
 
     parse_pci_capability_list(device);
+    enable_msi_or_msi_x(device, int__i8254x_interrupt);
 
     bar0 := read_base_address_register(device, 0);
     nic := cast(*I8254x_Registers) map_base_address_register(bar0);
 
     {
-        // Reset
-        nic.CTRL__device_control |= .PHY_RST__phy_reset;
-        for 1..10_000 #asm {pause;}
+        // Reset the controller
+
+        // The bit should be readable after one microsecond, and should eventually clear once reset is complete.
+        // Spin for 2us to be safe.
 
         nic.CTRL__device_control |= .RST__device_reset;
-        for 1..10_000 #asm {pause;}
+        spin_for_nanoseconds(2_000);
+        Timeout(nic.CTRL__device_control & .RST__device_reset == 0);
+
+        // To reset the PHY, PHY_RST should be asserted for 10ms. Spin for 15ms to be safe.
+
+        nic.CTRL__device_control |= .PHY_RST__phy_reset;
+        spin_for_nanoseconds(1_500_000);
+        nic.CTRL__device_control &= ~.PHY_RST__phy_reset;
     }
 
     {
@@ -456,7 +471,7 @@ init_i8254x :: (device: *Pci_Device) {
     }
 
     {
-        // General configuration (Section 14.3)
+        // General configuration
         ctrl := nic.CTRL__device_control;
 
         ctrl &= ~.LRST__link_reset;
@@ -471,9 +486,9 @@ init_i8254x :: (device: *Pci_Device) {
         nic.CTRL__device_control = ctrl;
 
         // Disable flow control
-        nic.FCAL = 0;
-        nic.FCAH = 0;
-        nic.FCT = 0;
+        nic.FCAL__flow_control_address_low = 0;
+        nic.FCAH__flow_control_address_high = 0;
+        nic.FCT__flow_control_type = 0;
 
         // Clear multicast table
         for* nic.MTA__multicast_table_array it.* = 0;
@@ -491,14 +506,14 @@ init_i8254x :: (device: *Pci_Device) {
         nic.RDLEN__receive_descriptor_length = 4096;
 
         // Enable promiscuous mode so that the controller gives packets to the host even if they aren't addressed to us.
-        receive_everything: I8254x_Registers.RCTL__Receive_Control =
+        receive_everything: I8254x_RCTL__Receive_Control =
               .SBP__store_bad_packets
             | .UPE__unicast_promiscuous_enabled
             | .MPE__multicast_promiscuous_enabled
             | .EN__enable
             | .BAM__broadcast_accept_mode;
 
-        buffer_size_4k: I8254x_Registers.RCTL__Receive_Control =
+        buffer_size_4k: I8254x_RCTL__Receive_Control =
               .BSIZE0__buffer_size_bit_0
             | .BSIZE1__buffer_size_bit_1
             | .BSEX__buffer_size_extension;
