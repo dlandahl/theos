@@ -408,8 +408,28 @@ I8254x_Receive_Descriptor :: struct {
     buffer_address: u64;
     length: u16;
     checksum: u16;
-    status: u8;
-    errors: u8;
+
+    status: enum_flags u8 {
+        DD__descriptor_done    :: 0x1;
+        EOP__end_of_packet     :: 0x2;
+        IXSM__ignore_checksum  :: 0x4;
+        VP__vlan_packet        :: 0x8;
+        RSV__reserved          :: 0x10;
+        TCPCS__tcp_crc_calculated  :: 0x20;
+        IPCS__ip_crc_calculated    :: 0x40;
+        PIF__passed_inexact_filter :: 0x80;
+    };
+
+    errors: enum_flags u8 {
+        CE__crc_or_alignment_error   :: 0x1;
+        SE__symbol_error             :: 0x2;
+        SEQ__sequence_error          :: 0x4;
+        RSV_reserved_error           :: 0x8;
+        CXE__carrier_extension_error :: 0x10;
+        TCPE__tcp_crc_error          :: 0x20;
+        IPE__ip_crc_error            :: 0x40;
+        RXE__rx_data_error           :: 0x80;
+    };
     special: u16;
 }
 
@@ -507,11 +527,10 @@ init_i8254x :: (device: *Pci_Device) {
 
         // Enable promiscuous mode so that the controller gives packets to the host even if they aren't addressed to us.
         receive_everything: I8254x_RCTL__Receive_Control =
-              .SBP__store_bad_packets
-            | .UPE__unicast_promiscuous_enabled
+              .UPE__unicast_promiscuous_enabled
             | .MPE__multicast_promiscuous_enabled
-            | .EN__enable
-            | .BAM__broadcast_accept_mode;
+            | .BAM__broadcast_accept_mode
+            | .EN__enable;
 
         buffer_size_4k: I8254x_RCTL__Receive_Control =
               .BSIZE0__buffer_size_bit_0
@@ -530,14 +549,38 @@ init_i8254x :: (device: *Pci_Device) {
         nic.RDH__receive_descriptor_head = 0;
         nic.RDT__receive_descriptor_tail = cast(u32, desc_count-1);
 
-        context.print_style.default_format_int.base = 10;
-
         head := 0;
+        new_head := head;
 
         while true {
-            while head == nic.RDH__receive_descriptor_head #asm {pause;}
-            log("%", nic.RDH__receive_descriptor_head);
-            head = nic.RDH__receive_descriptor_head;
+            while head == new_head {
+                new_head = nic.RDH__receive_descriptor_head;
+                #asm { pause; }
+            }
+
+            // Got ethernet packet(s).
+            for head..new_head-1 {
+
+                desc := queue[it];
+                data := cast(*void, desc.buffer_address + DIRECT_MAPPING_BASE);
+
+                frame_be := cast(*Ethernet_Header(network_byte_order=true), data).*;
+                frame    := byteswap_ethernet_frame(frame_be);
+
+                context.print_style = mac_address_print_style;
+                log("Source MAC: %, Dest MAC: %", frame.source_mac, frame.destination_mac);
+
+                data += size_of(Ethernet_Header);
+
+                if frame.ethertype == .IPv4 {
+                    ip := cast(*Ipv4_Header) data;
+                    assert(get(ip.bitfield, .version) == 4);
+
+                    log("IP protocol %", ip.protocol);
+                }
+            }
+
+            head = new_head;
         }
     }
 }
@@ -1203,8 +1246,11 @@ ahci_transfer_sectors :: (controller: *Ahci_Controller, direction: Transfer_Dire
     prdt.DBC__data_byte_count = cast(u16) sector_count * 0x200 - 1;
     prdt.I__interrupt_on_completion = .YES;
 
-    context.print_style.default_format_int.base = 16;
-    log("PRDT: %\n", prdt.*);
+    {
+        Temp_Context();
+        context.print_style.default_format_int.base = 16;
+        log("PRDT: %\n", prdt.*);
+    }
 
     Timeout_Block(#code {
         if controller.port.SACT__sata_active & 1 continue;

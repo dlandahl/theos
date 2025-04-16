@@ -12,7 +12,7 @@ get :: bitfield_get;
 
 #load "apic.jai";
 #load "x64.jai";
-#load "journal.jai";
+#load "network.jai";
 #load "pci_express.jai";
 #load "multitasking.jai";
 #load "time.jai";
