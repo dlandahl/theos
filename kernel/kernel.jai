@@ -18,7 +18,7 @@ get :: bitfield_get;
 #load "time.jai";
 
 X64_Core :: struct {
-    // It might make sense to #add_context this because there's one per core, but many procedures are called from interrupt routines so you would have to always manually set it.
+    // It might make sense to #add_context this because there's one per logical core, but many procedures are called from interrupt routines so you would have to always manually set it.
 
     task_state_segment: Tss_With_Iopb #align 0x80;
 
@@ -29,8 +29,6 @@ X64_Core :: struct {
     id: int;
 
     scheduler: Scheduler;
-
-    // This struct represents a logical core.
 }
 
 // This can't be in kernel_globals, or else, due to the size of the IOPB, the compiler will
@@ -261,6 +259,7 @@ kernel_entry :: () #no_context {
                 // init_nvme_controller(it);
             }
 
+            log("%", it.class_code);
             if it.class_code == .NETWORK && it.subclass == 0x0 {
                 init_i8254x(it);
             }

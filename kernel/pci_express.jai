@@ -376,32 +376,35 @@ I8254x_Registers :: struct {
 }
 
 I8254x_CTRL__Device_Control :: enum_flags u32 {
-    LRST__link_reset                   :: 0x8;
-    ASDE__auto_speed_detection         :: 0x20;
-    SLU__set_link_up                   :: 0x40;
-    ILOS__invert_los                   :: 0x80;
-    RST__device_reset                  :: 0x400_0000;
-    RFCE__receive_flow_control_enable  :: 0x800_0000;
-    TFCE__transmit_flow_control_enable :: 0x1000_0000;
-    VME__vlan_mode_enable              :: 0x4000_0000;
-    PHY_RST__phy_reset                 :: 0x8000_0000;
+    LRST__link_reset              :: 0x8;
+
+    ASDE__auto_speed_detection    :: 0x20;
+    SLU__set_link_up              :: 0x40;
+    ILOS__invert_los              :: 0x80;
+
+    RST__device_reset             :: 0x400_0000;
+    RFCE__receive_flow_control    :: 0x800_0000;
+    TFCE__transmit_flow_control   :: 0x1000_0000;
+
+    VME__vlan_mode_enable         :: 0x4000_0000;
+    PHY_RST__phy_reset            :: 0x8000_0000;
 }
 
 I8254x_RCTL__Receive_Control :: enum_flags u32 {
-    __reserved                         :: 0x1;
+    __reserved                    :: 0x1;
 
-    EN__enable                         :: 0x2;
-    SBP__store_bad_packets             :: 0x4;
-    UPE__unicast_promiscuous_enabled   :: 0x8;
-    MPE__multicast_promiscuous_enabled :: 0x10;
+    EN__enable                    :: 0x2;
+    SBP__store_bad_packets        :: 0x4;
+    UPE__unicast_promiscuous      :: 0x8;
+    MPE__multicast_promiscuous    :: 0x10;
 
-    RDMTS0__minimum_threshold_0        :: 0x100;
-    RDMTS1__minimum_threshold_1        :: 0x200;
+    RDMTS0__minimum_threshold_0   :: 0x100;
+    RDMTS1__minimum_threshold_1   :: 0x200;
 
-    BAM__broadcast_accept_mode         :: 0x8000;
-    BSIZE0__buffer_size_bit_0          :: 0x1_0000;
-    BSIZE1__buffer_size_bit_1          :: 0x2_0000;
-    BSEX__buffer_size_extension        :: 0x200_0000;
+    BAM__broadcast_accept_mode    :: 0x8000;
+    BSIZE0__buffer_size_bit_0     :: 0x1_0000;
+    BSIZE1__buffer_size_bit_1     :: 0x2_0000;
+    BSEX__buffer_size_extension   :: 0x200_0000;
 }
 
 I8254x_Receive_Descriptor :: struct {
@@ -471,7 +474,7 @@ init_i8254x :: (device: *Pci_Device) {
         // To reset the PHY, PHY_RST should be asserted for 10ms. Spin for 15ms to be safe.
 
         nic.CTRL__device_control |= .PHY_RST__phy_reset;
-        spin_for_nanoseconds(1_500_000);
+        spin_for_nanoseconds(15_000_000);
         nic.CTRL__device_control &= ~.PHY_RST__phy_reset;
     }
 
@@ -497,8 +500,8 @@ init_i8254x :: (device: *Pci_Device) {
         ctrl &= ~.LRST__link_reset;
         ctrl &= ~.ILOS__invert_los;
         ctrl &= ~.VME__vlan_mode_enable;
-        ctrl &= ~.RFCE__receive_flow_control_enable;
-        ctrl &= ~.TFCE__transmit_flow_control_enable;
+        ctrl &= ~.RFCE__receive_flow_control;
+        ctrl &= ~.TFCE__transmit_flow_control;
 
         ctrl |= .ASDE__auto_speed_detection;
         ctrl |= .SLU__set_link_up;
@@ -527,8 +530,8 @@ init_i8254x :: (device: *Pci_Device) {
 
         // Enable promiscuous mode so that the controller gives packets to the host even if they aren't addressed to us.
         receive_everything: I8254x_RCTL__Receive_Control =
-              .UPE__unicast_promiscuous_enabled
-            | .MPE__multicast_promiscuous_enabled
+              .UPE__unicast_promiscuous
+            | .MPE__multicast_promiscuous
             | .BAM__broadcast_accept_mode
             | .EN__enable;
 

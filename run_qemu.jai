@@ -18,14 +18,21 @@
             -device nvme,serial=cafebabe,drive=nvm
             -chardev stdio,id=char0,logfile=logs/qemu_serial.txt,signal=off
             -serial chardev:char0
-            -netdev tap,id=mynet0,ifname=tapwin -device e1000,netdev=mynet0
-            -m 256M 
+            -m 256M
             -smp 4 
     QEMU_CMD);
 
-    // -s -S 
-    // -d int 
-    // user,mac=02:ca:fe:f0:0d:01,id=n0
+#if OS == .LINUX {
+    array_add(*command, "-accel", "kvm");
+} else {
+    array_add(*command, "-netdev", "tap,id=mynet0,ifname=tapwin", "-device", "e1000,netdev=mynet0");
+}
+
+    command_line := get_build_options().compile_time_command_line;
+    array_add(*command, ..command_line);
+
+    // --trace "*e1000*" 
+
     run_command(.. command);
 }
 
