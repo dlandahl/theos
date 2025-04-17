@@ -2,6 +2,12 @@
 get_kernel_timestamp :: () -> Apollo_Time {
     using kernel_globals;
 
+    // This method of converting TSC to Apollo Time is not precise for low TSC frequencies, like those you get from QEMU when virtualization is not enabled.
+    // Use the higher-latency, more complicated HPET timer.
+    if tsc_frequency < 1_000_000 {
+        return hpet_get_monotonic_time();
+    }
+
     timestamp: Apollo_Time;
     timestamp.low = rdtsc();
 
@@ -458,7 +464,7 @@ hpet_get_monotonic_time :: () -> Apollo_Time {
     time_represented_by_counter.low = counter;
     time_represented_by_counter *= 100 * FEMTOSECONDS_PER_MILLISECOND;
 
-    return boot_time + time_represented_by_counter + time_represented_by_ticks;
+    return time_represented_by_counter + time_represented_by_ticks;
 }
 
 
@@ -547,12 +553,12 @@ calibrate_tsc :: () -> hz: u64 {
     ticks_per_calibration_run := cast(u32, calibration_time_fs / hpet.tick_period_femtoseconds);
 
     // Run until we get three consecutive results within a certain error
-    max_error := 5000; // Todo: this value might need to be dynamically estimated, since any specific value will not be reasonable for all possible TSC frequencies.
+    max_error := 100_000; // Todo: this value might need to be dynamically estimated, since any specific value will not be reasonable for all possible TSC frequencies.
     delta: [3] int;
 
     counter_register := cast(*u32, hpet.base_address + cast(u64) Hpet_Register.COUNTER);
 
-    for 1..1000 {
+    for 1..100 {
         #asm { cli; }
 
         counter_start := counter_register.*;

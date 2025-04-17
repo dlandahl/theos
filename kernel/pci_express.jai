@@ -342,8 +342,7 @@ I8254x_Registers :: struct {
     start: void;
 
     CTRL__device_control: I8254x_CTRL__Device_Control;
-    _: u32;
-    STATUS__device_status: u32;
+    STATUS__device_status: u32 #align 8;
 
 #place start; _: [0x28] u8;
     FCAL__flow_control_address_low: u32;
@@ -353,20 +352,36 @@ I8254x_Registers :: struct {
 #place start; _: [0x100] u8;
     RCTL__receive_control: I8254x_RCTL__Receive_Control;
 
+#place start; _: [0x400] u8;
+    TCTL__transmit_control: I8254x_TCTL__Transmit_Control;
+
+    // Inter-packet-gap configuration
+    TIPG__transmit_ipg: enum u32 {
+        IPGT__ipg_transmit_time   :: 10;
+        IPGR1__ipg_receive_time_1 :: 10;
+        IPGR2__ipg_receive_time_2 :: 10;
+        __reserved                :: 2;
+    } #align 8;
+
 #place start; _: [0x2800] u8;
     RDBAL__receive_descriptor_base_low: u32;
     RDBAH__receive_descriptor_base_high: u32;
 
     RDLEN__receive_descriptor_length: u32;
-    _: u32;
-    RDH__receive_descriptor_head: u32;
-    _: u32;
-    RDT__receive_descriptor_tail: u32;
-    _: u32;
+    RDH__receive_descriptor_head: u32 #align 8;
+    RDT__receive_descriptor_tail: u32 #align 8;
 
     RDTR__receive_delay_timer_register: enum_flags {
         FPD__flush_partial_descriptor_block :: 0x8000_0000;
-    };
+    } #align 8;
+
+#place start; _: [0x3800] u8;
+    TDBAL__transmit_descriptor_base_low: u32;
+    TDBAH__transmit_descriptor_base_high: u32;
+
+    TDLEN__transmit_descriptor_length: u32;
+    TDH__transmit_descriptor_head: u32 #align 8;
+    TDT__transmit_descriptor_tail: u32 #align 8;
 
 #place start; _: [0x5200] u8;
     MTA__multicast_table_array: [128] u32;
@@ -391,8 +406,6 @@ I8254x_CTRL__Device_Control :: enum_flags u32 {
 }
 
 I8254x_RCTL__Receive_Control :: enum_flags u32 {
-    __reserved                    :: 0x1;
-
     EN__enable                    :: 0x2;
     SBP__store_bad_packets        :: 0x4;
     UPE__unicast_promiscuous      :: 0x8;
@@ -405,6 +418,11 @@ I8254x_RCTL__Receive_Control :: enum_flags u32 {
     BSIZE0__buffer_size_bit_0     :: 0x1_0000;
     BSIZE1__buffer_size_bit_1     :: 0x2_0000;
     BSEX__buffer_size_extension   :: 0x200_0000;
+}
+
+I8254x_TCTL__Transmit_Control :: enum_flags u32 {
+    EN__enable                    :: 0x2;
+    PSP__pad_short_packets        :: 0x8;
 }
 
 I8254x_Receive_Descriptor :: struct {
@@ -433,7 +451,27 @@ I8254x_Receive_Descriptor :: struct {
         IPE__ip_crc_error            :: 0x40;
         RXE__rx_data_error           :: 0x80;
     };
+
     special: u16;
+}
+
+I8254x_Transmit_Descriptor :: struct {
+    buffer_address: u64;
+    length: u16;
+
+    checksum_offset: u8;
+    command: u8;
+
+    status: u8;
+    checksum_start: u8;
+
+    special: u16;
+}
+
+I8254x_MAC :: union {
+    // An easy way to convert a MAC address to and from the internal format within the hardware registers.
+    struct { ral, rah: u32; }
+    array: [6] u8;
 }
 
 #program_export
@@ -478,20 +516,14 @@ init_i8254x :: (device: *Pci_Device) {
         nic.CTRL__device_control &= ~.PHY_RST__phy_reset;
     }
 
-    {
-        // Get MAC address
-        mac: union {
-            struct { low, high: u32; }
-            array: [6] u8;
-        };
+    // Get MAC address
+    mac: I8254x_MAC;
+    mac.ral = nic.RAL__receive_address_low;
+    mac.rah = nic.RAH__receive_address_high;
 
-        mac.low  = nic.RAL__receive_address_low;
-        mac.high = nic.RAH__receive_address_high;
-
-        Temp_Context();
-        context.print_style = mac_address_print_style;
-        log("MAC address: %", mac.array);
-    }
+    Temp_Context();
+    context.print_style = mac_address_print_style;
+    log("MAC address: %", mac.array);
 
     {
         // General configuration
@@ -517,7 +549,65 @@ init_i8254x :: (device: *Pci_Device) {
         for* nic.MTA__multicast_table_array it.* = 0;
     }
 
-    {
+    if kernel_globals.tsc_frequency < 1_000_000 {
+        // Transmit packets
+
+        // Allocate transmit descriptor queue
+        transmit_desc_buffer := get_4k_page();
+        queue_size := 4096 / size_of(I8254x_Transmit_Descriptor);
+
+        nic.TDBAL__transmit_descriptor_base_low  = cast(u32, transmit_desc_buffer & 0xffff_ffff);
+        nic.TDBAH__transmit_descriptor_base_high = cast(u32, transmit_desc_buffer >> 32);
+
+        nic.TDLEN__transmit_descriptor_length = 4096;
+
+        nic.TDH__transmit_descriptor_head = 0;
+        nic.TDT__transmit_descriptor_tail = 0;
+
+        nic.TCTL__transmit_control |= .PSP__pad_short_packets | .EN__enable;
+
+        ipg: type_of(nic.TIPG__transmit_ipg);
+        set(*ipg, .IPGT__ipg_transmit_time, 10);
+        set(*ipg, .IPGR1__ipg_receive_time_1, 10);
+        set(*ipg, .IPGR2__ipg_receive_time_2, 10);
+
+        nic.TIPG__transmit_ipg = ipg;
+
+        queue_tail: u32;
+        queue := cast(*I8254x_Transmit_Descriptor, transmit_desc_buffer + DIRECT_MAPPING_BASE);
+
+        for 0..queue_size-2 {
+
+            // Build a valid ethernet packet
+            packet := get_4k_page();
+
+            ethernet_frame := cast(*Ethernet_Header, packet + DIRECT_MAPPING_BASE);
+
+            VBOX_MAC :: u8.[0x08, 0x00, 0x27, 0xe3, 0x86, 0xf2];
+            BROADCAST_MAC :: u8.[0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
+
+            ethernet_frame.destination_mac = BROADCAST_MAC;
+            ethernet_frame.source_mac = mac.array;
+
+            payload := cast(*u8, ethernet_frame + 1);
+            memcpy(payload, "Hello Sailor".data, 12);
+
+            // Put packet in queue
+            queue[queue_tail].buffer_address = packet;
+            queue[queue_tail].length = size_of(Ethernet_Header) + 12;
+
+            queue_tail += 1;
+            nic.TDT__transmit_descriptor_tail = queue_tail;
+
+            log("Transmitted...");
+
+            for 1..500_000 #asm {pause;}
+
+            log("Errors: %", queue[queue_tail].status);
+        }
+    }
+
+    else {
         // Receive packets
 
         // Allocate receive descriptor queue
@@ -543,14 +633,14 @@ init_i8254x :: (device: *Pci_Device) {
         nic.RCTL__receive_control = receive_everything | buffer_size_4k | .RDMTS1__minimum_threshold_1;
 
         queue := cast(*I8254x_Receive_Descriptor, receive_desc_buffer + DIRECT_MAPPING_BASE);
-        desc_count := 4096 / size_of(I8254x_Receive_Descriptor);
+        queue_size := 4096 / size_of(I8254x_Receive_Descriptor);
 
-        for 0..desc_count-1 {
+        for 0..queue_size-1 {
             queue[it].buffer_address = get_4k_page();
         }
 
         nic.RDH__receive_descriptor_head = 0;
-        nic.RDT__receive_descriptor_tail = cast(u32, desc_count-1);
+        nic.RDT__receive_descriptor_tail = cast(u32, queue_size-1);
 
         head := 0;
         new_head := head;
@@ -561,17 +651,23 @@ init_i8254x :: (device: *Pci_Device) {
                 #asm { pause; }
             }
 
+            // ts := get_kernel_timestamp();
+
             // Got ethernet packet(s).
             for head..new_head-1 {
 
                 desc := queue[it];
                 data := cast(*void, desc.buffer_address + DIRECT_MAPPING_BASE);
 
-                frame_be := cast(*Ethernet_Header(network_byte_order=true), data).*;
-                frame    := byteswap_ethernet_frame(frame_be);
+                frame := cast(*Ethernet_Header, data).*;
+
+                /*
+                context.print_style.default_format_int.base = 10;
+                log("====== %.% ======", to_seconds(ts), to_milliseconds(ts) % 1000);
 
                 context.print_style = mac_address_print_style;
-                log("Source MAC: %, Dest MAC: %", frame.source_mac, frame.destination_mac);
+                log("% => %", frame.source_mac, frame.destination_mac);
+                log("%", frame.ethertype);
 
                 data += size_of(Ethernet_Header);
 
@@ -580,6 +676,16 @@ init_i8254x :: (device: *Pci_Device) {
                     assert(get(ip.bitfield, .version) == 4);
 
                     log("IP protocol %", ip.protocol);
+                }
+
+                log("");
+                */
+
+                context.print_style = mac_address_print_style;
+                log("%", frame.source_mac);
+
+                if _memcmp(frame.destination_mac.data, mac.array.data, 6) == 0 {
+                    log("Got a packet");
                 }
             }
 

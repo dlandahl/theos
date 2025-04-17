@@ -149,7 +149,7 @@ compile_kernel :: () -> success: bool {
 
     write_entire_file(".build/ap_startup.asm", AP_STARTUP_CODE);
     command := break_command_into_strings(
-        "nasm .build/ap_startup.asm -o .build/ap_startup.bin -f bin -wall -w-reloc-rel-dword -w-reloc-abs-dword -w-reloc-abs-word"
+        "nasm .build/ap_startup.asm -o .build/ap_startup.bin -f bin"
     );
 
     result := run_command(.. command);
@@ -233,7 +233,7 @@ compile_kernel :: () -> success: bool {
                 log("Assembling interrupt routines");
 
                 write_entire_file(".build/interrupts.asm", builder_to_string(*interrupt_assembly));
-                command := break_command_into_strings("nasm .build/interrupts.asm -o .build/interrupts.so -f elf64 -wall -w-reloc-rel-dword");
+                command := break_command_into_strings("nasm .build/interrupts.asm -o .build/interrupts.so -f elf64");
 
                 // Generate assembly wrappers for interrupts handlers using metaprogramming
                 result := run_command(.. command);
