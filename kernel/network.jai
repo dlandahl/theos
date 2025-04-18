@@ -22,7 +22,7 @@ Ethertype :: enum u16 {
 Ipv4_Header :: struct {
     // In network byte order.
 
-    bitfield: enum u64 {
+    #as bitfield: enum u64 {
         ihl             :: 4;
         version         :: 4;
         ecn             :: 2;

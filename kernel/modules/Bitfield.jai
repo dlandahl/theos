@@ -33,7 +33,9 @@ Todo: would like to have this syntax:
 
 #scope_export
 
-bitfield_set :: (bitfield: *$B, flag: B, value: s64, $loc := #caller_location, $call := #caller_code) {
+bitfield_set :: (bitfield: *$B, flag: $F, value: s64, $loc := #caller_location, $call := #caller_code) #modify {
+    return handle_as(*B, *F);
+} {
     bit_mask, bit_offset :: #run calculate_mask_and_offset(B, loc, call);
 
     #if ENABLE_RUNTIME_ERROR_CHECKS {
@@ -49,7 +51,9 @@ bitfield_set :: (bitfield: *$B, flag: B, value: s64, $loc := #caller_location, $
     bitfield.* = temp;
 }
 
-bitfield_get :: (bitfield: $B, flag: B, $loc := #caller_location, $call := #caller_code) -> s64 {
+bitfield_get :: (bitfield: $B, flag: $F, $loc := #caller_location, $call := #caller_code) -> s64 #modify {
+    return handle_as(*B, *F);
+} {
     bit_mask, bit_offset :: #run calculate_mask_and_offset(B, loc, call);
 
     value := bitfield;
@@ -210,4 +214,22 @@ validate_bitfield :: (bitfield: *Type_Info, loc: Source_Code_Location) {
         error_message := tprint("Bitfield \"%\" values do not sum to the width of its integer type. The total width was %, expected %", name, total_width, expected_width);
         compiler_report(error_message, loc);
     }
+}
+
+handle_as :: (B: *Type, F: *Type) -> bool {
+    // This setup allows you to put #as on a struct member that represents a bitfield, and it works how you would expect.
+    // You can then write e.g. bitfield_get(struct_instance, .bitfield_member);
+    F.* = B.*;
+
+    if cast(*Type_Info, B.*).type == .STRUCT {
+        for cast(*Type_Info_Struct, B.*).members {
+            if it.flags & .AS && it.type.type == .ENUM {
+                B.* = get_type(it.type);
+                F.* = get_type(it.type);
+                return true;
+            }
+        }
+    }
+
+    return true;
 }

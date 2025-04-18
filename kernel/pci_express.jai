@@ -349,6 +349,13 @@ I8254x_Registers :: struct {
     FCAH__flow_control_address_high: u32;
     FCT__flow_control_type:  u32;
 
+#place start; _: [0xc0] u8;
+    ICR__interrupt_cause_read: u32;
+    ITR: u32;
+    ICS: u32;
+    IMS__interrupt_mask_set: u32 #align 8;
+    IMC__interrupt_mask_clear: u32 #align 8;
+
 #place start; _: [0x100] u8;
     RCTL__receive_control: I8254x_RCTL__Receive_Control;
 
@@ -361,7 +368,7 @@ I8254x_Registers :: struct {
         IPGR1__ipg_receive_time_1 :: 10;
         IPGR2__ipg_receive_time_2 :: 10;
         __reserved                :: 2;
-    } #align 8;
+    } #align 16;
 
 #place start; _: [0x2800] u8;
     RDBAL__receive_descriptor_base_low: u32;
@@ -382,6 +389,17 @@ I8254x_Registers :: struct {
     TDLEN__transmit_descriptor_length: u32;
     TDH__transmit_descriptor_head: u32 #align 8;
     TDT__transmit_descriptor_tail: u32 #align 8;
+
+#place start; _: [0x4000] u8;
+    CRCERRS__crc_error_count: u32;
+    ALGNERRC__alignment_error_count: u32;
+#place start; _: [0x40c0] u8;
+    TORL__total_octets_received_low: u32;
+    TORH__total_octets_received_high: u32;
+    TOTL__total_octets_transmitted_low: u32;
+    TOTH__total_octets_transmitted_high: u32;
+    TPR__total_packets_received: u32;
+    TPT__total_packets_transmitted: u32;
 
 #place start; _: [0x5200] u8;
     MTA__multicast_table_array: [128] u32;
@@ -439,7 +457,7 @@ I8254x_Receive_Descriptor :: struct {
         TCPCS__tcp_crc_calculated  :: 0x20;
         IPCS__ip_crc_calculated    :: 0x40;
         PIF__passed_inexact_filter :: 0x80;
-    };
+    }
 
     errors: enum_flags u8 {
         CE__crc_or_alignment_error   :: 0x1;
@@ -450,22 +468,30 @@ I8254x_Receive_Descriptor :: struct {
         TCPE__tcp_crc_error          :: 0x20;
         IPE__ip_crc_error            :: 0x40;
         RXE__rx_data_error           :: 0x80;
-    };
+    }
 
     special: u16;
 }
 
-I8254x_Transmit_Descriptor :: struct {
+I8254x_Tcpip_Data_Descriptor :: struct {
     buffer_address: u64;
-    length: u16;
 
-    checksum_offset: u8;
-    command: u8;
-
-    status: u8;
-    checksum_start: u8;
-
-    special: u16;
+    #as bitfield: enum u64 {
+        DTALEN__data_length    :: 20;
+        DTYP__data_type        :: 4;
+        DCMD_IDE               :: 1;
+        DCMD_VLE               :: 1;
+        DCMD_DEXT__extension   :: 1;
+        DCMD_RSV               :: 1;
+        DCMD_RS__report_status :: 1;
+        DCMD_TSE               :: 1;
+        DCMD_IFCS              :: 1;
+        DCMD_EOP               :: 1;
+        STA__status            :: 4;
+        RSV__reserved          :: 4;
+        POPTS__packet_options  :: 8;
+        SPECIAL                :: 16;
+    }
 }
 
 I8254x_MAC :: union {
@@ -475,8 +501,9 @@ I8254x_MAC :: union {
 }
 
 #program_export
-i8254x_interrupt :: () #c_call {
-
+i8254x_interrupt :: (stack: *void) #c_call {
+    write_string("======== 8254x Interrupt. =========\n");
+    write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 } @InterruptRoutine
 
 init_i8254x :: (device: *Pci_Device) {
@@ -540,41 +567,43 @@ init_i8254x :: (device: *Pci_Device) {
 
         nic.CTRL__device_control = ctrl;
 
+        for* nic.MTA__multicast_table_array it.* = 0;
+
         // Disable flow control
         nic.FCAL__flow_control_address_low = 0;
         nic.FCAH__flow_control_address_high = 0;
         nic.FCT__flow_control_type = 0;
 
-        // Clear multicast table
-        for* nic.MTA__multicast_table_array it.* = 0;
+        nic.IMS__interrupt_mask_set = 0xffff_ffff;
     }
 
-    if kernel_globals.tsc_frequency < 1_000_000 {
+    {
         // Transmit packets
 
         // Allocate transmit descriptor queue
         transmit_desc_buffer := get_4k_page();
-        queue_size := 4096 / size_of(I8254x_Transmit_Descriptor);
+        queue_size := 4096 / size_of(I8254x_Tcpip_Data_Descriptor);
 
         nic.TDBAL__transmit_descriptor_base_low  = cast(u32, transmit_desc_buffer & 0xffff_ffff);
         nic.TDBAH__transmit_descriptor_base_high = cast(u32, transmit_desc_buffer >> 32);
 
         nic.TDLEN__transmit_descriptor_length = 4096;
 
-        nic.TDH__transmit_descriptor_head = 0;
         nic.TDT__transmit_descriptor_tail = 0;
+        nic.TDH__transmit_descriptor_head = 0;
 
+        nic.TCTL__transmit_control |= (0x0f << 4) | (0x40 << 12);
         nic.TCTL__transmit_control |= .PSP__pad_short_packets | .EN__enable;
 
         ipg: type_of(nic.TIPG__transmit_ipg);
         set(*ipg, .IPGT__ipg_transmit_time, 10);
         set(*ipg, .IPGR1__ipg_receive_time_1, 10);
         set(*ipg, .IPGR2__ipg_receive_time_2, 10);
-
+        
         nic.TIPG__transmit_ipg = ipg;
 
         queue_tail: u32;
-        queue := cast(*I8254x_Transmit_Descriptor, transmit_desc_buffer + DIRECT_MAPPING_BASE);
+        queue := cast(*I8254x_Tcpip_Data_Descriptor, transmit_desc_buffer + DIRECT_MAPPING_BASE);
 
         for 0..queue_size-2 {
 
@@ -588,26 +617,38 @@ init_i8254x :: (device: *Pci_Device) {
 
             ethernet_frame.destination_mac = BROADCAST_MAC;
             ethernet_frame.source_mac = mac.array;
+            ethernet_frame.ethertype = .ARP;
 
             payload := cast(*u8, ethernet_frame + 1);
             memcpy(payload, "Hello Sailor".data, 12);
 
             // Put packet in queue
             queue[queue_tail].buffer_address = packet;
-            queue[queue_tail].length = size_of(Ethernet_Header) + 12;
+            queue[queue_tail].bitfield = 0;
+
+            set(*queue[queue_tail], .DTALEN__data_length, 256);
+            set(*queue[queue_tail], .DTYP__data_type, 1);
+
+            // Todo: could add a way to set/clear multiple single bit flags in a bitfield in one call.
+            set(*queue[queue_tail], .DCMD_DEXT__extension, 1);
+            set(*queue[queue_tail], .DCMD_RS__report_status, 1);
+            set(*queue[queue_tail], .DCMD_EOP, 1);
+            set(*queue[queue_tail], .DCMD_IFCS, 1);
 
             queue_tail += 1;
             nic.TDT__transmit_descriptor_tail = queue_tail;
 
-            log("Transmitted...");
+            log("Total transmitted: %", nic.TPT__total_packets_transmitted);
+            log("CRC errors: %", nic.CRCERRS__crc_error_count);
+            log("Alignment errors: %", nic.ALGNERRC__alignment_error_count);
 
-            for 1..500_000 #asm {pause;}
+            for 1..50_000_000 #asm { pause; }
 
-            log("Errors: %", queue[queue_tail].status);
+            log("Errors: %", get(queue[queue_tail-1], .STA__status));
         }
     }
 
-    else {
+    {
         // Receive packets
 
         // Allocate receive descriptor queue
@@ -673,7 +714,7 @@ init_i8254x :: (device: *Pci_Device) {
 
                 if frame.ethertype == .IPv4 {
                     ip := cast(*Ipv4_Header) data;
-                    assert(get(ip.bitfield, .version) == 4);
+                    assert(get(ip, .version) == 4);
 
                     log("IP protocol %", ip.protocol);
                 }
