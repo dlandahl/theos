@@ -500,13 +500,15 @@ init_tsc :: () {
     kernel_globals.tsc_frequency = calibrate_tsc();
 }
 
-spin_for_nanoseconds :: (ns: u64) {
-    start := rdtsc();
-    end   := start + kernel_globals.tsc_frequency * ns / 1_000_000_000;
+busy_loop :: (n: s64, $units: enum {nanoseconds; microseconds; milliseconds; seconds;}) {
+    start := get_kernel_timestamp();
+    end   := start + (#insert #run tprint("%_to_apollo(n);", units));
 
     assert(end >= start);
 
-    while rdtsc() < end #asm { pause; }
+    while get_kernel_timestamp() < end #asm {
+        pause;
+    }
 }
 
 calibrate_tsc :: () -> hz: u64 {
@@ -553,7 +555,7 @@ calibrate_tsc :: () -> hz: u64 {
     ticks_per_calibration_run := cast(u32, calibration_time_fs / hpet.tick_period_femtoseconds);
 
     // Run until we get three consecutive results within a certain error
-    max_error := 100_000; // Todo: this value might need to be dynamically estimated, since any specific value will not be reasonable for all possible TSC frequencies.
+    max_error := 500_000; // Todo: this value might need to be dynamically estimated, since any specific value will not be reasonable for all possible TSC frequencies.
     delta: [3] int;
 
     counter_register := cast(*u32, hpet.base_address + cast(u64) Hpet_Register.COUNTER);

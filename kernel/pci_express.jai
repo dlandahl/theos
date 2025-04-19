@@ -537,6 +537,7 @@ I8254x_MAC :: union {
 #program_export
 i8254x_interrupt :: (stack: *void) #c_call {
     write_string("======== 8254x Interrupt. =========\n");
+    bluescreen();
     write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 } @InterruptRoutine
 
@@ -564,18 +565,18 @@ init_i8254x :: (device: *Pci_Device) {
         // Spin for 2us to be safe.
 
         nic.CTRL__device_control |= .RST__device_reset;
-        spin_for_nanoseconds(2_000);
+        busy_loop(2, .microseconds);
         Timeout(nic.CTRL__device_control & .RST__device_reset == 0);
 
         // To reset the PHY, PHY_RST should be asserted for 10ms. Spin for 15ms to be safe.
 
         nic.CTRL__device_control |= .PHY_RST__phy_reset;
-        spin_for_nanoseconds(15_000_000);
+        busy_loop(15, .milliseconds);
         nic.CTRL__device_control &= ~.PHY_RST__phy_reset;
     }
 
     // Disable interrupts
-    nic.IMC__interrupt_mask_clear = 0xffff_ffff;
+    // nic.IMC__interrupt_mask_clear = 0xffff_ffff;
     _ := nic.ICR__interrupt_cause_read;
 
     // Get MAC address
@@ -653,7 +654,7 @@ init_i8254x :: (device: *Pci_Device) {
         queue_tail: u32;
         queue := cast(*I8254x_Transmit_Descriptor, transmit_desc_buffer + DIRECT_MAPPING_BASE);
 
-        for 0..queue_size-2 {
+        if false for 0..queue_size-2 {
 
             // Build a valid ethernet packet
             packet := get_4k_page();
@@ -674,9 +675,9 @@ init_i8254x :: (device: *Pci_Device) {
             arp.PLEN__protocol_length = 4;
             arp.OPER__operation = .request;
             arp.SHA__sender_hardware_address = mac.array;
-            arp.SPA__sender_protocol_address = .[169, 254, 68, 113];
+            arp.SPA__sender_protocol_address = .[0, 0, 0, 0];
             // arp.THA__target_hardware_address = .{};
-            arp.TPA__target_protocol_address = .[169, 254, 68, 113];
+            arp.TPA__target_protocol_address = .[192, 168, 1, 1];
 
             // Put packet in queue
             desc := queue + queue_tail;
@@ -701,14 +702,11 @@ init_i8254x :: (device: *Pci_Device) {
             nic.TDT__transmit_descriptor_tail = queue_tail;
 
             log("%/%", it, queue_size);
-            log("Total transmitted 64: %", nic.PTC64__packets_transmitted_64_count);
+            log("Queue head: %", nic.TDH__transmit_descriptor_head);
             log("Total transmitted: %", nic.TPT__total_packets_transmitted);
-            log("CRC errors: %", nic.CRCERRS__crc_error_count);
-            log("Alignment errors: %", nic.ALGNERRC__alignment_error_count);
 
             for 1..1_000_000 #asm { pause; }
 
-            // log("Status: %", get(queue[queue_tail-1], .STA__status));
             log("Status: %", queue[queue_tail-1].status);
         }
     }
@@ -754,6 +752,7 @@ init_i8254x :: (device: *Pci_Device) {
         while true {
             while head == new_head {
                 new_head = nic.RDH__receive_descriptor_head;
+                _ := nic.ICR__interrupt_cause_read;
                 #asm { pause; }
             }
 

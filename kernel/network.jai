@@ -1,9 +1,7 @@
 
-#import "Bit_Operations";
+// All fields are in network byte order.
 
 Ethernet_Header :: struct {
-    // In network byte order.
-
     destination_mac: [6] u8;
     source_mac:      [6] u8;
 
@@ -13,16 +11,13 @@ Ethernet_Header :: struct {
 #assert size_of(Ethernet_Header) == 14;
 
 Ethertype :: enum u16 {
-    // In network byte order.
-
-    IPv4                :: 0x0008;
-    ARP                 :: 0x0608;
-    IPv6                :: 0xDD86;
-    UNKNOWN             :: 0xF086;
+    IPv4      :: 0x0008;
+    ARP       :: 0x0608;
+    IPv6      :: 0xDD86;
+    UNKNOWN   :: 0xF086;
 }
 
 Ipv4_Header :: struct {
-    // In network byte order.
 
     #as bitfield: enum u64 {
         ihl             :: 4;
@@ -49,13 +44,19 @@ Ipv4_Header :: struct {
 
     checksum: u32;
 
-    source_address: u64;
-    destination_address: u64;
+    source_address: u32;
+    destination_address: u32;
+}
+
+Udp_Header :: struct {
+    source_port: u16;
+    destination_port: u16;
+
+    length: u16;
+    checksum: u16;
 }
 
 Arp_Packet :: struct {
-    // In network byte order.
-
     HTYPE__hardware_type: enum u16 {
         ethernet :: 0x0100;
     }
@@ -78,3 +79,44 @@ Arp_Packet :: struct {
 }
 
 #assert size_of(Arp_Packet) == 28;
+
+
+
+Dhcp_Message :: struct {
+    opcode:        u8;
+    hardware_type: u8;
+    mac_length:    u8;
+    hops:          u8;
+    xid:           u32;
+    seconds:       u16;
+    flags:         u16;
+
+    client_ip:     u32;
+    your_ip:       u32;
+    server_ip:     u32;
+    gateway_ip:    u32;
+
+    client_mac:  [6]  u8;
+    server_name: [64] u8;
+}
+
+Dhcp_Message_Type :: enum u8 {
+    discover           :: 1;
+    offer              :: 2;
+    request            :: 3;
+    decline            :: 4;
+    ack                :: 5;
+    nak                :: 6;
+    release            :: 7;
+    inform             :: 8;
+    force_renew        :: 9;
+    lease_query        :: 10;
+    lease_unassigned   :: 11;
+    lease_unknown      :: 12;
+    lease_active       :: 13;
+    bulk_lease_query   :: 14;
+    lease_query_done   :: 15;
+    active_lease_query :: 16;
+    lease_query_status :: 17;
+    tls                :: 18;
+}
