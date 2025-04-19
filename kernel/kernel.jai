@@ -1282,11 +1282,18 @@ Timeout :: (code: Code, message := "", time_ms := 1000, call := #caller_location
     }
 }
 
-Temp_Context :: () #expand {
-    newc := context;
-    `push_context,defer_pop newc;
+Push_Print_Style :: (style := context.print_style) -> *Print_Style #expand {
+    // User may choose whether to use the input argument, return value, or neither
+
+    old := context.print_style;
+    `defer context.print_style = old;
+
+    context.print_style = style;
+    return *context.print_style;
 }
 
+hex :: #bake_arguments formatInt(base=16);;
+dec :: #bake_arguments formatInt(base=10);
 
 
 

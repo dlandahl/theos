@@ -10,6 +10,8 @@ Ethernet_Header :: struct {
     ethertype: Ethertype;
 }
 
+#assert size_of(Ethernet_Header) == 14;
+
 Ethertype :: enum u16 {
     // In network byte order.
 
@@ -50,3 +52,29 @@ Ipv4_Header :: struct {
     source_address: u64;
     destination_address: u64;
 }
+
+Arp_Packet :: struct {
+    // In network byte order.
+
+    HTYPE__hardware_type: enum u16 {
+        ethernet :: 0x0100;
+    }
+
+    PTYPE__protocol_type: Ethertype;
+
+    HLEN__hardware_length: u8;
+    PLEN__protocol_length: u8;
+
+    OPER__operation: enum u16 {
+        request :: 0x0100;
+        reply   :: 0x0200;
+    }
+
+    SHA__sender_hardware_address: [6]u8;
+    SPA__sender_protocol_address: [4]u8;
+
+    THA__target_hardware_address: [6]u8;
+    TPA__target_protocol_address: [4]u8;
+}
+
+#assert size_of(Arp_Packet) == 28;

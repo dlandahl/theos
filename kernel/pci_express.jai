@@ -291,7 +291,7 @@ read_base_address_register :: (device: Pci_Device, bar_index: int) -> Pci_Bar {
 
     if _64bit {
         bar1 := device.registers[0x4 + bar_index + 1];
-        base |= (cast(u64) bar1) << 32;
+        base |= cast(u64, bar1) << 32;
     }
 
     device.registers[0x4 + bar_index] = 0xffffffff;
@@ -389,6 +389,8 @@ I8254x_Registers :: struct {
     TDLEN__transmit_descriptor_length: u32;
     TDH__transmit_descriptor_head: u32 #align 8;
     TDT__transmit_descriptor_tail: u32 #align 8;
+#place start; _: [0x3828] u8;
+    TXDCTL__transmit_descriptor_control: I8254x_TXDCTL__Transmit_Descriptor_Control;
 
 #place start; _: [0x4000] u8;
     CRCERRS__crc_error_count: u32;
@@ -399,7 +401,10 @@ I8254x_Registers :: struct {
     TOTL__total_octets_transmitted_low: u32;
     TOTH__total_octets_transmitted_high: u32;
     TPR__total_packets_received: u32;
+
+#place start; _: [0x40d4] u8;
     TPT__total_packets_transmitted: u32;
+    PTC64__packets_transmitted_64_count: u32;
 
 #place start; _: [0x5200] u8;
     MTA__multicast_table_array: [128] u32;
@@ -441,6 +446,18 @@ I8254x_RCTL__Receive_Control :: enum_flags u32 {
 I8254x_TCTL__Transmit_Control :: enum_flags u32 {
     EN__enable                    :: 0x2;
     PSP__pad_short_packets        :: 0x8;
+    RTLC__retransmit_on_late_collision :: 1 << 24;
+}
+
+I8254x_TXDCTL__Transmit_Descriptor_Control :: enum u32 {
+    PTHRESH__prefetch_threshold :: 6;
+    _                           :: 2;
+    HTHRESH__host_threshold     :: 6;
+    _                           :: 2;
+    WTHRESH__write_back_threshold :: 6;
+    _                           :: 2;
+    GRAN__granularity           :: 1;
+    LWTHRESH__transmit_descriptor_low_threshold :: 7;
 }
 
 I8254x_Receive_Descriptor :: struct {
@@ -494,6 +511,23 @@ I8254x_Tcpip_Data_Descriptor :: struct {
     }
 }
 
+I8254x_Transmit_Descriptor :: struct {
+    buffer_address: u64;
+    length: u16;
+
+    checksum_offset: u8;
+    command: enum_flags u8 {
+        EOP__end_of_packet :: 0x1;
+        IFCS__insert_fcs   :: 0x2;
+        RS__report_status  :: 0x8;
+    }
+
+    status: u8;
+    checksum_start: u8;
+
+    special: u16;
+}
+
 I8254x_MAC :: union {
     // An easy way to convert a MAC address to and from the internal format within the hardware registers.
     struct { ral, rah: u32; }
@@ -508,13 +542,10 @@ i8254x_interrupt :: (stack: *void) #c_call {
 
 init_i8254x :: (device: *Pci_Device) {
 
-    Temp_Context();
-    context.print_style.default_format_int.base = 16;
-
     log(
         "Vendor ID: %\nDevice ID: %",
-        device.vendor_id,
-        device.device_id
+        hex(device.vendor_id),
+        hex(device.device_id)
     );
 
     device.registers[1] |= cast(u32) Pci_Command.BUS_MASTER | .MEMORY_SPACE;
@@ -543,14 +574,19 @@ init_i8254x :: (device: *Pci_Device) {
         nic.CTRL__device_control &= ~.PHY_RST__phy_reset;
     }
 
+    // Disable interrupts
+    nic.IMC__interrupt_mask_clear = 0xffff_ffff;
+    _ := nic.ICR__interrupt_cause_read;
+
     // Get MAC address
     mac: I8254x_MAC;
     mac.ral = nic.RAL__receive_address_low;
     mac.rah = nic.RAH__receive_address_high;
 
-    Temp_Context();
-    context.print_style = mac_address_print_style;
-    log("MAC address: %", mac.array);
+    {
+        Push_Print_Style(mac_address_print_style);
+        log("MAC address: %", mac.array);
+    }
 
     {
         // General configuration
@@ -582,7 +618,7 @@ init_i8254x :: (device: *Pci_Device) {
 
         // Allocate transmit descriptor queue
         transmit_desc_buffer := get_4k_page();
-        queue_size := 4096 / size_of(I8254x_Tcpip_Data_Descriptor);
+        queue_size := 4096 / size_of(I8254x_Transmit_Descriptor);
 
         nic.TDBAL__transmit_descriptor_base_low  = cast(u32, transmit_desc_buffer & 0xffff_ffff);
         nic.TDBAH__transmit_descriptor_base_high = cast(u32, transmit_desc_buffer >> 32);
@@ -592,18 +628,30 @@ init_i8254x :: (device: *Pci_Device) {
         nic.TDT__transmit_descriptor_tail = 0;
         nic.TDH__transmit_descriptor_head = 0;
 
-        nic.TCTL__transmit_control |= (0x0f << 4) | (0x40 << 12);
-        nic.TCTL__transmit_control |= .PSP__pad_short_packets | .EN__enable;
+        txdctl: I8254x_TXDCTL__Transmit_Descriptor_Control;
+        set(*txdctl, .PTHRESH__prefetch_threshold, 0x3f);
+        set(*txdctl, .HTHRESH__host_threshold, 0x3f);
+        set(*txdctl, .WTHRESH__write_back_threshold, 0x1);
+        nic.TXDCTL__transmit_descriptor_control = txdctl;
+
+        tctl := I8254x_TCTL__Transmit_Control
+              .PSP__pad_short_packets
+            | .EN__enable
+            | .RTLC__retransmit_on_late_collision;
+
+        // Temporary, COLD and CT
+        tctl |= (0x0f << 4) | (0x40 << 12);
+
+        nic.TCTL__transmit_control = tctl;
 
         ipg: type_of(nic.TIPG__transmit_ipg);
         set(*ipg, .IPGT__ipg_transmit_time, 10);
         set(*ipg, .IPGR1__ipg_receive_time_1, 10);
         set(*ipg, .IPGR2__ipg_receive_time_2, 10);
-        
         nic.TIPG__transmit_ipg = ipg;
 
         queue_tail: u32;
-        queue := cast(*I8254x_Tcpip_Data_Descriptor, transmit_desc_buffer + DIRECT_MAPPING_BASE);
+        queue := cast(*I8254x_Transmit_Descriptor, transmit_desc_buffer + DIRECT_MAPPING_BASE);
 
         for 0..queue_size-2 {
 
@@ -619,32 +667,49 @@ init_i8254x :: (device: *Pci_Device) {
             ethernet_frame.source_mac = mac.array;
             ethernet_frame.ethertype = .ARP;
 
-            payload := cast(*u8, ethernet_frame + 1);
-            memcpy(payload, "Hello Sailor".data, 12);
+            arp := cast(*Arp_Packet, ethernet_frame + 1);
+            arp.HTYPE__hardware_type = .ethernet;
+            arp.PTYPE__protocol_type = .IPv4;
+            arp.HLEN__hardware_length = 6;
+            arp.PLEN__protocol_length = 4;
+            arp.OPER__operation = .request;
+            arp.SHA__sender_hardware_address = mac.array;
+            arp.SPA__sender_protocol_address = .[169, 254, 68, 113];
+            // arp.THA__target_hardware_address = .{};
+            arp.TPA__target_protocol_address = .[169, 254, 68, 113];
 
             // Put packet in queue
-            queue[queue_tail].buffer_address = packet;
-            queue[queue_tail].bitfield = 0;
+            desc := queue + queue_tail;
+            desc.buffer_address = packet;
+            desc.length = size_of(Ethernet_Header) + size_of(Arp_Packet);
+            desc.command = .RS__report_status | .IFCS__insert_fcs | .EOP__end_of_packet;
 
-            set(*queue[queue_tail], .DTALEN__data_length, 256);
+            /*
+                For extended descriptor format:
+
+            queue[queue_tail].bitfield = 0;
+            set(*queue[queue_tail], .DTALEN__data_length, 64);
             set(*queue[queue_tail], .DTYP__data_type, 1);
 
-            // Todo: could add a way to set/clear multiple single bit flags in a bitfield in one call.
             set(*queue[queue_tail], .DCMD_DEXT__extension, 1);
             set(*queue[queue_tail], .DCMD_RS__report_status, 1);
             set(*queue[queue_tail], .DCMD_EOP, 1);
             set(*queue[queue_tail], .DCMD_IFCS, 1);
+            */
 
             queue_tail += 1;
             nic.TDT__transmit_descriptor_tail = queue_tail;
 
+            log("%/%", it, queue_size);
+            log("Total transmitted 64: %", nic.PTC64__packets_transmitted_64_count);
             log("Total transmitted: %", nic.TPT__total_packets_transmitted);
             log("CRC errors: %", nic.CRCERRS__crc_error_count);
             log("Alignment errors: %", nic.ALGNERRC__alignment_error_count);
 
-            for 1..50_000_000 #asm { pause; }
+            for 1..1_000_000 #asm { pause; }
 
-            log("Errors: %", get(queue[queue_tail-1], .STA__status));
+            // log("Status: %", get(queue[queue_tail-1], .STA__status));
+            log("Status: %", queue[queue_tail-1].status);
         }
     }
 
@@ -692,7 +757,7 @@ init_i8254x :: (device: *Pci_Device) {
                 #asm { pause; }
             }
 
-            // ts := get_kernel_timestamp();
+            ts := get_kernel_timestamp();
 
             // Got ethernet packet(s).
             for head..new_head-1 {
@@ -702,28 +767,33 @@ init_i8254x :: (device: *Pci_Device) {
 
                 frame := cast(*Ethernet_Header, data).*;
 
-                /*
-                context.print_style.default_format_int.base = 10;
-                log("====== %.% ======", to_seconds(ts), to_milliseconds(ts) % 1000);
+                log("====== % [%] ======", formatFloat(to_float64_seconds(ts), trailing_width=3, zero_removal=.NO), frame.ethertype);
 
-                context.print_style = mac_address_print_style;
-                log("% => %", frame.source_mac, frame.destination_mac);
-                log("%", frame.ethertype);
+                {
+                    Push_Print_Style().* = mac_address_print_style;
+                    log("% => %", frame.source_mac, frame.destination_mac);
+                }
 
-                data += size_of(Ethernet_Header);
+                log("Length: %", desc.length);
 
                 if frame.ethertype == .IPv4 {
-                    ip := cast(*Ipv4_Header) data;
-                    assert(get(ip, .version) == 4);
+                    ip := cast(*Ipv4_Header, data + size_of(Ethernet_Header));
+
+                    // Auto-dereference is not handled in our #as handling code for bitfields...
+                    assert(get(ip.*, .version) == 4);
 
                     log("IP protocol %", ip.protocol);
                 }
 
-                log("");
-                */
+                if frame.ethertype == .ARP {
+                    packet := cast(*Arp_Packet, data + size_of(Ethernet_Header));
 
-                context.print_style = mac_address_print_style;
-                log("%", frame.source_mac);
+                    ps := Push_Print_Style();
+                    ps.default_format_int.base = 16;
+                    ps.default_format_int.minimum_digits = 2;
+
+                    log("%", packet.*);
+                }
 
                 if _memcmp(frame.destination_mac.data, mac.array.data, 6) == 0 {
                     log("Got a packet");
@@ -1397,7 +1467,7 @@ ahci_transfer_sectors :: (controller: *Ahci_Controller, direction: Transfer_Dire
     prdt.I__interrupt_on_completion = .YES;
 
     {
-        Temp_Context();
+        Push_Print_Style();
         context.print_style.default_format_int.base = 16;
         log("PRDT: %\n", prdt.*);
     }
