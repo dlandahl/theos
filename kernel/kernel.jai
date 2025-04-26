@@ -261,7 +261,9 @@ kernel_entry :: () #no_context {
 
             log("%", it.class_code);
             if it.class_code == .NETWORK && it.subclass == 0x0 {
-                init_i8254x(it);
+                nic := init_i8254x(it);
+
+                do_networking(*nic);
             }
         }
 
@@ -796,6 +798,48 @@ Page_Flags :: enum_flags u64 {
     EXECUTE_DISABLE :: 1 << 63;
 }
 
+get_physical_address :: (virtual: *void) -> u64, present: bool {
+    using Page_Flags;
+    x := cast(u64) virtual;
+
+    mask: u64 = 0x1ff;
+
+    pml4_offset := (x >> 39) & mask;
+    pdpt_offset := (x >> 30) & mask;
+    pd\ _offset := (x >> 21) & mask;
+    pt\ _offset := (x >> 12) & mask;
+    page_offset := x & 0xfff;
+
+    ReadTableEntry :: (index: u64, table_address: u64) -> entry: u64 #expand {
+        present := table_address & xx PRESENT;
+
+        if !present `return 0, false;
+
+        table := cast(*u64, table_address & ~0xfff + DIRECT_MAPPING_BASE);
+        return table[index];
+    }
+
+    cr3: u64;
+    #asm { get_cr3 cr3; }
+    pml4 := cast(*u64, cr3 + DIRECT_MAPPING_BASE);
+
+    pml4e := pml4[pml4_offset];
+
+    pdpte := ReadTableEntry(pdpt_offset, pml4e);
+    if pdpte & xx PAGE_SIZE {
+        page_offset := x & 0x3fff_ffff;
+        return (pdpte & ~0xfff) + page_offset, true;
+    }
+
+    pde := ReadTableEntry(pd_offset, pdpte);
+    if pde & xx PAGE_SIZE {
+        page_offset := x & 0x1f_ffff;
+        return (pde & ~0xfff) + page_offset, true;
+    }
+
+    pte := ReadTableEntry(pt_offset, pde);
+    return (pte & ~0xfff) + page_offset, true;
+}
 
 
 // A block allocator that just linearly scans to find a large enough free block. Does not do the job of finding a best fit region to prevent fragmentation.

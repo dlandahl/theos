@@ -446,7 +446,7 @@ I8254x_RCTL__Receive_Control :: enum_flags u32 {
 I8254x_TCTL__Transmit_Control :: enum_flags u32 {
     EN__enable                    :: 0x2;
     PSP__pad_short_packets        :: 0x8;
-    RTLC__retransmit_on_late_collision :: 1 << 24;
+    RTLC__retransmit_on_late_collision :: 0x100_0000;
 }
 
 I8254x_TXDCTL__Transmit_Descriptor_Control :: enum u32 {
@@ -541,7 +541,19 @@ i8254x_interrupt :: (stack: *void) #c_call {
     write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 } @InterruptRoutine
 
-init_i8254x :: (device: *Pci_Device) {
+I8254x_Network_Interface_Card :: struct {
+    using mmio: *I8254x_Registers;
+
+    tx_queue_tail: u32;
+    rx_queue_head: int;
+
+    tx_queue: [] I8254x_Transmit_Descriptor;
+    rx_queue: [] I8254x_Receive_Descriptor;
+
+    mac_address: [6] u8;
+}
+
+init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
 
     log(
         "Vendor ID: %\nDevice ID: %",
@@ -555,8 +567,10 @@ init_i8254x :: (device: *Pci_Device) {
     parse_pci_capability_list(device);
     enable_msi_or_msi_x(device, int__i8254x_interrupt);
 
+    nic: I8254x_Network_Interface_Card;
+
     bar0 := read_base_address_register(device, 0);
-    nic := cast(*I8254x_Registers) map_base_address_register(bar0);
+    nic.mmio = map_base_address_register(bar0);
 
     {
         // Reset the controller
@@ -583,6 +597,7 @@ init_i8254x :: (device: *Pci_Device) {
     mac: I8254x_MAC;
     mac.ral = nic.RAL__receive_address_low;
     mac.rah = nic.RAH__receive_address_high;
+    nic.mac_address = mac.array;
 
     {
         Push_Print_Style(mac_address_print_style);
@@ -619,7 +634,9 @@ init_i8254x :: (device: *Pci_Device) {
 
         // Allocate transmit descriptor queue
         transmit_desc_buffer := get_4k_page();
-        queue_size := 4096 / size_of(I8254x_Transmit_Descriptor);
+
+        nic.tx_queue.data = cast(*I8254x_Transmit_Descriptor, transmit_desc_buffer + DIRECT_MAPPING_BASE);
+        nic.tx_queue.count = 4096 / size_of(I8254x_Transmit_Descriptor);
 
         nic.TDBAL__transmit_descriptor_base_low  = cast(u32, transmit_desc_buffer & 0xffff_ffff);
         nic.TDBAH__transmit_descriptor_base_high = cast(u32, transmit_desc_buffer >> 32);
@@ -650,65 +667,6 @@ init_i8254x :: (device: *Pci_Device) {
         set(*ipg, .IPGR1__ipg_receive_time_1, 10);
         set(*ipg, .IPGR2__ipg_receive_time_2, 10);
         nic.TIPG__transmit_ipg = ipg;
-
-        queue_tail: u32;
-        queue := cast(*I8254x_Transmit_Descriptor, transmit_desc_buffer + DIRECT_MAPPING_BASE);
-
-        if false for 0..queue_size-2 {
-
-            // Build a valid ethernet packet
-            packet := get_4k_page();
-
-            ethernet_frame := cast(*Ethernet_Header, packet + DIRECT_MAPPING_BASE);
-
-            VBOX_MAC :: u8.[0x08, 0x00, 0x27, 0xe3, 0x86, 0xf2];
-            BROADCAST_MAC :: u8.[0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
-
-            ethernet_frame.destination_mac = BROADCAST_MAC;
-            ethernet_frame.source_mac = mac.array;
-            ethernet_frame.ethertype = .ARP;
-
-            arp := cast(*Arp_Packet, ethernet_frame + 1);
-            arp.HTYPE__hardware_type = .ethernet;
-            arp.PTYPE__protocol_type = .IPv4;
-            arp.HLEN__hardware_length = 6;
-            arp.PLEN__protocol_length = 4;
-            arp.OPER__operation = .request;
-            arp.SHA__sender_hardware_address = mac.array;
-            arp.SPA__sender_protocol_address = .[0, 0, 0, 0];
-            // arp.THA__target_hardware_address = .{};
-            arp.TPA__target_protocol_address = .[192, 168, 1, 1];
-
-            // Put packet in queue
-            desc := queue + queue_tail;
-            desc.buffer_address = packet;
-            desc.length = size_of(Ethernet_Header) + size_of(Arp_Packet);
-            desc.command = .RS__report_status | .IFCS__insert_fcs | .EOP__end_of_packet;
-
-            /*
-                For extended descriptor format:
-
-            queue[queue_tail].bitfield = 0;
-            set(*queue[queue_tail], .DTALEN__data_length, 64);
-            set(*queue[queue_tail], .DTYP__data_type, 1);
-
-            set(*queue[queue_tail], .DCMD_DEXT__extension, 1);
-            set(*queue[queue_tail], .DCMD_RS__report_status, 1);
-            set(*queue[queue_tail], .DCMD_EOP, 1);
-            set(*queue[queue_tail], .DCMD_IFCS, 1);
-            */
-
-            queue_tail += 1;
-            nic.TDT__transmit_descriptor_tail = queue_tail;
-
-            log("%/%", it, queue_size);
-            log("Queue head: %", nic.TDH__transmit_descriptor_head);
-            log("Total transmitted: %", nic.TPT__total_packets_transmitted);
-
-            for 1..1_000_000 #asm { pause; }
-
-            log("Status: %", queue[queue_tail-1].status);
-        }
     }
 
     {
@@ -716,6 +674,9 @@ init_i8254x :: (device: *Pci_Device) {
 
         // Allocate receive descriptor queue
         receive_desc_buffer := get_4k_page();
+
+        nic.rx_queue.data = cast(*I8254x_Receive_Descriptor, receive_desc_buffer + DIRECT_MAPPING_BASE);
+        nic.rx_queue.count = 4096 / size_of(I8254x_Receive_Descriptor);
 
         nic.RDBAL__receive_descriptor_base_low  = cast(u32, receive_desc_buffer & 0xffff_ffff);
         nic.RDBAH__receive_descriptor_base_high = cast(u32, receive_desc_buffer >> 32);
@@ -736,72 +697,47 @@ init_i8254x :: (device: *Pci_Device) {
 
         nic.RCTL__receive_control = receive_everything | buffer_size_4k | .RDMTS1__minimum_threshold_1;
 
-        queue := cast(*I8254x_Receive_Descriptor, receive_desc_buffer + DIRECT_MAPPING_BASE);
-        queue_size := 4096 / size_of(I8254x_Receive_Descriptor);
-
-        for 0..queue_size-1 {
-            queue[it].buffer_address = get_4k_page();
+        for* nic.rx_queue {
+            it.buffer_address = get_4k_page();
         }
 
         nic.RDH__receive_descriptor_head = 0;
-        nic.RDT__receive_descriptor_tail = cast(u32, queue_size-1);
-
-        head := 0;
-        new_head := head;
-
-        while true {
-            while head == new_head {
-                new_head = nic.RDH__receive_descriptor_head;
-                _ := nic.ICR__interrupt_cause_read;
-                #asm { pause; }
-            }
-
-            ts := get_kernel_timestamp();
-
-            // Got ethernet packet(s).
-            for head..new_head-1 {
-
-                desc := queue[it];
-                data := cast(*void, desc.buffer_address + DIRECT_MAPPING_BASE);
-
-                frame := cast(*Ethernet_Header, data).*;
-
-                log("====== % [%] ======", formatFloat(to_float64_seconds(ts), trailing_width=3, zero_removal=.NO), frame.ethertype);
-
-                {
-                    Push_Print_Style().* = mac_address_print_style;
-                    log("% => %", frame.source_mac, frame.destination_mac);
-                }
-
-                log("Length: %", desc.length);
-
-                if frame.ethertype == .IPv4 {
-                    ip := cast(*Ipv4_Header, data + size_of(Ethernet_Header));
-
-                    // Auto-dereference is not handled in our #as handling code for bitfields...
-                    assert(get(ip.*, .version) == 4);
-
-                    log("IP protocol %", ip.protocol);
-                }
-
-                if frame.ethertype == .ARP {
-                    packet := cast(*Arp_Packet, data + size_of(Ethernet_Header));
-
-                    ps := Push_Print_Style();
-                    ps.default_format_int.base = 16;
-                    ps.default_format_int.minimum_digits = 2;
-
-                    log("%", packet.*);
-                }
-
-                if _memcmp(frame.destination_mac.data, mac.array.data, 6) == 0 {
-                    log("Got a packet");
-                }
-            }
-
-            head = new_head;
-        }
+        nic.RDT__receive_descriptor_tail = cast(u32, nic.rx_queue.count-1);
     }
+
+    return nic;
+}
+
+i8254x_get_newly_received_packets :: (nic: *I8254x_Network_Interface_Card) -> [] Network_Packet {
+
+    new_head := nic.RDH__receive_descriptor_head;
+    packets_received := NewArray(new_head - nic.rx_queue_head, Network_Packet,, temp);
+
+    for* packets_received {
+        i8254_packet := *nic.rx_queue[nic.rx_queue_head];
+
+        it.data = cast(*void, i8254_packet.buffer_address + DIRECT_MAPPING_BASE);
+        it.length = i8254_packet.length;
+
+        nic.rx_queue_head += 1;
+    }
+
+    return packets_received;
+}
+
+i8254x_transmit_packet :: (nic: *I8254x_Network_Interface_Card, packet: Network_Packet) {
+    desc := nic.tx_queue.data + nic.tx_queue_tail;
+
+    desc.buffer_address = get_physical_address(packet.data);
+    desc.length = cast(u16) packet.length;
+    desc.command = .RS__report_status | .IFCS__insert_fcs | .EOP__end_of_packet;
+
+    nic.tx_queue_tail += 1;
+    nic.TDT__transmit_descriptor_tail = nic.tx_queue_tail;
+
+    Timeout(nic.TPT__total_packets_transmitted);
+
+    log("Status: %", desc.status);
 }
 
 

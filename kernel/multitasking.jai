@@ -90,7 +90,7 @@ core_begin_multitasking :: () {
     scheduler.idle_task = create_task(params);
 
     {
-        // Enable Local APIC timer interrupts
+        // Enable Local APIC timer interrupts, or TSC deadline if available
 
         register_interrupt_gate(int__spurious_interrupt, 0xff);
         spurious := read_apic_register(.SPURIOUS_INTERRUPT);
