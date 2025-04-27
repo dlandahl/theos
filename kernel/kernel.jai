@@ -311,7 +311,6 @@ simd_floating_point_exception :: (stack: *Interrupt_Stack()) #c_call {
     }
 } @InterruptRoutine
 
-
 make_kernel_context :: (c: *#Context) #no_context {
     // initializer_of(#Context)(c); 
 
@@ -328,6 +327,12 @@ make_kernel_context :: (c: *#Context) #no_context {
     };
 
     c.logger = (message: string, data: *void, info: Log_Info) {
+        if context.log_category {
+            write_string("[");
+            write_string(context.log_category);
+            write_string("] ");
+        }
+
         write_string(message);
 
         if message[message.count-1] != #char "\n" {
@@ -1292,7 +1297,7 @@ align :: (alignment: int, value: int) -> int #no_context {
     return (value + (alignment - 1)) & -alignment;
 }
 
-Timeout_Block :: (code: Code, message := "", time_ms := 1000, call := #caller_location) #expand {
+Timeout_Block :: (code: Code, time_ms := 1000) -> bool #expand {
     start := get_monotonic_system_time();
 
     while true {
@@ -1300,15 +1305,16 @@ Timeout_Block :: (code: Code, message := "", time_ms := 1000, call := #caller_lo
         elapsed := get_monotonic_system_time() - start;
 
         if to_milliseconds(elapsed) > time_ms {
-            log_error(message);
-            bluescreen(call);
+            return true;
         }
 
         #asm { pause; }
     }
+
+    return false;
 }
 
-Timeout :: (code: Code, message := "", time_ms := 1000, call := #caller_location) #expand {
+Timeout :: (code: Code, time_ms := 1000) -> bool #expand {
     start := get_monotonic_system_time();
 
     while true {
@@ -1318,12 +1324,13 @@ Timeout :: (code: Code, message := "", time_ms := 1000, call := #caller_location
         elapsed := get_monotonic_system_time() - start;
 
         if to_milliseconds(elapsed) > time_ms {
-            log_error(message);
-            bluescreen(call);
+            return true;
         }
 
         #asm { pause; }
     }
+
+    return false;
 }
 
 Push_Print_Style :: (style := context.print_style) -> *Print_Style #expand {
@@ -1338,6 +1345,14 @@ Push_Print_Style :: (style := context.print_style) -> *Print_Style #expand {
 
 hex :: #bake_arguments formatInt(base=16);;
 dec :: #bake_arguments formatInt(base=10);
+
+#add_context log_category: string;
+
+Log_Category :: (category: string) #expand {
+    old := context.log_category;
+    context.log_category = category;
+    `defer context.log_category = old;
+}
 
 
 

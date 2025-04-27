@@ -554,6 +554,7 @@ I8254x_Network_Interface_Card :: struct {
 }
 
 init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
+    Log_Category("8254x");
 
     log(
         "Vendor ID: %\nDevice ID: %",
@@ -580,7 +581,11 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
 
         nic.CTRL__device_control |= .RST__device_reset;
         busy_loop(2, .microseconds);
-        Timeout(nic.CTRL__device_control & .RST__device_reset == 0);
+
+        if Timeout(nic.CTRL__device_control & .RST__device_reset == 0) {
+            log_error("Timeout during device reset.");
+            return nic;
+        }
 
         // To reset the PHY, PHY_RST should be asserted for 10ms. Spin for 15ms to be safe.
 
@@ -654,8 +659,8 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
 
         tctl := I8254x_TCTL__Transmit_Control
               .PSP__pad_short_packets
-            | .EN__enable
-            | .RTLC__retransmit_on_late_collision;
+            | .RTLC__retransmit_on_late_collision
+            | .EN__enable;
 
         // Temporary, COLD and CT
         tctl |= (0x0f << 4) | (0x40 << 12);
@@ -725,8 +730,17 @@ i8254x_get_newly_received_packets :: (nic: *I8254x_Network_Interface_Card) -> []
     return packets_received;
 }
 
-i8254x_transmit_packet :: (nic: *I8254x_Network_Interface_Card, packet: Network_Packet) {
-    desc := nic.tx_queue.data + nic.tx_queue_tail;
+i8254x_transmit_packet :: (nic: *I8254x_Network_Interface_Card, packet: Network_Packet) -> bool {
+    Log_Category("8254x");
+
+    if !packet.data || !packet.length {
+        log_error("Uninitialized packet: %", packet);
+        return false;
+    }
+
+    success := true;
+
+    desc := *nic.tx_queue[nic.tx_queue_tail];
 
     desc.buffer_address = get_physical_address(packet.data);
     desc.length = cast(u16) packet.length;
@@ -735,9 +749,16 @@ i8254x_transmit_packet :: (nic: *I8254x_Network_Interface_Card, packet: Network_
     nic.tx_queue_tail += 1;
     nic.TDT__transmit_descriptor_tail = nic.tx_queue_tail;
 
-    Timeout(nic.TPT__total_packets_transmitted);
+    if Timeout(nic.TPT__total_packets_transmitted) {
+        log_error("Failed to transmit network packet.");
+        success = false;
+    }
 
-    log("Status: %", desc.status);
+    if desc.status != 1 {
+        log("Transmit descriptor status: %", desc.status);
+    }
+
+    return success;
 }
 
 
@@ -930,6 +951,8 @@ nvme_interrupt :: (stack: *void) {
 } @InterruptRoutine
 
 init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
+    Log_Category("NVMe");
+
     if device.class_code != .MASS_STORAGE bluescreen();
     if device.subclass   != 0x8           bluescreen();
 
@@ -969,7 +992,7 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
         for sn if it == #char " " { sn.count = it_index; break; }
         for mn if it == #char " " { mn.count = it_index; break; }
 
-        log("Found NVMe controller with serial number '%' and model number '%'.", sn, mn);
+        log("Found controller with serial number '%' and model number '%'.", sn, mn);
         free_4k_page(admin_command.DPTR__data_pointer[0]);
     }
 
@@ -990,7 +1013,7 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
         }
 
         if nvme.nsid == 0 {
-            log_error("NVMe no active namespace ID found");
+            log_error("No active namespace ID found");
             bluescreen();
         }
 
@@ -1037,9 +1060,9 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
         nvme_send_io_command(*nvme, io_command);
         
         if cast(*u16, buffer + 510 + DIRECT_MAPPING_BASE).* == 0xaa55 {
-            log("Success :)");
+            log("Success");
         } else {
-            log("Failure :(");
+            log("Failure");
         }
     }
 
@@ -1048,14 +1071,17 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
 
 nvme_reset_controller :: (nvme: *Nvme_Controller) {
     if (nvme.CSTS__controller_status & .SHST__SHUTDOWN_STATUS0) || (nvme.CSTS__controller_status & .SHST__SHUTDOWN_STATUS1) {
-        log("NVMe shutdown status.");
+        log("Shutdown status.");
     }
 
     if nvme.CC__controller_config & .EN__enable {
         set(*nvme.CC__controller_config, .EN__enable, 0);
     }
 
-    Timeout(!(nvme.CSTS__controller_status & .RDY__READY), "NVMe reset timeout (RDY is set.)");
+    if Timeout(!(nvme.CSTS__controller_status & .RDY__READY)) {
+        log_error("Reset timeout (RDY is set.)");
+        return;
+    }
 
     // Initialize admin queues.
     admin_sq := get_4k_page();
@@ -1093,18 +1119,21 @@ nvme_reset_controller :: (nvme: *Nvme_Controller) {
 
     set(*nvme.CC__controller_config, .EN__enable, 1);
 
-    Timeout_Block(#code {
+    if Timeout_Block(#code {
         if nvme.CSTS__controller_status & .RDY__READY break;
 
         fatal := nvme.CSTS__controller_status & .CFS__CONTROLLER_FATAL_STATUS;
         if fatal {
-            log_error("Nvme controller fatal status during reset.");
+            log_error("Controller fatal status during reset.");
             bluescreen();
         }
-    }, "NVMe reset timeout (RDY is unset.)");
+    }) {
+        log("Reset timeout (RDY is unset.)");
+    }
 }
 
 nvme_send_admin_command :: (using nvme: *Nvme_Controller, command: Nvme_Submission_Queue_Entry) {
+    Log_Category("NVMe");
     admin_sq[admin_sq_tail] = command;
 
     start_phase := admin_cq[admin_cq_head].STATUS__status & 1;
@@ -1118,7 +1147,7 @@ nvme_send_admin_command :: (using nvme: *Nvme_Controller, command: Nvme_Submissi
 
     status := admin_cq[admin_cq_head].STATUS__status >> 1;
     if status != 0 {
-        log_error("NVMe command failed with status %", status);
+        log_error("Admin command failed with status %", status);
     }
 
     admin_cq_head += 1;
@@ -1128,6 +1157,7 @@ nvme_send_admin_command :: (using nvme: *Nvme_Controller, command: Nvme_Submissi
 }
 
 nvme_send_io_command :: (using nvme: *Nvme_Controller, command: Nvme_Submission_Queue_Entry) {
+    Log_Category("NVMe");
     io_sq[io_sq_tail] = command;
 
     start_phase := io_cq[io_cq_head].STATUS__status & 1;
@@ -1143,7 +1173,7 @@ nvme_send_io_command :: (using nvme: *Nvme_Controller, command: Nvme_Submission_
 
     status := io_cq[io_cq_head].STATUS__status >> 1;
     if status != 0 {
-        log_error("NVMe command failed with status %", status);
+        log_error("IO command failed with status %", status);
     }
 
     io_cq_head += 1;
@@ -1173,6 +1203,8 @@ ahci_interrupt :: (data: *void) {
 } @InterruptRoutine
 
 init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, success: bool {
+    Log_Category("AHCI");
+
     device.registers[1] |= cast(u32) Pci_Command.BUS_MASTER | .MEMORY_SPACE;
     device.registers[1] &= cast(u32) ~Pci_Command.INTERRUPT_DISABLE;
 
@@ -1181,7 +1213,7 @@ init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, succe
 
     bar := read_base_address_register(device, bar_index = 5);
     if !bar.base {
-        log_error("AHCI controller has no base address set");
+        log_error("Controller has no base address set");
         return success = false;
     }
 
@@ -1192,7 +1224,7 @@ init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, succe
     ahci.GHC__global_host_control |= .AE__ahci_enable | .IE__interrupt_enable;
 
     if !(ahci.CAP__host_capabilities & .S64A__64bit_addressing) {
-        log_error("AHCI controller without 64-bit addressing not supported");
+        log_error("Controller without 64-bit addressing not supported");
         return success = false;
     }
 
@@ -1216,17 +1248,17 @@ init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, succe
         if ahci_port_is_running(port) {
             port.CMD__command_status &= ~.ST__start;
 
-            Timeout(
-                !(port.CMD__command_status & .CR__command_list_running),
-                "AHCI port not idle timeout (command list running)"
-            );
+            if Timeout(!(port.CMD__command_status & .CR__command_list_running)) {
+                log_error("Port not idle timeout (command list running)");
+                return success = false;
+            }
 
             port.CMD__command_status &= ~.FRE__fis_receive_enable;
 
-            Timeout(
-                !(port.CMD__command_status & .FR__receive_running),
-                "AHCI port not idle timeout (receive running)"
-            );
+            if Timeout(!(port.CMD__command_status & .FR__receive_running)) {
+                log_error("Port not idle timeout (receive running)");
+                return success = false;
+            }
         }
     }
 
@@ -1235,7 +1267,7 @@ init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, succe
 
         port := *ahci.ports[it];
         if !(port.CMD__command_status & .SUD__spin_up_device) {
-            log_error("AHCI port not spun up");
+            log_error("Port not spun up");
             return success = false;
         }
 
@@ -1247,12 +1279,12 @@ init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, succe
 
         ipm := port.SSTS__sata_status & .IPM_MASK;
         if ipm != .IPM_ACTIVE {
-            log_error("AHCI port power management interface state is not active. See 3.3.10 (PxSSTS)");
+            log_error("Port power management interface state is not active. See 3.3.10 (PxSSTS)");
             return success = false;
         }
 
         if port.SIG__signature != .ATA {
-            log_error("AHCI We only handle the \"ATA\" device signature");
+            log_error("We only handle the \"ATA\" device signature");
             return success = false;
         }
 
@@ -1301,17 +1333,17 @@ init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, succe
 
         port.CMD__command_status |= .FRE__fis_receive_enable;
 
-        Timeout(
-            port.CMD__command_status & .FR__receive_running,
-            "AHCI port idle timeout (receive running)"
-        );
+        if Timeout(port.CMD__command_status & .FR__receive_running) {
+            log_error("Port idle timeout (receive running)");
+            return success = false;
+        }
 
         port.CMD__command_status |= .ST__start;
 
-        Timeout(
-            port.CMD__command_status & .CR__command_list_running,
-            "AHCI port idle timeout (command list running)"
-        );
+        if Timeout(port.CMD__command_status & .CR__command_list_running) {
+            log_error("Port idle timeout (command list running)");
+            return success = false;
+        }
 
         controller.ahci = ahci;
         return controller, true;
@@ -1334,6 +1366,7 @@ Transfer_Direction :: enum {
 }
 
 ahci_transfer :: (controller: *Ahci_Controller, direction: Transfer_Direction, memory_address: u64, number_of_bytes: u64, disk_address: u64) {
+    Log_Category("AHCI");
 
     assert(cast(u64) memory_address % 0x200 == 0);
 
@@ -1367,6 +1400,8 @@ ahci_transfer :: (controller: *Ahci_Controller, direction: Transfer_Direction, m
 }
 
 ahci_transfer_sectors :: (controller: *Ahci_Controller, direction: Transfer_Direction, physical: u64, lba: u64, sector_count: int) {
+    Log_Category("AHCI");
+
     fis: Ahci_Command_Fis;
     fis.flags = .IS_COMMAND;
     fis.command = ifx direction == .READ then Ata_Command.READ_DMA_EX else .WRITE_DMA_EX;
@@ -1407,7 +1442,7 @@ ahci_transfer_sectors :: (controller: *Ahci_Controller, direction: Transfer_Dire
         log("PRDT: %\n", prdt.*);
     }
 
-    Timeout_Block(#code {
+    if Timeout_Block(#code {
         if controller.port.SACT__sata_active & 1 continue;
 
         ata_status := cast(u32, Ata_Status.BUSY | .TRANSFER_REQUESTED);
@@ -1417,15 +1452,17 @@ ahci_transfer_sectors :: (controller: *Ahci_Controller, direction: Transfer_Dire
         }
 
         break;
-    }, "SATA busy timeout");
+    }) {
+        log_error("SATA busy timeout");
+        return;
+    }
 
     assert(!(controller.port.CI__command_issue & 1));
     controller.port.CI__command_issue |= 1;
 
-    Timeout(
-        !(controller.port.CI__command_issue & 1),
-        "SATA command issue timeout"
-    );
+    if Timeout(!(controller.port.CI__command_issue & 1)) {
+        log_error("SATA command issue timeout");
+    }
 
 
     for 1..1_000_000 #asm { pause; }

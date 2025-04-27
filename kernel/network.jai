@@ -53,29 +53,33 @@ Ipv4_Header :: struct {
 } #no_padding
 
 byte_swap_ip :: (header: *Ipv4_Header) {
-    set(header, .total_length,   bs16(cast(u16) get(header.*, .total_length)));
-    set(header, .identification, bs16(cast(u16) get(header.*, .identification)));
+    set(header, .total_length,   bs16(get(header.*, .total_length).(u16)));
+    set(header, .identification, bs16(get(header.*, .identification).(u16)));
     header.checksum = bs16(header.checksum);
 }
 
-ip4_checksum :: (ip: Ipv4_Header) -> u16 {
-    in := cast(*u8) *ip;
+internet_checksum :: (header: $H) -> u16 {
+    assert(header.checksum == 0);
+
+    bytes := cast(*u8) *header;
     sum: u32 = 0;
 
-    num_words := size_of(Ipv4_Header) / size_of(u16);
+    assert(size_of(H) % 2 == 0); // Todo
+
+    num_words := size_of(H) / size_of(u16);
 
     for 0..num_words-1 {
-        high := cast(u16, in[it*2]) << 8;
-        low  := cast(u16, in[it*2 + 1]);
+        high := bytes[it*2    ].(u16) << 8;
+        low  := bytes[it*2 + 1].(u16);
 
-        sum += high + low;
+        sum += high.(u32) + low.(u32);
     }
 
     while sum > 0xffff {
         sum = (sum >> 16) + (sum & 0xffff);
     }
 
-    return ~cast(u16, sum);
+    return ~bs16(xx sum);
 }
 
 
@@ -93,8 +97,6 @@ byte_swap_udp :: (udp: *Udp_Header) {
     udp.destination_port = bs16(udp.destination_port);
     udp.length           = bs16(udp.length);
     udp.checksum         = bs16(udp.checksum);
-
-    log("%", udp.*);
 }
 
 
@@ -167,12 +169,64 @@ Dhcp_Message_Type :: enum u8 {
     tls                :: 18;
 }
 
+// add_dhcp_option :: (code: Dhcp_Option_Code, length: int, content: [] u8) {
+//
+// }
+
+
+
 byte_swap_dhcp_message :: (dhcp: *Dhcp_Message) {
-    dhcp.xid = bs32(dhcp.xid);
+    dhcp.xid     = bs32(dhcp.xid);
     dhcp.seconds = bs16(dhcp.seconds);
-    dhcp.flags = bs16(dhcp.flags);
-    dhcp.magic = bs32(dhcp.magic);
+    dhcp.flags   = bs16(dhcp.flags);
+    dhcp.magic   = bs32(dhcp.magic);
 }
+
+Icmp_Header :: struct {
+    control_message: enum u16 {
+        // Type and code (subtype) combined into one field
+
+        echo_reply   :: 0x00_00;
+        echo_request :: 0x00_08;
+    }
+
+    checksum: u16;
+    data: u32;
+}
+
+Icmp_Packet :: struct {
+    eth: Ethernet_Header;
+    ip: Ipv4_Header #align 1;
+    icmp: Icmp_Header #align 1;
+}
+
+make_pong :: (ping: *Icmp_Packet) -> Icmp_Packet {
+    using pong: Icmp_Packet;
+
+    eth.destination_mac = ping.eth.source_mac;
+    eth.source_mac      = ping.eth.destination_mac;
+    eth.ethertype       = .IPv4;
+
+    set(*ip, .version, 4);
+    set(*ip, .ihl, 5);
+    set(*ip, .total_length, size_of(Ipv4_Header) + size_of(Icmp_Header));
+
+    ip.time_to_live = 128;
+    ip.protocol = .ICMP;
+    ip.source_address = ping.ip.destination_address;
+    ip.destination_address = ping.ip.source_address;
+
+    byte_swap_ip(*ip);
+    ip.checksum = internet_checksum(ip);
+
+    icmp.control_message = .echo_reply;
+    icmp.data = ping.icmp.data;
+    icmp.checksum = internet_checksum(icmp);
+
+    return pong;
+}
+
+
 
 BROADCAST_MAC :: u8.[0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
 
@@ -189,9 +243,85 @@ add_to_packet :: (packet: *Network_Packet, data: *$T) {
 }
 
 do_networking :: (nic: *I8254x_Network_Interface_Card) {
+    Log_Category("Net");
+
+    // It seems like the VirtualBox network bridge is not ready to transmit packets until a few seconds after we initalize the emulated NIC.
+    sleep_until(get_monotonic_system_time() + seconds_to_apollo(5));
+
     // Make a DHCP request, see if we get a response.
+    packet, xid := make_dhcp_request(nic);
+
+    log("Transmitting DHCP request...");
+
+    success := i8254x_transmit_packet(nic, packet);
+    if !success {
+        log("Failed.");
+        bluescreen();
+    }
+
+    // Wait for an offer
+    if Timeout_Block(#code {
+        packets := i8254x_get_newly_received_packets(nic);
+
+        for packets {
+            eth := cast(*Ethernet_Header) it.data;
+
+            if false {
+                Push_Print_Style(mac_address_print_style);
+                log("% => %", eth.source_mac, eth.destination_mac);
+            }
+
+            if _memcmp(eth.destination_mac.data, nic.mac_address.data, 6) != 0 {
+                // The packet is not addressed to us.
+                continue;
+            }
+
+            if eth.ethertype != .IPv4 {
+                log("Received network packet with unsupported protocol %.", eth.ethertype);
+                continue;
+            }
+
+            ip := cast(*Ipv4_Header) (eth + 1);
+            assert(get(ip.*, .ihl) == 5);
+
+            if ip.protocol == .ICMP {
+                icmp := cast(*Icmp_Header) (ip + 1);
+
+                if icmp.control_message == .echo_request {
+                    log("Got pinged, sending pong.");
+
+                    pong := make_pong(cast(*Icmp_Packet) it.data);
+
+                    packet: Network_Packet;
+                    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
+                    packet.length = size_of(Icmp_Packet);
+
+                    memcpy(packet.data, *pong, size_of(Icmp_Packet));
+                    success := i8254x_transmit_packet(nic, packet);
+
+                    if !success {
+                        log_error("Failed to send pong.");
+                    } else {
+                        log("Pong sent.");
+                    }
+                } else {
+                    log("Received ICMP type % which is not understood.", icmp.control_message);
+                    continue;
+                }
+            }
+        }
+
+        busy_loop(50, .milliseconds);
+    }, time_ms = 10_000) {
+        log("No DHCP offer received.");
+    }
+}
+
+make_dhcp_request :: (nic: *I8254x_Network_Interface_Card) -> Network_Packet, u32 {
     packet: Network_Packet;
     packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
+
+    xid := cast(u32) rdtsc();
 
     eth: Ethernet_Header;
     eth.destination_mac = BROADCAST_MAC;
@@ -221,9 +351,10 @@ do_networking :: (nic: *I8254x_Network_Interface_Card) {
     ip.protocol = .UDP;
     ip.source_address = 0;
     ip.destination_address = 0xff_ff_ff_ff;
-    ip.checksum = ip4_checksum(ip);
 
     byte_swap_ip(*ip);
+    ip.checksum = internet_checksum(ip);
+
     add_to_packet(*packet, *ip);
 
     udp: Udp_Header;
@@ -240,7 +371,7 @@ do_networking :: (nic: *I8254x_Network_Interface_Card) {
     dhcp.opcode = 0x1;
     dhcp.hardware_type = 0x1;
     dhcp.mac_length = 0x6;
-    dhcp.xid = xx rdtsc();
+    dhcp.xid = xid;
     dhcp.client_mac = nic.mac_address;
     dhcp.magic = 0x63825363;
 
@@ -251,19 +382,7 @@ do_networking :: (nic: *I8254x_Network_Interface_Card) {
     add_to_packet(*packet, *dhcp_opt_request_ip);
     add_to_packet(*packet, *dhcp_opt_prl);
 
-    log("Transmitting DHCP discover with XID % and IP total length %", hex(dhcp.xid), ip_packet_length);
-
-    for 1..100 {
-        i8254x_transmit_packet(nic, packet);
-        busy_loop(500, .milliseconds);
-    }
-
-    while true {
-        packets := i8254x_get_newly_received_packets(nic);
-        for packets log_packet(it);
-
-        busy_loop(50, .milliseconds);
-    }
+    return packet, xid;
 }
 
 log_packet :: (using packet: Network_Packet) {
