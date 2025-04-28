@@ -169,11 +169,11 @@ Dhcp_Message_Type :: enum u8 {
     tls                :: 18;
 }
 
-// add_dhcp_option :: (code: Dhcp_Option_Code, length: int, content: [] u8) {
-//
-// }
-
-
+Dhcp_Option_Code :: enum u8 {
+    request_ip :: 0x32;
+    discover   :: 0x35;
+    prl        :: 0x37;
+}
 
 byte_swap_dhcp_message :: (dhcp: *Dhcp_Message) {
     dhcp.xid     = bs32(dhcp.xid);
@@ -181,6 +181,8 @@ byte_swap_dhcp_message :: (dhcp: *Dhcp_Message) {
     dhcp.flags   = bs16(dhcp.flags);
     dhcp.magic   = bs32(dhcp.magic);
 }
+
+
 
 Icmp_Header :: struct {
     control_message: enum u16 {
@@ -266,9 +268,9 @@ do_networking :: (nic: *I8254x_Network_Interface_Card) {
         for packets {
             eth := cast(*Ethernet_Header) it.data;
 
-            if false {
+            if true {
                 Push_Print_Style(mac_address_print_style);
-                log("% => %", eth.source_mac, eth.destination_mac);
+                log("% => % (%)", eth.source_mac, eth.destination_mac, eth.ethertype);
             }
 
             if _memcmp(eth.destination_mac.data, nic.mac_address.data, 6) != 0 {
@@ -309,6 +311,18 @@ do_networking :: (nic: *I8254x_Network_Interface_Card) {
                     continue;
                 }
             }
+
+            if ip.protocol == .UDP {
+                udp := cast(*Udp_Header) (ip + 1);
+                if bs16(udp.destination_port) != 68 continue;
+
+                dhcp := cast(*Dhcp_Message) (udp + 1);
+
+                byte_swap_dhcp_message(dhcp);
+                log("Got DHCP message: %", dhcp.*);
+
+                break;
+            }
         }
 
         busy_loop(50, .milliseconds);
@@ -331,7 +345,7 @@ make_dhcp_request :: (nic: *I8254x_Network_Interface_Card) -> Network_Packet, u3
     add_to_packet(*packet, *eth);
 
     // DHCP options
-    dhcp_opt_discover   := u8.[0x35, 0x1, 0x1];
+    dhcp_opt_discover   := u8.[0x35, 0x01, 0x01];
     dhcp_opt_request_ip := u8.[0x32, 0x04, 0xc0, 0xa8, 0x01, 0x64];
     dhcp_opt_prl        := u8.[0x37, 0x04, 0x01, 0x03, 0x0f, 0x06, 0xff];
 

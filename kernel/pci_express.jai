@@ -215,7 +215,7 @@ enable_msi_or_msi_x :: (device: *Pci_Device, interrupt_handler: () #c_call) -> e
         // Todo: this BAR might be one that has already been mapped, or will be mapped for other purposes by the driver.
         // Need to add a general system for detecting when a BAR is already mapped and returning the existing memory region.
         // Mapping a BAR twice should in theory not cause errors, it just "wastes" virtual memory. Maybe all base address
-        // registers that have valid addresses should just be mapped during device detection?
+        // registers that have valid addresses should be mapped when the device is detected.
 
         bar := read_base_address_register(device, table_bar_index);
         device.msi_x_table.data = map_base_address_register(bar) + table_offset;
@@ -556,11 +556,8 @@ I8254x_Network_Interface_Card :: struct {
 init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
     Log_Category("8254x");
 
-    log(
-        "Vendor ID: %\nDevice ID: %",
-        hex(device.vendor_id),
-        hex(device.device_id)
-    );
+    log("Vendor ID: %", hex(device.vendor_id));
+    log("Device ID: %", hex(device.device_id));
 
     device.registers[1] |= cast(u32) Pci_Command.BUS_MASTER | .MEMORY_SPACE;
     device.registers[1] &= cast(u32) ~Pci_Command.INTERRUPT_DISABLE;
@@ -688,19 +685,13 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
 
         nic.RDLEN__receive_descriptor_length = 4096;
 
-        // Enable promiscuous mode so that the controller gives packets to the host even if they aren't addressed to us.
-        receive_everything: I8254x_RCTL__Receive_Control =
-              .UPE__unicast_promiscuous
-            | .MPE__multicast_promiscuous
-            | .BAM__broadcast_accept_mode
-            | .EN__enable;
-
-        buffer_size_4k: I8254x_RCTL__Receive_Control =
+        nic.RCTL__receive_control =
               .BSIZE0__buffer_size_bit_0
             | .BSIZE1__buffer_size_bit_1
-            | .BSEX__buffer_size_extension;
-
-        nic.RCTL__receive_control = receive_everything | buffer_size_4k | .RDMTS1__minimum_threshold_1;
+            | .BSEX__buffer_size_extension
+            | .BAM__broadcast_accept_mode
+            | .RDMTS1__minimum_threshold_1
+            | .EN__enable;
 
         for* nic.rx_queue {
             it.buffer_address = get_4k_page();

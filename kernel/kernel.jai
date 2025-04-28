@@ -91,8 +91,9 @@ Kernel_Globals :: struct {
         // Recursive, so that errors generated during text rendering can be displayed on the screen.
         spinlock: Recursive_Spinlock;
     }
-    
-    serial_port_spinlock: Spinlock;
+
+    // Recursive, so that procedures that generate multiple accesses to the serial port can be grouped together, and not be interleaved with accesses by other cores.
+    serial_port_spinlock: Recursive_Spinlock;
 }
 
 kernel_globals: Kernel_Globals;
@@ -315,6 +316,8 @@ make_kernel_context :: (c: *#Context) #no_context {
     // initializer_of(#Context)(c); 
 
     c.assertion_failed = (location: Source_Code_Location, message: string) -> bool {
+        acquire(*kernel_globals.serial_port_spinlock);
+
         write_string("Assertion failure");
         if message.count {
             write_strings(": ", message);
@@ -322,11 +325,15 @@ make_kernel_context :: (c: *#Context) #no_context {
         write_string("\n");
 
         print_stack_trace(context.stack_trace);
+
+        release(*kernel_globals.serial_port_spinlock);
         bluescreen(location);
         return true;
     };
 
     c.logger = (message: string, data: *void, info: Log_Info) {
+        Scoped_Acquire(*kernel_globals.serial_port_spinlock);
+
         if context.log_category {
             write_string("[");
             write_string(context.log_category);
@@ -338,8 +345,7 @@ make_kernel_context :: (c: *#Context) #no_context {
         if message[message.count-1] != #char "\n" {
             write_string("\n");
         }
-
-    };
+    }
 
     c.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = 2;
     c.print_style.default_format_struct.use_newlines_if_long_form = true;
