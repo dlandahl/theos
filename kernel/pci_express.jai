@@ -606,7 +606,7 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
 
     {
         Push_Print_Style(mac_address_print_style);
-        log("MAC address: %", mac.array);
+        log("MAC address: %", nic.mac_address);
     }
 
     {

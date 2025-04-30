@@ -243,8 +243,8 @@ kernel_entry :: () #no_context {
         for* pci_devices {
             if it.class_code == .MASS_STORAGE {
                 if it.subclass == {
-                    case 0x8; init_nvme_controller(it);
-                    case 0x6; init_ahci_controller(it);
+                    // case 0x8; init_nvme_controller(it);
+                    // case 0x6; init_ahci_controller(it);
                 }
             }
 
@@ -253,7 +253,7 @@ kernel_entry :: () #no_context {
             }
         }
 
-        network_adapter_initialized := kernel_globals.net.adapter.mmio;
+        network_adapter_initialized := kernel_globals.net.adapter.mmio != null;
 
         if network_adapter_initialized {
             // It seems like the VirtualBox network bridge is not ready to transmit packets until a few seconds after we initalize the emulated NIC.

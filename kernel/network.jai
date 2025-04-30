@@ -119,10 +119,10 @@ Arp_Packet :: struct {
     }
 
     SHA__sender_hardware_address: [6]u8;
-    SPA__sender_protocol_address: [4]u8;
+    SPA__sender_protocol_address: u32 #align 1;
 
     THA__target_hardware_address: [6]u8;
-    TPA__target_protocol_address: [4]u8;
+    TPA__target_protocol_address: u32 #align 1;
 }
 
 #assert size_of(Arp_Packet) == 28;
@@ -262,8 +262,23 @@ add_to_packet :: (packet: *Network_Packet, data: *$T) {
 
 
 
+format_mac :: (mac: [6] u8) -> string {
+    Push_Print_Style(mac_address_print_style);
+    return tprint("%", mac);
+}
+
+format_ip :: (ip: u32) -> string {
+    ip_array := (*ip).(*[4]u8).*;
+
+    return tprint("%.%.%.%",
+        ip_array[0],
+        ip_array[1],
+        ip_array[2],
+        ip_array[3]
+    );
+}
+
 Network_Connection :: struct {
-    mac_address: [6] u8;
     router_mac_address: [6] u8;
 
     our_ip: u32;
@@ -322,7 +337,7 @@ establish_network_connection :: (using net: *Network_Connection) {
             if dhcp.xid != xid continue;
 
             // A DHCP offer can be sent by broadcast MAC, so check if the client MAC matches in the DHCP message.
-            if _memcmp(dhcp.client_mac.data, mac_address.data, 6) != 0 {
+            if _memcmp(dhcp.client_mac.data, adapter.mac_address.data, 6) != 0 {
                 continue;
             }
 
@@ -339,7 +354,8 @@ establish_network_connection :: (using net: *Network_Connection) {
                 router_ip = ip.source_address;
                 router_mac_address = eth.source_mac;
 
-                log("Got DHCP offer for IP: %. Server IP: %, server MAC: %. Accepting...", our_ip, router_ip, router_mac_address);
+                log("Got DHCP offer for IP: %.", format_ip(our_ip));
+                log("Server IP: %, server MAC: %.", format_ip(router_ip), format_mac(router_mac_address));
 
                 packet := make_dhcp_request(net, xid);
                 assert(i8254x_transmit_packet(*adapter, packet));
@@ -350,11 +366,79 @@ establish_network_connection :: (using net: *Network_Connection) {
                 if dhcp_handshake_state != .offer_accepted continue;
 
                 dhcp_handshake_state = .completed;
+                log("DHCP handshake completed.");
             }
         }
 
         busy_loop(50, .milliseconds);
     }
+}
+
+make_dhcp_discover :: (net: *Network_Connection) -> Network_Packet, u32 {
+    packet: Network_Packet;
+    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
+
+    xid := cast(u32) rdtsc();
+
+    eth: Ethernet_Header;
+    eth.destination_mac = BROADCAST_MAC;
+    eth.source_mac = net.adapter.mac_address;
+    eth.ethertype = .IPv4;
+
+    add_to_packet(*packet, *eth);
+
+    // DHCP options
+    dhcp_opt_discover   := u8.[0x35, 0x01, 0x01];
+    dhcp_opt_prl        := u8.[0x37, 0x04, 0x01, 0x03, 0x0f, 0x06, 0xff];
+
+    dhcp_options_length : u16 = dhcp_opt_discover.count + dhcp_opt_prl.count;
+
+    ip_packet_length := size_of(Ipv4_Header)
+        + size_of(Udp_Header)
+        + size_of(Dhcp_Message)
+        + dhcp_options_length;
+
+    ip: Ipv4_Header;
+    set(*ip, .version, 4);
+    set(*ip, .ihl, 5);
+    set(*ip, .total_length, ip_packet_length);
+
+    ip.time_to_live = 128;
+    ip.protocol = .UDP;
+    ip.source_address = 0;
+    ip.destination_address = 0xff_ff_ff_ff;
+
+    byte_swap_ip(*ip);
+    ip.checksum = internet_checksum(ip);
+
+    add_to_packet(*packet, *ip);
+
+    udp: Udp_Header;
+    udp.source_port = DHCP_CLIENT_PORT;
+    udp.destination_port = DHCP_SERVER_PORT;
+    udp.length = size_of(Udp_Header)
+        + size_of(Dhcp_Message)
+        + dhcp_options_length;
+
+    byte_swap_udp_header(*udp);
+    add_to_packet(*packet, *udp);
+
+    dhcp: Dhcp_Message;
+    dhcp.opcode = 0x1;
+    dhcp.hardware_type = 0x1;
+    dhcp.mac_length = 0x6;
+    dhcp.xid = xid;
+    dhcp.client_mac = net.adapter.mac_address;
+
+    dhcp.magic = Dhcp_Message.MAGIC;
+
+    byte_swap_dhcp_message(*dhcp);
+    add_to_packet(*packet, *dhcp);
+
+    add_to_packet(*packet, *dhcp_opt_discover);
+    add_to_packet(*packet, *dhcp_opt_prl);
+
+    return packet, xid;
 }
 
 make_dhcp_request :: (net: *Network_Connection, xid: u32) -> Network_Packet {
@@ -366,7 +450,7 @@ make_dhcp_request :: (net: *Network_Connection, xid: u32) -> Network_Packet {
 
     eth: Ethernet_Header;
     eth.destination_mac = BROADCAST_MAC;
-    eth.source_mac = net.mac_address;
+    eth.source_mac = net.adapter.mac_address;
     eth.ethertype = .IPv4;
 
     add_to_packet(*packet, *eth);
@@ -374,8 +458,8 @@ make_dhcp_request :: (net: *Network_Connection, xid: u32) -> Network_Packet {
     // DHCP options
     dhcp_opt_request := u8.[0x35, 0x01, 0x03];
 
-    router_ip := (*net.router_ip).(*[] u8).*;
-    our_ip := (*net.our_ip).(*[] u8).*;
+    router_ip := (*net.router_ip).(*[4]u8).*;
+    our_ip := (*net.our_ip).(*[4]u8).*;
 
     dhcp_opt_server := u8.[
         0x36, 0x04,
@@ -430,7 +514,7 @@ make_dhcp_request :: (net: *Network_Connection, xid: u32) -> Network_Packet {
     dhcp.hardware_type = 0x1;
     dhcp.mac_length = 0x6;
     dhcp.xid = xid;
-    dhcp.client_mac = net.mac_address;
+    dhcp.client_mac = net.adapter.mac_address;
     dhcp.server_ip = net.router_ip;
     dhcp.magic = Dhcp_Message.MAGIC;
 
@@ -442,72 +526,6 @@ make_dhcp_request :: (net: *Network_Connection, xid: u32) -> Network_Packet {
     add_to_packet(*packet, *dhcp_opt_requested_ip);
 
     return packet;
-}
-
-make_dhcp_discover :: (net: *Network_Connection) -> Network_Packet, u32 {
-    packet: Network_Packet;
-    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
-
-    xid := cast(u32) rdtsc();
-
-    eth: Ethernet_Header;
-    eth.destination_mac = BROADCAST_MAC;
-    eth.source_mac = net.mac_address;
-    eth.ethertype = .IPv4;
-
-    add_to_packet(*packet, *eth);
-
-    // DHCP options
-    dhcp_opt_discover   := u8.[0x35, 0x01, 0x01];
-    dhcp_opt_prl        := u8.[0x37, 0x04, 0x01, 0x03, 0x0f, 0x06, 0xff];
-
-    dhcp_options_length : u16 = dhcp_opt_discover.count + dhcp_opt_prl.count;
-
-    ip_packet_length := size_of(Ipv4_Header)
-        + size_of(Udp_Header)
-        + size_of(Dhcp_Message)
-        + dhcp_options_length;
-
-    ip: Ipv4_Header;
-    set(*ip, .version, 4);
-    set(*ip, .ihl, 5);
-    set(*ip, .total_length, ip_packet_length);
-
-    ip.time_to_live = 128;
-    ip.protocol = .UDP;
-    ip.source_address = 0;
-    ip.destination_address = 0xff_ff_ff_ff;
-
-    byte_swap_ip(*ip);
-    ip.checksum = internet_checksum(ip);
-
-    add_to_packet(*packet, *ip);
-
-    udp: Udp_Header;
-    udp.source_port = DHCP_CLIENT_PORT;
-    udp.destination_port = DHCP_SERVER_PORT;
-    udp.length = size_of(Udp_Header)
-        + size_of(Dhcp_Message)
-        + dhcp_options_length;
-
-    byte_swap_udp_header(*udp);
-    add_to_packet(*packet, *udp);
-
-    dhcp: Dhcp_Message;
-    dhcp.opcode = 0x1;
-    dhcp.hardware_type = 0x1;
-    dhcp.mac_length = 0x6;
-    dhcp.xid = xid;
-    dhcp.client_mac = net.mac_address;
-    dhcp.magic = Dhcp_Message.MAGIC;
-
-    byte_swap_dhcp_message(*dhcp);
-    add_to_packet(*packet, *dhcp);
-
-    add_to_packet(*packet, *dhcp_opt_discover);
-    add_to_packet(*packet, *dhcp_opt_prl);
-
-    return packet, xid;
 }
 
 get_dhcp_message_if_one_is_contained :: (ip: *Ipv4_Header) -> *Dhcp_Message {
