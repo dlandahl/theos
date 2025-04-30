@@ -315,7 +315,10 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
 
     virtual := alloc_block(*kernel_globals.virtual_block_allocator, bar.limit);
 
-    log("Mapping BAR % to address %", bar, cast(*void)virtual);
+    {
+        Push_Print_Style().default_format_int.base = 16;
+        log("Mapping BAR % to address %", bar, cast(*void)virtual);
+    }
 
     for 0..(bar.limit-1) / 4096 {
         offset := it * 4096;
@@ -690,6 +693,8 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
             | .BSIZE1__buffer_size_bit_1
             | .BSEX__buffer_size_extension
             | .BAM__broadcast_accept_mode
+        //  | .UPE__unicast_promiscuous
+        //  | .MPE__multicast_promiscuous
             | .RDMTS1__minimum_threshold_1
             | .EN__enable;
 

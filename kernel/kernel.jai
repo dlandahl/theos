@@ -94,6 +94,8 @@ Kernel_Globals :: struct {
 
     // Recursive, so that procedures that generate multiple accesses to the serial port can be grouped together, and not be interleaved with accesses by other cores.
     serial_port_spinlock: Recursive_Spinlock;
+
+    net: Network_Connection;
 }
 
 kernel_globals: Kernel_Globals;
@@ -237,35 +239,27 @@ kernel_entry :: () #no_context {
         core_begin_multitasking();
 
         find_all_pci_devices();
-        if false for* pci_devices {
-            if it.class_code == .MASS_STORAGE && it.subclass == 0x6 {
 
-                controller, success := init_ahci_controller(it);
-                if !success continue;
-
-                memory := allocate_large_page();
-                ahci_transfer(*controller, .READ, memory, 512, 0);
-
-                for 0..511 {
-                    byte := cast(*u8) memory + it + DIRECT_MAPPING_BASE;
-                    print("% ", formatInt(byte.*, base=16, minimum_digits=2));
-
-                    if !((it+1) % 16) print("\n");
+        for* pci_devices {
+            if it.class_code == .MASS_STORAGE {
+                if it.subclass == {
+                    case 0x8; init_nvme_controller(it);
+                    case 0x6; init_ahci_controller(it);
                 }
+            }
+
+            if it.class_code == .NETWORK && it.subclass == 0x0 {
+                kernel_globals.net.adapter = init_i8254x(it);
             }
         }
 
-        for* pci_devices {
-            if it.class_code == .MASS_STORAGE && it.subclass == 0x8 {
-                // init_nvme_controller(it);
-            }
+        network_adapter_initialized := kernel_globals.net.adapter.mmio;
 
-            log("%", it.class_code);
-            if it.class_code == .NETWORK && it.subclass == 0x0 {
-                nic := init_i8254x(it);
+        if network_adapter_initialized {
+            // It seems like the VirtualBox network bridge is not ready to transmit packets until a few seconds after we initalize the emulated NIC.
+            sleep_for(seconds_to_apollo(5));
 
-                do_networking(*nic);
-            }
+            establish_network_connection(*kernel_globals.net);
         }
 
         while true {}
@@ -1349,7 +1343,7 @@ Push_Print_Style :: (style := context.print_style) -> *Print_Style #expand {
     return *context.print_style;
 }
 
-hex :: #bake_arguments formatInt(base=16);;
+hex :: #bake_arguments formatInt(base=16);
 dec :: #bake_arguments formatInt(base=10);
 
 #add_context log_category: string;
@@ -1374,10 +1368,12 @@ draw_text :: (text: string) #no_context {
 
     Scoped_Acquire(*spinlock);
 
-    line_spacing :: 5;
+    line_spacing :: 5;   // Number of pixels between the bottom of one character cell, and the top of the next one down.
     char_width   :: 9;
     char_height  :: 16;
     margin       :: 10;
+
+    line_height := char_height + line_spacing;
 
     framebuffer := kernel_globals.framebuffer;
 
@@ -1396,19 +1392,19 @@ draw_text :: (text: string) #no_context {
         }
 
         screen_x := cursor_x * char_width + margin;
-        screen_y := cursor_y * (char_height + line_spacing) + margin;
+        screen_y := cursor_y * line_height + margin;
 
-        if screen_y + char_height + line_spacing + margin > framebuffer.y_resolution {
-            source := (char_height + line_spacing + margin) * framebuffer.stride;
+        if screen_y + line_height + margin > framebuffer.y_resolution {
+            source := (line_height + margin) * framebuffer.stride;
             target := margin * framebuffer.stride;
 
-            count := cursor_y * (char_height + line_spacing) * framebuffer.stride;
+            count := cursor_y * line_height * framebuffer.stride;
 
             // Inefficient when printing strings with many newlines.
             memcpy(framebuffer.buffer + target, framebuffer.buffer + source, count * size_of(u32));
 
             cursor_y -= 1;
-            screen_y -= char_height + line_spacing;
+            screen_y -= line_height;
         }
 
         source_top_left := char_width * (cast(int) it - 0x20);

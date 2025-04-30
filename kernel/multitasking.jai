@@ -156,6 +156,10 @@ create_task :: (params: Create_Task_Parameters = .{}) -> *Task_Info {
     return new_task;
 }
 
+sleep_for :: (time: Apollo_Time) {
+    sleep_until(get_monotonic_system_time() + time);
+}
+
 sleep_until :: (time: Apollo_Time) {
 
     scheduler := *get_current_core().scheduler;
@@ -324,8 +328,7 @@ syscall_handler :: (data: *Syscall_Stack) #c_call {
         t.low  = data.rbx;
         t.high = cast(s64) data.rdx;
 
-        time := get_monotonic_system_time();
-        sleep_until(time + t);
+        sleep_for(t);
 
       case 4;
         s: string;
