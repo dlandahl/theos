@@ -248,6 +248,35 @@ make_pong :: (ping: *Icmp_Packet) -> Icmp_Packet {
     return pong;
 }
 
+make_ping :: (net: *Network_Connection, destination_ip: u32) -> Icmp_Packet {
+    using ping: Icmp_Packet;
+
+    log("Pinging %", format_ip(destination_ip));
+    log("Dest MAC: %", format_mac(net.router_mac_address));
+    log("Source MAC: %", format_mac(net.adapter.mac_address));
+
+    eth.destination_mac = net.router_mac_address;
+    eth.source_mac = net.adapter.mac_address;
+    
+    set(*ip, .version, 4);
+    set(*ip, .ihl, 5);
+    set(*ip, .total_length, size_of(Ipv4_Header) + size_of(Icmp_Header));
+
+    ip.time_to_live = 64;
+    ip.protocol = .ICMP;
+    ip.source_address = net.our_ip;
+    ip.destination_address = destination_ip;
+
+    byte_swap_ip(*ip);
+    ip.checksum = internet_checksum(ip);
+
+    icmp.control_message = .echo_request;
+    icmp.data = 0; // xx rdtsc();
+    icmp.checksum = internet_checksum(icmp);
+
+    return ping;
+}
+
 
 
 Network_Packet :: struct {
@@ -286,10 +315,15 @@ Network_Connection :: struct {
 
     adapter: I8254x_Network_Interface_Card;
 
+    arp_probe_transmitted_at: Apollo_Time;
+
     dhcp_handshake_state: enum {
         not_started;
         discover_transmitted;
         offer_accepted;
+        arp_probe_1_transmitted;
+        arp_probe_2_transmitted;
+        arp_probe_3_transmitted;
         completed;
     }
 }
@@ -304,13 +338,23 @@ establish_network_connection :: (using net: *Network_Connection) {
 
     dhcp_handshake_state = .discover_transmitted;
 
-    // Let's spend 10 seconds trying to get an IP.
-    wait_until := get_monotonic_system_time() + seconds_to_apollo(10);
+    // Let's spend 60 seconds trying to get an IP.
+    wait_until := get_monotonic_system_time() + seconds_to_apollo(60);
     offer: *Dhcp_Message;
 
     LOG_ALL_RECEIVED_ETHERNET_PACKETS :: true;
 
     while establishing_dhcp_connection := get_monotonic_system_time() < wait_until  {
+
+        if dhcp_handshake_state == .arp_probe_1_transmitted || dhcp_handshake_state == .arp_probe_2_transmitted {
+            if arp_probe_transmitted_at < get_monotonic_system_time() - seconds_to_apollo(1) {
+                log("Transmitting another ARP probe...");
+                transmit_arp_probe(net);
+                dhcp_handshake_state += 1;
+                arp_probe_transmitted_at = get_monotonic_system_time();
+            }
+        }
+
         packets := i8254x_get_newly_received_packets(*adapter);
 
         for packets {
@@ -320,6 +364,8 @@ establish_network_connection :: (using net: *Network_Connection) {
                 Push_Print_Style(mac_address_print_style);
                 log("% => % (%)", eth.source_mac, eth.destination_mac, eth.ethertype);
             }
+
+            if false if maybe_handle_arp(net, eth) continue;
 
             if eth.ethertype != .IPv4 {
                 log("Received network packet with unsupported protocol %.", eth.ethertype);
@@ -348,8 +394,6 @@ establish_network_connection :: (using net: *Network_Connection) {
                     continue;
                 }
 
-                wait_until += seconds_to_apollo(5);
-
                 our_ip = dhcp.your_ip;
                 router_ip = ip.source_address;
                 router_mac_address = eth.source_mac;
@@ -365,8 +409,27 @@ establish_network_connection :: (using net: *Network_Connection) {
               case .ack;
                 if dhcp_handshake_state != .offer_accepted continue;
 
-                dhcp_handshake_state = .completed;
-                log("DHCP handshake completed.");
+                log("DHCP request acknowledged. Sending ARP probe...");
+
+                transmit_arp_probe(net);
+                arp_probe_transmitted_at = get_monotonic_system_time();
+
+                dhcp_handshake_state = .arp_probe_1_transmitted;
+
+                if false {
+                    log("Pinging Discord");
+                    ping := make_ping(net, our_ip);
+
+                    packet: Network_Packet;
+                    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
+                    packet.length = size_of(Icmp_Packet);
+
+                    memcpy(packet.data, *ping, size_of(Icmp_Packet));
+                    success := i8254x_transmit_packet(*adapter, packet);
+                    if !success bluescreen();
+                }
+
+                // break establishing_dhcp_connection;
             }
         }
 
@@ -474,7 +537,9 @@ make_dhcp_request :: (net: *Network_Connection, xid: u32) -> Network_Packet {
         our_ip[0],
         our_ip[1],
         our_ip[2],
-        our_ip[3]
+        our_ip[3],
+
+        0xff
     ];
 
     dhcp_options_length : u16 = dhcp_opt_request.count + dhcp_opt_server.count + dhcp_opt_requested_ip.count;
@@ -560,7 +625,7 @@ maybe_handle_echo_request :: (net: *Network_Connection, ip: *Ipv4_Header) -> han
         return true;
     }
 
-    log("Got pinged, sending pong.");
+    log("Got pinged, sending pong");
 
     ping := cast(*Icmp_Packet) icmp;
     pong := make_pong(ping);
@@ -570,13 +635,92 @@ maybe_handle_echo_request :: (net: *Network_Connection, ip: *Ipv4_Header) -> han
     packet.length = size_of(Icmp_Packet);
 
     memcpy(packet.data, *pong, size_of(Icmp_Packet));
-    success := i8254x_transmit_packet(*net.adapter, packet);
+    assert(i8254x_transmit_packet(*net.adapter, packet));
+    log("Pong sent");
 
-    if !success {
-        log_error("Failed to send pong.");
-    } else {
-        log("Pong sent.");
+    free_4k_page(cast(u64, packet.data - DIRECT_MAPPING_BASE));
+
+    return true;
+}
+
+transmit_arp_probe :: (net: *Network_Connection) {
+
+    packet: Network_Packet;
+    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
+    packet.length = size_of(Ethernet_Header);
+
+    probe: struct {
+        using eth: Ethernet_Header;
+        using arp: Arp_Packet;
     }
+
+    probe.destination_mac = BROADCAST_MAC;
+    probe.source_mac      = net.adapter.mac_address;
+    probe.ethertype       = .ARP;
+
+    probe.HTYPE__hardware_type = .ethernet;
+    probe.PTYPE__protocol_type = .IPv4;
+    probe.HLEN__hardware_length = 6;
+    probe.PLEN__protocol_length = 4;
+    probe.OPER__operation       = .request;
+
+    probe.SHA__sender_hardware_address = net.adapter.mac_address;
+    probe.SPA__sender_protocol_address = 0;
+    probe.THA__target_hardware_address = .[0,0,0,0,0,0];
+    probe.TPA__target_protocol_address = net.our_ip;
+
+    add_to_packet(packet.data, *probe);
+    assert(i8254x_transmit_packet(*net.adapter, packet));
+    log("ARP probe sent");
+
+    free_4k_page(cast(u64, packet.data - DIRECT_MAPPING_BASE));
+
+}
+
+maybe_handle_arp :: (net: *Network_Connection, eth: *Ethernet_Header) -> bool {
+    if eth.ethertype != .ARP return false;
+
+    arp := cast(*Arp_Packet) (eth + 1);
+
+    log("Received ARP %", arp.*);
+
+    if net.our_ip != arp.TPA__target_protocol_address return true;
+    if arp.OPER__operation != .request return true;
+
+    if arp.SPA__sender_protocol_address == arp.TPA__target_protocol_address {
+        // Gratuitous ARP
+        return true;
+    }
+
+    packet: Network_Packet;
+    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
+    packet.length = size_of(Ethernet_Header);
+
+    reply: struct {
+        using eth: Ethernet_Header;
+        using arp: Arp_Packet;
+    }
+
+    reply.destination_mac = BROADCAST_MAC;
+    reply.source_mac      = net.adapter.mac_address;
+    reply.ethertype       = .ARP;
+
+    reply.HTYPE__hardware_type = .ethernet;
+    reply.PTYPE__protocol_type = .IPv4;
+    reply.HLEN__hardware_length = 6;
+    reply.PLEN__protocol_length = 4;
+    reply.OPER__operation       = .reply;
+
+    reply.SHA__sender_hardware_address = net.adapter.mac_address;
+    reply.SPA__sender_protocol_address = net.our_ip;
+    reply.THA__target_hardware_address = arp.SHA__sender_hardware_address;
+    reply.TPA__target_protocol_address = arp.SPA__sender_protocol_address;
+
+    add_to_packet(packet.data, *reply);
+    assert(i8254x_transmit_packet(*net.adapter, packet));
+    log("ARP reply sent");
+
+    free_4k_page(cast(u64, packet.data - DIRECT_MAPPING_BASE));
 
     return true;
 }

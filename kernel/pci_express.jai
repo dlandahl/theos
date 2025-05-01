@@ -13,10 +13,6 @@ find_all_pci_devices :: () {
         bluescreen();
     }
 
-    total_length := mcfg.length;
-    ecam_base := cast(u64) mcfg + size_of(Acpi_Mcfg);
-    ecam_length_bytes := total_length - size_of(Acpi_Mcfg);
-
     Ecam_Entry :: struct {
         base_address: u64;
         segment_group: u16;
@@ -25,8 +21,10 @@ find_all_pci_devices :: () {
         reserved: u32;
     }
 
+    ecam_length_bytes := mcfg.length - size_of(Acpi_Mcfg);
+
     ecam: [] Ecam_Entry;
-    ecam.data = cast(*Ecam_Entry) ecam_base;
+    ecam.data = cast(*Ecam_Entry, mcfg + 1);
     ecam.count = ecam_length_bytes / size_of(Ecam_Entry);
 
     for ecam {
@@ -753,6 +751,8 @@ i8254x_transmit_packet :: (nic: *I8254x_Network_Interface_Card, packet: Network_
     if desc.status != 1 {
         log("Transmit descriptor status: %", desc.status);
     }
+
+    log("Packet transmitted.");
 
     return success;
 }
