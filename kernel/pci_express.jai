@@ -752,8 +752,6 @@ i8254x_transmit_packet :: (nic: *I8254x_Network_Interface_Card, packet: Network_
         log("Transmit descriptor status: %", desc.status);
     }
 
-    log("Packet transmitted.");
-
     return success;
 }
 

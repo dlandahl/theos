@@ -3,6 +3,8 @@
 
 #import "Machine_X64";
 #import "Bit_Operations";
+#import "Hash_Table";
+#import "String";
 
 #import "Bitfield"(false);
 set :: bitfield_set;
