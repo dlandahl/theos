@@ -257,6 +257,7 @@ make_ping :: (net: *Network_Connection, destination_ip: u32) -> Icmp_Packet {
 
     eth.destination_mac = net.router_mac_address;
     eth.source_mac = net.adapter.mac_address;
+    eth.ethertype = .IPv4;
     
     set(*ip, .version, 4);
     set(*ip, .ihl, 5);
@@ -271,7 +272,7 @@ make_ping :: (net: *Network_Connection, destination_ip: u32) -> Icmp_Packet {
     ip.checksum = internet_checksum(ip);
 
     icmp.control_message = .echo_request;
-    icmp.data = 0; // xx rdtsc();
+    icmp.data = xx rdtsc() & 0xffff;
     icmp.checksum = internet_checksum(icmp);
 
     return ping;
@@ -346,13 +347,34 @@ establish_network_connection :: (using net: *Network_Connection) {
 
     while establishing_dhcp_connection := get_monotonic_system_time() < wait_until  {
 
-        if dhcp_handshake_state == .arp_probe_1_transmitted || dhcp_handshake_state == .arp_probe_2_transmitted {
-            if arp_probe_transmitted_at < get_monotonic_system_time() - seconds_to_apollo(1) {
-                log("Transmitting another ARP probe...");
-                transmit_arp_probe(net);
+        if dhcp_handshake_state >= .arp_probe_1_transmitted && dhcp_handshake_state <= .arp_probe_3_transmitted {
+            probe_time_elapsed := arp_probe_transmitted_at < get_monotonic_system_time() - seconds_to_apollo(1);
+
+            if probe_time_elapsed {
+                if dhcp_handshake_state != .arp_probe_3_transmitted {
+                    log("Transmitting another ARP probe...");
+                    transmit_arp_probe(net);
+                }
+
                 dhcp_handshake_state += 1;
                 arp_probe_transmitted_at = get_monotonic_system_time();
             }
+        }
+
+        if dhcp_handshake_state == .completed {
+            log("Pinging Discord");
+            ip := u8.[162, 159, 135, 232];
+            ping := make_ping(net, (*ip).(*u32).*);
+
+            packet: Network_Packet;
+            packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
+
+            add_to_packet(*packet, *ping);
+
+            success := i8254x_transmit_packet(*adapter, packet);
+            if !success bluescreen();
+
+            dhcp_handshake_state += 1;
         }
 
         packets := i8254x_get_newly_received_packets(*adapter);
@@ -365,7 +387,7 @@ establish_network_connection :: (using net: *Network_Connection) {
                 log("% => % (%)", eth.source_mac, eth.destination_mac, eth.ethertype);
             }
 
-            if false if maybe_handle_arp(net, eth) continue;
+            if maybe_handle_arp(net, eth) continue;
 
             if eth.ethertype != .IPv4 {
                 log("Received network packet with unsupported protocol %.", eth.ethertype);
@@ -415,21 +437,6 @@ establish_network_connection :: (using net: *Network_Connection) {
                 arp_probe_transmitted_at = get_monotonic_system_time();
 
                 dhcp_handshake_state = .arp_probe_1_transmitted;
-
-                if false {
-                    log("Pinging Discord");
-                    ping := make_ping(net, our_ip);
-
-                    packet: Network_Packet;
-                    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
-                    packet.length = size_of(Icmp_Packet);
-
-                    memcpy(packet.data, *ping, size_of(Icmp_Packet));
-                    success := i8254x_transmit_packet(*adapter, packet);
-                    if !success bluescreen();
-                }
-
-                // break establishing_dhcp_connection;
             }
         }
 
@@ -645,14 +652,13 @@ maybe_handle_echo_request :: (net: *Network_Connection, ip: *Ipv4_Header) -> han
 
 transmit_arp_probe :: (net: *Network_Connection) {
 
-    packet: Network_Packet;
-    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
-    packet.length = size_of(Ethernet_Header);
-
     probe: struct {
         using eth: Ethernet_Header;
         using arp: Arp_Packet;
     }
+
+    packet: Network_Packet;
+    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
 
     probe.destination_mac = BROADCAST_MAC;
     probe.source_mac      = net.adapter.mac_address;
@@ -669,7 +675,7 @@ transmit_arp_probe :: (net: *Network_Connection) {
     probe.THA__target_hardware_address = .[0,0,0,0,0,0];
     probe.TPA__target_protocol_address = net.our_ip;
 
-    add_to_packet(packet.data, *probe);
+    add_to_packet(*packet, *probe);
     assert(i8254x_transmit_packet(*net.adapter, packet));
     log("ARP probe sent");
 
@@ -682,8 +688,6 @@ maybe_handle_arp :: (net: *Network_Connection, eth: *Ethernet_Header) -> bool {
 
     arp := cast(*Arp_Packet) (eth + 1);
 
-    log("Received ARP %", arp.*);
-
     if net.our_ip != arp.TPA__target_protocol_address return true;
     if arp.OPER__operation != .request return true;
 
@@ -692,16 +696,15 @@ maybe_handle_arp :: (net: *Network_Connection, eth: *Ethernet_Header) -> bool {
         return true;
     }
 
-    packet: Network_Packet;
-    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
-    packet.length = size_of(Ethernet_Header);
-
     reply: struct {
         using eth: Ethernet_Header;
         using arp: Arp_Packet;
     }
 
-    reply.destination_mac = BROADCAST_MAC;
+    packet: Network_Packet;
+    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
+
+    reply.destination_mac = arp.SHA__sender_hardware_address;
     reply.source_mac      = net.adapter.mac_address;
     reply.ethertype       = .ARP;
 
@@ -716,7 +719,7 @@ maybe_handle_arp :: (net: *Network_Connection, eth: *Ethernet_Header) -> bool {
     reply.THA__target_hardware_address = arp.SHA__sender_hardware_address;
     reply.TPA__target_protocol_address = arp.SPA__sender_protocol_address;
 
-    add_to_packet(packet.data, *reply);
+    add_to_packet(*packet, *reply);
     assert(i8254x_transmit_packet(*net.adapter, packet));
     log("ARP reply sent");
 
