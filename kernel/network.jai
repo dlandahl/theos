@@ -387,6 +387,8 @@ Network_Connection :: struct {
         destination_ip: u32;
         sent_at: Apollo_Time;
     };
+
+    spinlock: Spinlock;
 }
 
 establish_network_connection :: (using net: *Network_Connection) {

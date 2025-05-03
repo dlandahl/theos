@@ -83,7 +83,6 @@ Kernel_Globals :: struct {
     // has said that TSC frequency is imprecise even if provided by CPUID, so will need to investigate that.
     tsc_deadline_support: bool;
 
-
     temporary_text_drawing_state: struct {
         cursor_x: int;
         cursor_y: int;
@@ -98,6 +97,10 @@ Kernel_Globals :: struct {
     serial_port_spinlock: Recursive_Spinlock;
 
     net: Network_Connection;
+
+    uacpi_state: Uacpi_State;
+
+    pci_ecam: [] Ecam_Entry;
 }
 
 kernel_globals: Kernel_Globals;
@@ -217,13 +220,6 @@ kernel_entry :: () #no_context {
         tasks.allocator = context.allocator;
         next_task_id = 1;
 
-        // uacpi_context_set_log_level(.DEBUG);
-
-        // if uacpi_initialize(0) != .OK bluescreen();
-
-        // fadt = New(acpi_fadt);
-        // if uacpi_table_fadt(*fadt) != .OK bluescreen();
-
         // Get the time at the most recent second. Maybe use an interrupt to detect a more accurate boot time.
         boot_calendar_time := rtc_get_calendar_time();
 
@@ -242,7 +238,10 @@ kernel_entry :: () #no_context {
 
         find_all_pci_devices();
 
-        for* pci_devices {
+        if uacpi_initialize(0) != .OK bluescreen();
+        // if uacpi_namespace_load() != .OK bluescreen();
+
+        if false for* pci_devices {
             if it.class_code == .MASS_STORAGE {
                 if it.subclass == {
                     // case 0x8; init_nvme_controller(it);
@@ -263,6 +262,12 @@ kernel_entry :: () #no_context {
 
             establish_network_connection(*kernel_globals.net);
         }
+
+        // uacpi_context_set_log_level(.DEBUG);
+        // if uacpi_namespace_initialize() != .OK bluescreen();
+
+        // fadt = New(acpi_fadt);
+        // if uacpi_table_fadt(*fadt) != .OK bluescreen();
 
         while true {}
 
@@ -308,7 +313,7 @@ simd_floating_point_exception :: (stack: *Interrupt_Stack()) #c_call {
     }
 } @InterruptRoutine
 
-make_kernel_context :: (c: *#Context) #no_context {
+make_kernel_context :: (c: *#Context, temporary_buffer_size := 0x2000) #no_context {
     // initializer_of(#Context)(c); 
 
     c.assertion_failed = (location: Source_Code_Location, message: string) -> bool {
@@ -383,7 +388,7 @@ make_kernel_context :: (c: *#Context) #no_context {
         return null;
     };
 
-    {
+    if temporary_buffer_size != 0 {
         ts_buffer_block := alloc_block(*kernel_globals.physical_block_allocator, 0x2000);
         c.temporary_storage = cast(*Temporary_Storage) get_4k_page();
 

@@ -6,19 +6,19 @@ Acpi_Mcfg :: struct {
     reserved: u64 #align 4;
 }
 
+Ecam_Entry :: struct {
+    base_address: u64;
+    segment_group: u16;
+    start_bus: u8;
+    end_bus: u8;
+    reserved: u32;
+}
+
 find_all_pci_devices :: () {
     mcfg := cast(*Acpi_Mcfg) find_acpi_table("MCFG");
     if !mcfg {
         log_error("ACPI MCFG table not found.");
         bluescreen();
-    }
-
-    Ecam_Entry :: struct {
-        base_address: u64;
-        segment_group: u16;
-        start_bus: u8;
-        end_bus: u8;
-        reserved: u32;
     }
 
     ecam_length_bytes := mcfg.length - size_of(Acpi_Mcfg);
@@ -51,6 +51,8 @@ find_all_pci_devices :: () {
             }
         }
     }
+
+    kernel_globals.pci_ecam = ecam;
 }
 
 pci_devices: [..] Pci_Device;

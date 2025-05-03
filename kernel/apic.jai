@@ -426,6 +426,18 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
 // Implement the uACPI kernel API callbacks
 //
 
+Uacpi_State :: struct {
+    first_irq_handler_gate_index: int;
+
+    irq_contexts: [8] struct {
+        handler: uacpi_interrupt_handler;
+        ctx: uacpi_handle;
+    };
+    irq_contexts_used: int;
+
+    spinlock_storage: Bucket_Array(Spinlock, 16, always_iterate_by_pointer=true);
+}
+
 #import "Uacpi";
 
 #program_export uacpi_do_atomic_cmpxchg64 :: () #c_call {
@@ -493,9 +505,31 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
     return .OK;
 }
 
-#program_export uacpi_kernel_pci_read :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_kernel_pci_read\"\n");
+#program_export
+uacpi_kernel_pci_read :: (bus_address: *uacpi_pci_address, offset: uacpi_size, byte_width: u8, value: *u64) -> uacpi_status #c_call {
+    using bus_address;
+
+    for kernel_globals.pci_ecam {
+        if it.segment_group != segment continue;
+
+        device_offset := cast(u64, bus * 256 + device * 8 + function);
+        address := it.base_address + device_offset * PCI_CONFIGURATION_SPACE_SIZE;
+
+        // Todo: we need to handle unaligned accesses here.
+        if address & 0b11 bluescreen();
+
+        if byte_width == {
+            case 1; value.* = xx address.(*u8).*;
+            case 2; value.* = xx address.(*u16).*;
+            case 4; value.* = xx address.(*u32).*;
+            case; bluescreen();
+        }
+
+        return .OK;
+    }
+
     bluescreen();
+    return .INVALID_ARGUMENT;
 }
 
 #program_export uacpi_kernel_pci_write :: () #c_call {
@@ -503,9 +537,13 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
     bluescreen();
 }
 
-#program_export uacpi_kernel_io_map :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_kernel_io_map\"\n");
-    bluescreen();
+#program_export
+uacpi_kernel_io_map :: (base: uacpi_io_addr, len: uacpi_size, out_handle: *uacpi_handle) -> uacpi_status #c_call {
+    using kernel_globals.uacpi_state;
+
+    out_handle.* = xx base;
+
+    return .OK;
 }
 
 #program_export uacpi_kernel_io_unmap :: () #c_call {
@@ -513,14 +551,34 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
     bluescreen();
 }
 
-#program_export uacpi_kernel_io_read :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_kernel_io_read\"\n");
+#program_export
+uacpi_kernel_io_read :: () -> uacpi_status #c_call {
     bluescreen();
+    return .OK;
 }
 
-#program_export uacpi_kernel_io_write :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_kernel_io_write\"\n");
-    bluescreen();
+#program_export
+uacpi_kernel_io_write :: (handle: uacpi_handle, offset: uacpi_size, byte_width: uacpi_u8, value: u64) -> uacpi_status #c_call {
+    using kernel_globals.uacpi_state;
+
+    io_region_index := cast(*u16) handle;
+    base := io_region_index.*;
+
+    address := base + xx offset;
+
+    #asm {
+        address === d;
+        value   === a;
+    }
+
+    if byte_width == {
+        case 1; #asm { out.8  address, value; }
+        case 2; #asm { out.16 address, value; }
+        case 4; #asm { out.32 address, value; }
+        case; bluescreen();
+    }
+
+    return .OK;
 }
 
 #program_export uacpi_kernel_map :: (addr: uacpi_phys_addr, len: uacpi_size) -> *void #c_call {
@@ -569,9 +627,10 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
     write_string(message);
 }
 
-#program_export uacpi_kernel_get_nanoseconds_since_boot :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_kernel_get_nanoseconds_since_boot\"\n");
-    bluescreen();
+#program_export uacpi_kernel_get_nanoseconds_since_boot :: () -> u64 #c_call {
+    push_context {
+        return cast(u64) to_nanoseconds(get_kernel_timestamp());
+    }
 }
 
 #program_export uacpi_kernel_stall :: () #c_call {
@@ -584,9 +643,6 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
     bluescreen();
 }
 
-
-
-// These uACPI multithreading callbacks should be implemented once we have multithreading primitives in the kernel.
 
 next_mutex_handle: uacpi_handle = xx 1;
 next_event_handle: uacpi_handle = xx 1;
@@ -640,9 +696,53 @@ next_event_handle: uacpi_handle = xx 1;
     bluescreen();
 }
 
-#program_export uacpi_kernel_install_interrupt_handler :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_kernel_install_interrupt_handler\"\n");
-    bluescreen();
+UACPI_IRQ_HANDLER :: #string END
+#program_export handle_uacpi_irq_%1 :: (stack: *void) #c_call {
+    using kernel_globals.uacpi_state;
+    irq := *irq_contexts[%1];
+    irq.handler(irq.ctx);
+} @InterruptRoutine
+END;
+
+#insert #run,host -> string {
+    builder: String_Builder;
+    for 0..7 {
+        print(*builder, UACPI_IRQ_HANDLER, it);
+    }
+    return builder_to_string(*builder);
+};
+
+init_uacpi_interrupt_handlers :: () {
+    using kernel_globals.uacpi_state;
+
+    first_irq_handler_gate_index = kernel_globals.next_free_interrupt_gate;
+    kernel_globals.next_free_interrupt_gate += irq_contexts.count;
+}
+
+#program_export
+uacpi_kernel_install_interrupt_handler :: (irq: u32, handler: uacpi_interrupt_handler, ctx: uacpi_handle, out_irq_handle: *uacpi_handle) -> uacpi_status #c_call {
+    using kernel_globals.uacpi_state;
+
+    push_context {
+        make_kernel_context(*context);
+
+        if irq_contexts_used >= irq_contexts.count {
+            log_error("Must allocate more IRQ handlers for uACPI.");
+            bluescreen();
+        }
+
+        new_irq := *irq_contexts[irq_contexts_used];
+
+        new_irq.handler = handler;
+        new_irq.ctx     = ctx;
+
+        gate := first_irq_handler_gate_index + irq_contexts_used;
+        ioapic_add_interrupt_redirection_table_entry(irq, gate);
+
+        irq_contexts_used += 1;
+
+        return .OK;
+    }
 }
 
 #program_export uacpi_kernel_uninstall_interrupt_handler :: () #c_call {
@@ -650,24 +750,65 @@ next_event_handle: uacpi_handle = xx 1;
     bluescreen();
 }
 
-#program_export uacpi_kernel_create_spinlock :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_kernel_create_spinlock\"\n");
-    bluescreen();
+#program_export
+uacpi_kernel_create_spinlock :: () -> uacpi_handle #c_call {
+    using kernel_globals.uacpi_state;
+    push_context {
+        make_kernel_context(*context);
+        _, locator := bucket_array_add(*spinlock_storage, 0);
+
+        // ucapi_handle is *void, Bucket_Locator is two 32-bit integers. We can store the locator using the pointer value.
+        handle: uacpi_handle;
+        memcpy(*handle, *locator, 8);
+
+        return handle;
+    }
 }
 
-#program_export uacpi_kernel_free_spinlock :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_kernel_free_spinlock\"\n");
-    bluescreen();
+#program_export
+uacpi_kernel_free_spinlock :: (handle: uacpi_handle) #c_call {
+    using kernel_globals.uacpi_state;
+
+    push_context {
+        make_kernel_context(*context);
+
+        locator: Bucket_Locator;
+        memcpy(*locator, *handle, 8);
+
+        bucket_array_remove(*spinlock_storage, locator);
+    }
 }
 
-#program_export uacpi_kernel_lock_spinlock :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_kernel_lock_spinlock\"\n");
-    bluescreen();
+#program_export
+uacpi_kernel_lock_spinlock :: (handle: uacpi_handle) -> uacpi_cpu_flags #c_call {
+    using kernel_globals.uacpi_state;
+
+    push_context {
+        make_kernel_context(*context);
+
+        locator: Bucket_Locator;
+        memcpy(*locator, *handle, 8);
+
+        lock := bucket_array_find(*spinlock_storage, locator);
+        acquire(*lock);
+
+        return 0; // Todo, think about interrupts. This may currently cause deadlocks.
+    }
 }
 
-#program_export uacpi_kernel_unlock_spinlock :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_kernel_unlock_spinlock\"\n");
-    bluescreen();
+#program_export
+uacpi_kernel_unlock_spinlock :: (handle: uacpi_handle, flags: uacpi_cpu_flags) #c_call {
+    using kernel_globals.uacpi_state;
+
+    push_context {
+        make_kernel_context(*context);
+
+        locator: Bucket_Locator;
+        memcpy(*locator, *handle, 8);
+
+        lock := bucket_array_find(*spinlock_storage, locator);
+        release(*lock);
+    }
 }
 
 #program_export uacpi_kernel_schedule_work :: () #c_call {
