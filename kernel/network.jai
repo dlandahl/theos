@@ -164,16 +164,16 @@ byte_swap_tcp_header :: (tcp: *Tcp_Header) {
     tcp.urgent_pointer   = bs16(tcp.urgent_pointer);
 }
 
-Tcp_Connection :: () {
+Tcp_Connection :: struct {
     port: u16;
 
     remote_port: u16;
-    remote_ip: u16;
+    remote_ip: u32;
 
     handshake_state: enum {
-        not_started;
-        syn_sent;
-        ack_sent;
+        NOT_STARTED;
+        SYN_SENT;
+        ACK_SENT;
     }
 
     sequence_number: u32;
@@ -389,10 +389,19 @@ Network_Connection :: struct {
     };
 
     spinlock: Spinlock;
+
+    FIRST_DYNAMIC_PORT :: 0xc000;
+    tcp_connections: [..] Tcp_Connection;
 }
 
-establish_network_connection :: (using net: *Network_Connection) {
+network_thread :: () #c_call {
+    push_context,defer_pop;
+
+    core := get_current_core();
+    release(*core.scheduler.spinlock);
+
     Log_Category("Net");
+    using net := *kernel_globals.net;
 
     packet, xid := make_dhcp_discover(net);
 

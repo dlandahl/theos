@@ -569,9 +569,7 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
     device.registers[1] &= cast(u32) ~Pci_Command.INTERRUPT_DISABLE;
 
     parse_pci_capability_list(device);
-    enable_msi_or_msi_x(device, int__i8254x_interrupt);
-
-    log("line: %, pin: %", device.interrupt_line, device.interrupt_pin);
+    enabled := enable_msi_or_msi_x(device, int__i8254x_interrupt);
 
     nic: I8254x_Network_Interface_Card;
 

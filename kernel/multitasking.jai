@@ -70,51 +70,27 @@ core_begin_multitasking :: () {
     scheduler.current_task = allocate_task_info_struct();
     scheduler.current_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
 
-    idle :: () #c_call {
-        push_context,defer_pop;
-
-        core := get_current_core();
-        release(*core.scheduler.spinlock);
-
-        while true {
-            #asm { hlt; }
-            yield();
-        }
-    }
-
-    params: Create_Task_Parameters;
-    params.user_stack_size = 0;
-    params.kernel_stack_size = 0x2000;
-    params.entry_point = idle;
-
-    scheduler.idle_task = create_task(params);
+    scheduler.idle_task = scheduler.current_task;
 
     {
         // Enable Local APIC timer interrupts, or TSC deadline if available
 
-        register_interrupt_gate(int__spurious_interrupt, 0xff);
-        spurious := read_apic_register(.SPURIOUS_INTERRUPT);
-        write_apic_register(.SPURIOUS_INTERRUPT, spurious | 0x1ff); // Todo magic number
-
         lapic_timer: Apic_Lvt_Timer;
 
         if kernel_globals.tsc_deadline_support {
-            bitfield_set(*lapic_timer, .timer_mode, APIC_TIMER_MODE_TSC_DEADLINE);
-        } else {
-            write_apic_register(.TIC__TIMER_INITIAL, 0x0400_0000);
-            bitfield_set(*lapic_timer, .timer_mode, APIC_TIMER_MODE_PERIODIC);
-        }
+            set(*lapic_timer, .timer_mode, APIC_TIMER_MODE_TSC_DEADLINE);
 
-        gate := cast(u8) kernel_globals.local_apic_timer_interrupt_gate;
-        bitfield_set(*lapic_timer, .gate_index, gate);
-        bitfield_set(*lapic_timer, .mask,       0);
-
-        write_apic_register(.LVT__TIMER, << cast(*u32) *lapic_timer);
-
-        if kernel_globals.tsc_deadline_support {
             delay := kernel_globals.tsc_frequency / 10;
             write_msr(.TSC_DEADLINE, rdtsc() + delay);
+        } else {
+            write_apic_register(.TIC__TIMER_INITIAL, 0x4000_0000);
+            set(*lapic_timer, .timer_mode, APIC_TIMER_MODE_PERIODIC);
         }
+
+        set(*lapic_timer, .gate_index, kernel_globals.local_apic_timer_interrupt_gate);
+        set(*lapic_timer, .mask,       0);
+
+        write_apic_register(.LVT__TIMER, << cast(*u32) *lapic_timer);
     }
 }
 
@@ -126,32 +102,26 @@ put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
     queue_push(*scheduler.waiting_to_run, task);
 }
 
-Create_Task_Parameters :: struct {
-    entry_point: () #c_call = task_do_work;
-
-    kernel_stack_size: int = 0x8000;
-    user_stack_size:   int = 0x8000;
-
-    mxcsr: Mxcsr = .MASK_ALL;
-}
-
-create_task :: (params: Create_Task_Parameters = .{}) -> *Task_Info {
+create_task :: (entry_point: () #c_call, kernel_stack_size := 0x4000, user_stack_size := 0x4000, mxcsr := Mxcsr.MASK_ALL) -> *Task_Info {
     new_task := allocate_task_info_struct();
     new_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
 
-    new_task.kernel_stack = alloc(params.kernel_stack_size) + params.kernel_stack_size;
-    new_task.user_stack   = alloc(params.user_stack_size)   + params.user_stack_size;
+    new_task.kernel_stack = alloc(kernel_stack_size) + kernel_stack_size;
+
+    if user_stack_size != 0 {
+        new_task.user_stack = alloc(user_stack_size) + user_stack_size;
+    }
 
     stack := cast(*Interrupt_Stack) new_task.kernel_stack - 1;
     stack.flags = .IF__interrupt;
     stack.cs = .RING0_CODE;
     stack.ss = .RING0_DATA;
-    stack.ip = cast(*void) params.entry_point;
+    stack.ip = cast(*void) entry_point;
     stack.sp = new_task.kernel_stack;
 
     new_task.rsp = cast(*void) stack;
 
-    new_task.xsave.mxcsr = params.mxcsr;
+    new_task.xsave.mxcsr = mxcsr;
 
     return new_task;
 }
@@ -230,6 +200,8 @@ yield :: () {
     wake_sleeping_tasks(core, time_now);
 
     if queue_is_empty(scheduler.waiting_to_run) {
+        if !current.sleeping return;
+
         next = scheduler.idle_task;
     } else {
         next = queue_pop(*scheduler.waiting_to_run);

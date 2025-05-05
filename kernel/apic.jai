@@ -274,22 +274,13 @@ ap_entry_point :: () #c_call {
     push_context {
         init_processor_core();
 
-        core := get_current_core();
-
         core_begin_multitasking();
-
-        for 1..4 {
-            new_task := create_task();
-            put_task_on_core(new_task, core);
-        }
 
         #asm { sti; }
 
         while true {
-            sleep(2000, .milliseconds);
-            print("Whatever.\n");
-
-            reset_temporary_storage();
+            yield();
+            #asm { hlt; }
         }
     }
 }
@@ -417,6 +408,96 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
     }
 } @InterruptRoutineWithErrorCode
 
+
+
+initialize_uacpi :: () {
+    init_uacpi_interrupt_handlers();
+
+    if uacpi_initialize(0) != .OK bluescreen();
+    if uacpi_namespace_load() != .OK bluescreen();
+    if uacpi_namespace_initialize() != .OK bluescreen();
+
+    uacpi_set_interrupt_model(.IOAPIC);
+
+    uacpi_install_fixed_event_handler(.POWER_BUTTON, (ctx: uacpi_handle) -> uacpi_interrupt_ret #c_call {
+        write_string("Turning off the PC...\n");
+
+        uacpi_prepare_for_sleep_state(.S5);
+        uacpi_enter_sleep_state(.S5);
+
+        return UACPI_INTERRUPT_HANDLED;
+    }, null);
+
+    if uacpi_finalize_gpe_initialization() != .OK bluescreen();
+}
+
+get_pci_irq_routing :: () {
+    namespace_root := uacpi_namespace_root();
+
+    PCI_BRIDGE_PNP_ID :: "PNP0A03";
+
+    uacpi_find_devices(PCI_BRIDGE_PNP_ID, (user: *void, node: *uacpi_namespace_node, depth: u32) -> uacpi_iteration_decision #c_call {
+        node_info: *uacpi_namespace_node_info;
+        if uacpi_get_namespace_node_info(node, *node_info) != .OK bluescreen();
+
+        routing: *uacpi_pci_routing_table;
+        uacpi_get_pci_routing_table(node, *routing);
+
+        push_context {
+            Push_Print_Style().default_format_int.base=16;
+
+            entries := (routing + 1).(*uacpi_pci_routing_table_entry);
+            for 0..routing.num_entries-1 {
+
+                address := entries[it].address;
+                bus    := address >> 24;
+                device := address >> 16;
+
+                device_offset := cast(u64, bus * 256 + device * 8);
+                device_offset *= PCI_CONFIGURATION_SPACE_SIZE;
+                device_offset += kernel_globals.pci_ecam[0].base_address;
+
+                config := cast(*Pci_Configuration_Space, device_offset + DIRECT_MAPPING_BASE);
+
+                log("Class ID: %", config.class_code);
+                log("Pin:      %", config.interrupt_pin);
+
+
+                res: *uacpi_resources;
+                uacpi_get_current_resources(entries[it].source, *res);
+
+                uacpi_for_each_resource(res, (user: *void, resource: *uacpi_resource) -> uacpi_iteration_decision #c_call {
+                    push_context {
+                        type := resource.type.(uacpi_resource_type);
+                        if type == .END_TAG return .BREAK;
+
+                        assert(type == .EXTENDED_IRQ);
+                        irq := (*resource.extended_irq + 1).(*u32).*;
+                        log("Irq: %", irq);
+                    }
+                    return .CONTINUE;
+                }, null);
+
+                #if false {
+                    info: *uacpi_namespace_node_info;
+                    log("%", uacpi_get_namespace_node_info(entries[it].source, *info));
+                    log("%", info.*);
+
+                    name: *uacpi_id_string;
+                    log("%", uacpi_eval_hid(entries[it].source, *name));
+
+                    s: string;
+                    s.data = name.value;
+                    s.count = name.size.(s64)-1;
+                    log("Source name: %", s);
+                }
+                // uacpi_free_id_string(name);
+            }
+        }
+
+        return .CONTINUE;
+    }, null);
+}
 
 
 //

@@ -154,7 +154,7 @@ kernel_entry :: () #no_context {
     large_page_allocator.lru_most  = LRU_TAIL;
 
     large_page := allocate_large_page();
-    init_block_allocator(*physical_block_allocator, large_page, 0x20_0000);
+    init_block_allocator(*physical_block_allocator, large_page, 0x20_0000, 0x10);
 
     processor_cores.data = space_for_processor_cores.data;
 
@@ -226,15 +226,17 @@ kernel_entry :: () #no_context {
 
         draw_text("Hello, Sailor!\nWelcome to the operating system.\n");
 
+        core_begin_multitasking();
+
         time := get_monotonic_system_time();
         calendar := native_apollo_to_calendar(time);
         print("Time: %\n", calendar_to_string(calendar));
 
-        core_begin_multitasking();
+        startup_application_processors();
 
         find_all_pci_devices();
 
-        if false for* pci_devices {
+        for* pci_devices {
             if it.class_code == .MASS_STORAGE {
                 if it.subclass == {
                     // case 0x8; init_nvme_controller(it);
@@ -253,99 +255,18 @@ kernel_entry :: () #no_context {
             // It seems like the VirtualBox network bridge is not ready to transmit packets until a few seconds after we initalize the emulated NIC.
             sleep(5, .seconds);
 
-            establish_network_connection(*kernel_globals.net);
-        }
-
-        init_uacpi_interrupt_handlers();
-
-        if uacpi_initialize(0) != .OK bluescreen();
-        if uacpi_namespace_load() != .OK bluescreen();
-        if uacpi_namespace_initialize() != .OK bluescreen();
-
-        log("%", uacpi_set_interrupt_model(.IOAPIC));
-
-        uacpi_install_fixed_event_handler(.POWER_BUTTON, (ctx: uacpi_handle) -> uacpi_interrupt_ret #c_call {
-            write_string("Shutting down the PC...\n");
-            write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
-
-            uacpi_prepare_for_sleep_state(.S5);
-            uacpi_enter_sleep_state(.S5);
-
-            return UACPI_INTERRUPT_HANDLED;
-        }, null);
-
-        if uacpi_finalize_gpe_initialization() != .OK bluescreen();
-
-        namespace_root := uacpi_namespace_root();
-
-        PCI_BRIDGE_PNP_ID :: "PNP0A03";
-
-        while true {}
-
-        uacpi_find_devices(PCI_BRIDGE_PNP_ID, (user: *void, node: *uacpi_namespace_node, depth: u32) -> uacpi_iteration_decision #c_call {
-            node_info: *uacpi_namespace_node_info;
-            if uacpi_get_namespace_node_info(node, *node_info) != .OK bluescreen();
-
-            routing: *uacpi_pci_routing_table;
-            uacpi_get_pci_routing_table(node, *routing);
-
-            push_context {
-                Push_Print_Style().default_format_int.base=16;
-
-                entries := (routing + 1).(*uacpi_pci_routing_table_entry);
-                for 0..routing.num_entries-1 {
-
-                    info: *uacpi_namespace_node_info;
-                    log("%", uacpi_get_namespace_node_info(entries[it].source, *info));
-                    log("%", info.*);
-
-                    name: *uacpi_id_string;
-                    log("%", uacpi_eval_hid(entries[it].source, *name));
-
-                    s: string;
-                    s.data = name.value;
-                    s.count = name.size.(s64)-1;
-                    log("Source name: %", s);
-
-                    // uacpi_free_id_string(name);
-                }
-            }
-
-            return .CONTINUE;
-        }, null);
-
-        // uacpi_context_set_log_level(.DEBUG);
-
-        // fadt = New(acpi_fadt);
-        // if uacpi_table_fadt(*fadt) != .OK bluescreen();
-
-        while true {}
-
-        context.print_style.default_format_int.base = 10;
-
-        startup_application_processors();
-
-        core := get_current_core();
-        for 1..4 {
-            new_task := create_task();
-            put_task_on_core(new_task, core);
+            task := create_task(network_thread);
+            put_task_on_core(task, *processor_cores[1]);
         }
 
         #asm { sti; }
 
         while true {
-            time := get_monotonic_system_time();
-            calendar := native_apollo_to_calendar(time);
-            print("Time: %\n", calendar_to_string(calendar));
-
-            print("This is thread % running on core %\n", core.scheduler.current_task.id, core.id);
-            sleep_until(time + milliseconds_to_apollo(1000));
-
-            reset_temporary_storage();
+            yield();
+            #asm { hlt; }
         }
     }
 }
-
 
 #program_export
 simd_floating_point_exception :: (stack: *Interrupt_Stack()) #c_call {
@@ -435,7 +356,7 @@ init_default_context_values :: () #no_context {
     };
 }
 
-init_processor_core :: () #no_context {
+init_processor_core :: () {
     core: *X64_Core;
 
     enable_cpu_features();
@@ -534,6 +455,14 @@ init_processor_core :: () #no_context {
         efer := read_msr(.EFER__extended_features);
         efer |= EFER_SCE__syscall_enable;
         write_msr(.EFER__extended_features, efer);
+    }
+
+    {
+        // Spurious interrupts
+
+        register_interrupt_gate(int__spurious_interrupt, 0xff);
+        spurious := read_apic_register(.SPURIOUS_INTERRUPT);
+        write_apic_register(.SPURIOUS_INTERRUPT, spurious | 0x1ff); // Todo magic number
     }
 }
 
