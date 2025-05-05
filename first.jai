@@ -45,27 +45,22 @@ main :: () {
         return;
     }
 
-    do_bootloader, do_kernel := true, true;
+    kernel_only := false;
     args := get_build_options().compile_time_command_line;
 
-    if args {
-        do_bootloader, do_kernel = false, false;
-
-        for args if it == {
-            case "kernel"; do_kernel = true;
-            case "boot"; do_bootloader = true;
-            case; log_error("Command line argument not understood: %", it);
-        }
+    for args if it == {
+        case "kernel_only"; kernel_only = true;
+        case; log_error("Command line argument not understood: %", it);
     }
 
     make_directory_if_it_does_not_exist(".build/");
 
-    if do_bootloader && !compile_bootloader() {
+    if !kernel_only && !compile_bootloader() {
         log_error("Failed to compile the bootloader.\n");
         exit(1);
     }
 
-    if do_kernel && !compile_kernel() {
+    if !compile_kernel(kernel_only) {
         log_error("Failed to compile the kernel.\n");
         exit(1);
     }
@@ -144,18 +139,20 @@ compile_bootloader :: () -> success: bool {
     return success;
 }
 
-compile_kernel :: () -> success: bool {
-    log("Assembling AP Startup Code");
+compile_kernel :: (kernel_only: bool) -> success: bool {
+    if !kernel_only {
+        log("Assembling AP Startup Code");
 
-    write_entire_file(".build/ap_startup.asm", AP_STARTUP_CODE);
-    command := break_command_into_strings(
-        "nasm .build/ap_startup.asm -o .build/ap_startup.bin -f bin"
-    );
+        write_entire_file(".build/ap_startup.asm", AP_STARTUP_CODE);
+        command := break_command_into_strings(
+            "nasm .build/ap_startup.asm -o .build/ap_startup.bin -f bin"
+        );
 
-    result := run_command(.. command);
-    if result.exit_code != 0 {
-        log_error("Failed to assemble AP startup code.");
-        return false;
+        result := run_command(.. command);
+        if result.exit_code != 0 {
+            log_error("Failed to assemble AP startup code.");
+            return false;
+        }
     }
 
     log("Compiling kernel");
@@ -229,18 +226,19 @@ compile_kernel :: () -> success: bool {
             }
 
             if phase.phase == .ALL_TARGET_CODE_BUILT {
+                if !kernel_only {
+                    log("Assembling interrupt routines");
 
-                log("Assembling interrupt routines");
+                    write_entire_file(".build/interrupts.asm", builder_to_string(*interrupt_assembly));
+                    command := break_command_into_strings("nasm .build/interrupts.asm -o .build/interrupts.so -f elf64");
 
-                write_entire_file(".build/interrupts.asm", builder_to_string(*interrupt_assembly));
-                command := break_command_into_strings("nasm .build/interrupts.asm -o .build/interrupts.so -f elf64");
-
-                // Generate assembly wrappers for interrupts handlers using metaprogramming
-                result := run_command(.. command);
-                if result.exit_code != 0 {
-                    log_error("Failed to assemble interrupt routines.");
-                    compiler_set_workspace_status(.FAILED, workspace);
-                    success = false;
+                    // Generate assembly wrappers for interrupts handlers using metaprogramming
+                    result := run_command(.. command);
+                    if result.exit_code != 0 {
+                        log_error("Failed to assemble interrupt routines.");
+                        compiler_set_workspace_status(.FAILED, workspace);
+                        success = false;
+                    }
                 }
             }
         }

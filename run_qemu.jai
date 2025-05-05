@@ -40,7 +40,7 @@
     // Handy page table calculator
     x := cast(u64) 256 * 1024 * 1024;
 
-    mask: u64 = 0b111111111;
+    mask: u64 = 0x1ff;
 
     #import "Basic";
     pml4_offset := (x >> 39) & mask;

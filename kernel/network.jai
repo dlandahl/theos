@@ -491,7 +491,7 @@ establish_network_connection :: (using net: *Network_Connection) {
             }
         }
 
-        busy_loop(50, .milliseconds);
+        sleep(50, .milliseconds);
     }
 }
 
@@ -765,7 +765,6 @@ maybe_handle_echo :: (net: *Network_Connection, eth: *Ethernet_Header) -> handle
         add_to_packet(*packet, pong);
 
         i8254x_transmit_packet(*net.adapter, packet);
-        log("Pong sent");
 
         free_4k_page(cast(u64, packet.data - DIRECT_MAPPING_BASE));
 

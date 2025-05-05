@@ -40,7 +40,6 @@ space_for_processor_cores: [1024] X64_Core;
 // For the same reason this struct shouldn't have default values.
 #assert initializer_of(X64_Core) == null;
 
-
 Kernel_Globals :: struct {
     using boot_data: *Boot_Data;
 
@@ -63,8 +62,6 @@ Kernel_Globals :: struct {
     local_apic_timer_interrupt_gate: int;
 
     high_precision_timer: HPET;
-
-    main_thread_context: #Context;
 
     tasks: Bucket_Array(Task_Info, 256, always_iterate_by_pointer=true);
     next_task_id: int;
@@ -91,6 +88,8 @@ Kernel_Globals :: struct {
 
         // Recursive, so that errors generated during text rendering can be displayed on the screen.
         spinlock: Recursive_Spinlock;
+
+        font_loaded: bool;
     }
 
     // Recursive, so that procedures that generate multiple accesses to the serial port can be grouped together, and not be interleaved with accesses by other cores.
@@ -112,6 +111,8 @@ kernel_entry :: () #no_context {
     using kernel_globals;
 
     write_string_callback = kernel_write_string;
+
+    init_default_context_values();
 
     // We should avoid using the UEFI identity map because we'll need to get rid of it once we run user processes in low memory.
     boot_data = cast(*Boot_Data, Boot_Data.BASE_ADDRESS + DIRECT_MAPPING_BASE);
@@ -152,17 +153,13 @@ kernel_entry :: () #no_context {
     large_page_allocator.lru_least = LRU_TAIL;
     large_page_allocator.lru_most  = LRU_TAIL;
 
-    big_page := allocate_large_page();
-    init_block_allocator(*physical_block_allocator, big_page, 0x20_0000);
+    large_page := allocate_large_page();
+    init_block_allocator(*physical_block_allocator, large_page, 0x20_0000);
 
     processor_cores.data = space_for_processor_cores.data;
 
-    make_kernel_context(*main_thread_context);
-
-    push_context main_thread_context {
-
+    push_context {
         rtc_init();
-
 
         using framebuffer;
 
@@ -176,12 +173,11 @@ kernel_entry :: () #no_context {
             }
         }
 
-
         // Put a virtual memory heap after the direct mapping
         GB :: 0x4000_0000;
         direct_mapping_size := boot_data.page_tables.direct_pd.count * GB;
 
-        heap_base := DIRECT_MAPPING_BASE + direct_mapping_size;
+        heap_base := DIRECT_MAPPING_BASE + direct_mapping_size + 4096 * 100;
         heap_size := 64 * GB;
 
         // Keep virtual allocations page aligned, since virtual memory always needs to be mapped anyway.
@@ -205,8 +201,8 @@ kernel_entry :: () #no_context {
             root_acpi_table = xx (rsdp.rsdt_address + DIRECT_MAPPING_BASE);
         }
 
-        kernel_globals.temporary_text_drawing_state.font = parse_pnm(font_file);
-
+        temporary_text_drawing_state.font = parse_pnm(font_file);
+        temporary_text_drawing_state.font_loaded = true;
 
         initialize_apic();
 
@@ -238,9 +234,6 @@ kernel_entry :: () #no_context {
 
         find_all_pci_devices();
 
-        if uacpi_initialize(0) != .OK bluescreen();
-        // if uacpi_namespace_load() != .OK bluescreen();
-
         if false for* pci_devices {
             if it.class_code == .MASS_STORAGE {
                 if it.subclass == {
@@ -258,13 +251,64 @@ kernel_entry :: () #no_context {
 
         if network_adapter_initialized {
             // It seems like the VirtualBox network bridge is not ready to transmit packets until a few seconds after we initalize the emulated NIC.
-            sleep_for(seconds_to_apollo(5));
+            sleep(5, .seconds);
 
             establish_network_connection(*kernel_globals.net);
         }
 
+        if uacpi_initialize(0) != .OK bluescreen();
+        if uacpi_namespace_load() != .OK bluescreen();
+        if uacpi_namespace_initialize() != .OK bluescreen();
+
+        log("%", uacpi_set_interrupt_model(.IOAPIC));
+
+        uacpi_install_fixed_event_handler(.POWER_BUTTON, (ctx: uacpi_handle) -> uacpi_interrupt_ret #c_call {
+            write_string("Shutting down the PC...\n");
+            return UACPI_INTERRUPT_HANDLED;
+        }, null);
+
+        if uacpi_finalize_gpe_initialization() != .OK bluescreen();
+
+        // uacpi_prepare_for_sleep_state(.S5);
+        // uacpi_enter_sleep_state(.S5);
+
+        namespace_root := uacpi_namespace_root();
+
+        PCI_BRIDGE_PNP_ID :: "PNP0A03";
+
+        uacpi_find_devices(PCI_BRIDGE_PNP_ID, (user: *void, node: *uacpi_namespace_node, depth: u32) -> uacpi_iteration_decision #c_call {
+            node_info: *uacpi_namespace_node_info;
+            if uacpi_get_namespace_node_info(node, *node_info) != .OK bluescreen();
+
+            routing: *uacpi_pci_routing_table;
+            uacpi_get_pci_routing_table(node, *routing);
+
+            push_context {
+                Push_Print_Style().default_format_int.base=16;
+
+                entries := (routing + 1).(*uacpi_pci_routing_table_entry);
+                for 0..routing.num_entries-1 {
+
+                    info: *uacpi_namespace_node_info;
+                    log("%", uacpi_get_namespace_node_info(entries[it].source, *info));
+                    log("%", info.*);
+
+                    name: *uacpi_id_string;
+                    log("%", uacpi_eval_hid(entries[it].source, *name));
+
+                    s: string;
+                    s.data = name.value;
+                    s.count = name.size.(s64)-1;
+                    log("Source name: %", s);
+
+                    // uacpi_free_id_string(name);
+                }
+            }
+
+            return .CONTINUE;
+        }, null);
+
         // uacpi_context_set_log_level(.DEBUG);
-        // if uacpi_namespace_initialize() != .OK bluescreen();
 
         // fadt = New(acpi_fadt);
         // if uacpi_table_fadt(*fadt) != .OK bluescreen();
@@ -313,10 +357,9 @@ simd_floating_point_exception :: (stack: *Interrupt_Stack()) #c_call {
     }
 } @InterruptRoutine
 
-make_kernel_context :: (c: *#Context, temporary_buffer_size := 0x2000) #no_context {
-    // initializer_of(#Context)(c); 
+init_default_context_values :: () #no_context {
 
-    c.assertion_failed = (location: Source_Code_Location, message: string) -> bool {
+    kernel_assertion_failed = (location: Source_Code_Location, message: string) -> bool {
         acquire(*kernel_globals.serial_port_spinlock);
 
         write_string("Assertion failure");
@@ -332,7 +375,7 @@ make_kernel_context :: (c: *#Context, temporary_buffer_size := 0x2000) #no_conte
         return true;
     };
 
-    c.logger = (message: string, data: *void, info: Log_Info) {
+    kernel_default_logger = (message: string, data: *void, info: Log_Info) {
         Scoped_Acquire(*kernel_globals.serial_port_spinlock);
 
         if context.log_category {
@@ -348,10 +391,7 @@ make_kernel_context :: (c: *#Context, temporary_buffer_size := 0x2000) #no_conte
         }
     }
 
-    c.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = 2;
-    c.print_style.default_format_struct.use_newlines_if_long_form = true;
-
-    c.allocator.proc = (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
+    kernel_default_allocator_proc = (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
         if mode == .ALLOCATE || mode == .RESIZE {
             if size == 0 {
                 return null;
@@ -387,17 +427,6 @@ make_kernel_context :: (c: *#Context, temporary_buffer_size := 0x2000) #no_conte
 
         return null;
     };
-
-    if temporary_buffer_size != 0 {
-        ts_buffer_block := alloc_block(*kernel_globals.physical_block_allocator, 0x2000);
-        c.temporary_storage = cast(*Temporary_Storage) get_4k_page();
-
-        ts_buffer := cast(*void) ts_buffer_block + DIRECT_MAPPING_BASE;
-
-        set_initial_data(c.temporary_storage, 0x2000, ts_buffer);
-
-        c.temporary_storage.overflow_allocator = c.allocator;
-    }
 }
 
 init_processor_core :: () #no_context {
@@ -532,7 +561,7 @@ Large_Page_Allocator :: struct {
     spinlock: Recursive_Spinlock;
 }
 
-allocate_large_page :: () -> u64 #no_context {
+allocate_large_page :: (loc := #caller_location) -> u64 #no_context {
 
     using kernel_globals.large_page_allocator;
     Scoped_Acquire(*spinlock);
@@ -557,6 +586,11 @@ allocate_large_page :: () -> u64 #no_context {
             continue;
         }
 
+        if desc.state == .ALLOCATED {
+            // This can be removed once `allocate_consecutive_large_pages` is replaced.
+            continue;
+        }
+
         desc.state = .ALLOCATED;
         return cast(u64) address;
     }
@@ -573,6 +607,43 @@ allocate_large_page :: () -> u64 #no_context {
     }
 
     // There's no free memory
+    bluescreen(loc);
+    return 0;
+}
+
+allocate_consecutive_large_pages :: (wanted: int) -> u64 #no_context {
+    // Hack. Remove this once we have a system that can allocate virtual memory and map it as needed, removing the need for consecutive physical pages.
+
+    using kernel_globals.large_page_allocator;
+    Scoped_Acquire(*spinlock);
+
+    search_index := max_large_page_used.(int);
+    consecutive_pages_found: int;
+
+    // Should put the large pages array into `large_page_allocator`, but it would need to be accessible from the bootloader...
+    while search_index < kernel_globals.large_pages.count {
+
+        desc := *kernel_globals.large_pages[search_index];
+        search_index += 1;
+
+        if desc.state == .RESERVED {
+            consecutive_pages_found = 0;
+            continue;
+        }
+
+        consecutive_pages_found += 1;
+        if consecutive_pages_found != wanted {
+            continue;
+        }
+
+        for search_index-wanted..search_index-1 {
+            desc := *kernel_globals.large_pages[it];
+            desc.state = .ALLOCATED;
+        }
+
+        return cast(u64, (search_index-wanted) * 0x20_0000);
+    }
+
     bluescreen();
     return 0;
 }
@@ -763,7 +834,10 @@ get_or_create_page_table :: (table: *u64, entry: u64) -> *u64 {
 
     table[entry] = address | xx PRESENT | READ_WRITE;
 
-    return cast(*u64, address + DIRECT_MAPPING_BASE);
+    virtual_address := cast(*u64, address + DIRECT_MAPPING_BASE);
+    memset(virtual_address, 0, 4096);
+
+    return virtual_address;
 }
 
 map_page :: (virtual_address: *void, physical_address: u64, flags := Page_Flags.PRESENT | .READ_WRITE, loc := #caller_location) {
@@ -787,6 +861,7 @@ map_page :: (virtual_address: u64, physical_address: u64, flags := Page_Flags.PR
     pt   := get_or_create_page_table(pd,   pd_offset);
 
     if pt[pt_offset] & xx PRESENT {
+        log("%", hex(pt.(u64) - DIRECT_MAPPING_BASE));
         bluescreen(loc);
     }
 
@@ -1372,6 +1447,8 @@ font_file :: #run,host -> [] u8 {
 
 draw_text :: (text: string) #no_context {
     using kernel_globals.temporary_text_drawing_state;
+
+    if !font_loaded return;
 
     Scoped_Acquire(*spinlock);
 

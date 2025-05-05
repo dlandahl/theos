@@ -272,8 +272,6 @@ ap_entry_point :: () #c_call {
     release(*ap_startup_spinlock);
 
     push_context {
-        make_kernel_context(*context);
-
         init_processor_core();
 
         core := get_current_core();
@@ -288,8 +286,7 @@ ap_entry_point :: () #c_call {
         #asm { sti; }
 
         while true {
-            time := get_monotonic_system_time();
-            sleep_until(time + milliseconds_to_apollo(2000));
+            sleep(2000, .milliseconds);
             print("Whatever.\n");
 
             reset_temporary_storage();
@@ -518,6 +515,9 @@ uacpi_kernel_pci_read :: (bus_address: *uacpi_pci_address, offset: uacpi_size, b
         // Todo: we need to handle unaligned accesses here.
         if address & 0b11 bluescreen();
 
+        // Todo: This address is not necessarily covered by the direct mapping. The same issue exists in the rest of the PCI configuration space access code.
+        address += DIRECT_MAPPING_BASE;
+
         if byte_width == {
             case 1; value.* = xx address.(*u8).*;
             case 2; value.* = xx address.(*u16).*;
@@ -552,8 +552,27 @@ uacpi_kernel_io_map :: (base: uacpi_io_addr, len: uacpi_size, out_handle: *uacpi
 }
 
 #program_export
-uacpi_kernel_io_read :: () -> uacpi_status #c_call {
-    bluescreen();
+uacpi_kernel_io_read :: (handle: uacpi_handle, offset: uacpi_size, byte_width: uacpi_u8, value: *u64) -> uacpi_status #c_call {
+    using kernel_globals.uacpi_state;
+
+    io_base := cast(*u16) handle;
+    address := io_base.* + xx offset;
+
+    result: u64;
+    #asm {
+        address === d;
+        result  === a;
+    }
+
+    if byte_width == {
+        case 1; #asm { in.8  result, address; }
+        case 2; #asm { in.16 result, address; }
+        case 4; #asm { in.32 result, address; }
+        case; bluescreen();
+    }
+
+    value.* = result;
+
     return .OK;
 }
 
@@ -561,10 +580,8 @@ uacpi_kernel_io_read :: () -> uacpi_status #c_call {
 uacpi_kernel_io_write :: (handle: uacpi_handle, offset: uacpi_size, byte_width: uacpi_u8, value: u64) -> uacpi_status #c_call {
     using kernel_globals.uacpi_state;
 
-    io_region_index := cast(*u16) handle;
-    base := io_region_index.*;
-
-    address := base + xx offset;
+    io_base := cast(*u16) handle;
+    address := io_base.* + xx offset;
 
     #asm {
         address === d;
@@ -581,15 +598,38 @@ uacpi_kernel_io_write :: (handle: uacpi_handle, offset: uacpi_size, byte_width: 
     return .OK;
 }
 
-#program_export uacpi_kernel_map :: (addr: uacpi_phys_addr, len: uacpi_size) -> *void #c_call {
-    return cast(*void) addr + DIRECT_MAPPING_BASE;
+#program_export
+uacpi_kernel_map :: (addr: uacpi_phys_addr, len: uacpi_size) -> *void #c_call {
+    // write_nonnegative_number(addr, base=16);
+    // write_string("\n");
+    // write_nonnegative_number(xx kernel_globals.framebuffer.buffer, base=16);
+    // write_string("\n");
+    // return cast(*void) addr + DIRECT_MAPPING_BASE;
+
+    push_context {
+
+        memory := alloc_block(*kernel_globals.virtual_block_allocator, cast(u64) len);
+        pages_needed := len / 4096;
+        if len % 4096 pages_needed += 1;
+
+        page_flags := Page_Flags.READ_WRITE | .PRESENT | .CACHE_DISABLE;
+
+        for 0..pages_needed-1 {
+            offset := cast(u64) it * 4096;
+            map_page(memory + offset, addr + offset, page_flags);
+        }
+
+        return xx memory;
+    }
 }
 
-#program_export uacpi_kernel_unmap :: (addr: *void, len: uacpi_size) #c_call {
+#program_export
+uacpi_kernel_unmap :: (addr: *void, len: uacpi_size) #c_call {
     return;
 }
 
-#program_export uacpi_kernel_alloc :: (size: uacpi_size) -> *void #c_call {
+#program_export
+uacpi_kernel_alloc :: (size: uacpi_size) -> *void #c_call {
     push_context {
         phys := alloc_block(*kernel_globals.physical_block_allocator, size);
         virt := cast(*void) phys + DIRECT_MAPPING_BASE;
@@ -598,7 +638,8 @@ uacpi_kernel_io_write :: (handle: uacpi_handle, offset: uacpi_size, byte_width: 
     }
 }
 
-#program_export uacpi_kernel_calloc :: (count: uacpi_size, size: uacpi_size) -> *void #c_call {
+#program_export
+uacpi_kernel_calloc :: (count: uacpi_size, size: uacpi_size) -> *void #c_call {
     size_bytes := size*count;
 
     push_context {
@@ -610,7 +651,8 @@ uacpi_kernel_io_write :: (handle: uacpi_handle, offset: uacpi_size, byte_width: 
     }
 }
 
-#program_export uacpi_kernel_free :: (mem: *void) #c_call {
+#program_export
+uacpi_kernel_free :: (mem: *void) #c_call {
     if mem == null return;
 
     push_context {
@@ -619,12 +661,19 @@ uacpi_kernel_io_write :: (handle: uacpi_handle, offset: uacpi_size, byte_width: 
     }
 }
 
-#program_export uacpi_kernel_log :: (log_level: uacpi_log_level, c_string: *uacpi_char) #c_call {
-    message: string;
-    message.data = c_string;
-    message.count = c_style_strlen(c_string);
+#program_export
+uacpi_kernel_log :: (log_level: uacpi_log_level, c_string: *uacpi_char) #c_call {
+    // if log_level < .INFO return;
 
-    write_string(message);
+    push_context {
+        Log_Category("uACPI");
+
+        message: string;
+        message.data = c_string;
+        message.count = c_style_strlen(c_string);
+
+        log(message);
+    }
 }
 
 #program_export uacpi_kernel_get_nanoseconds_since_boot :: () -> u64 #c_call {
@@ -724,7 +773,6 @@ uacpi_kernel_install_interrupt_handler :: (irq: u32, handler: uacpi_interrupt_ha
     using kernel_globals.uacpi_state;
 
     push_context {
-        make_kernel_context(*context);
 
         if irq_contexts_used >= irq_contexts.count {
             log_error("Must allocate more IRQ handlers for uACPI.");
@@ -754,10 +802,13 @@ uacpi_kernel_install_interrupt_handler :: (irq: u32, handler: uacpi_interrupt_ha
 uacpi_kernel_create_spinlock :: () -> uacpi_handle #c_call {
     using kernel_globals.uacpi_state;
     push_context {
-        make_kernel_context(*context);
-        _, locator := bucket_array_add(*spinlock_storage, 0);
+
+        locator, _ := bucket_array_add(*spinlock_storage, 0);
+        locator.slot_index += 1; // Because we return this in a pointer, if this value is zero, uACPI assumes we ran out of memory.
 
         // ucapi_handle is *void, Bucket_Locator is two 32-bit integers. We can store the locator using the pointer value.
+        #assert size_of(uacpi_handle) >= size_of(Bucket_Locator);
+
         handle: uacpi_handle;
         memcpy(*handle, *locator, 8);
 
@@ -770,13 +821,19 @@ uacpi_kernel_free_spinlock :: (handle: uacpi_handle) #c_call {
     using kernel_globals.uacpi_state;
 
     push_context {
-        make_kernel_context(*context);
-
         locator: Bucket_Locator;
         memcpy(*locator, *handle, 8);
+        locator.slot_index -= 1;
 
         bucket_array_remove(*spinlock_storage, locator);
     }
+}
+
+bucket_array_find_pointer :: (using array: *Bucket_Array, locator: Bucket_Locator) -> *array.type {
+    bucket := all_buckets[locator.bucket_index];
+    assert(bucket.occupied[locator.slot_index] == true);
+    result := *bucket.data[locator.slot_index];
+    return result;
 }
 
 #program_export
@@ -784,13 +841,12 @@ uacpi_kernel_lock_spinlock :: (handle: uacpi_handle) -> uacpi_cpu_flags #c_call 
     using kernel_globals.uacpi_state;
 
     push_context {
-        make_kernel_context(*context);
-
         locator: Bucket_Locator;
         memcpy(*locator, *handle, 8);
+        locator.slot_index -= 1;
 
-        lock := bucket_array_find(*spinlock_storage, locator);
-        acquire(*lock);
+        lock := bucket_array_find_pointer(*spinlock_storage, locator);
+        acquire(lock);
 
         return 0; // Todo, think about interrupts. This may currently cause deadlocks.
     }
@@ -801,13 +857,12 @@ uacpi_kernel_unlock_spinlock :: (handle: uacpi_handle, flags: uacpi_cpu_flags) #
     using kernel_globals.uacpi_state;
 
     push_context {
-        make_kernel_context(*context);
-
         locator: Bucket_Locator;
         memcpy(*locator, *handle, 8);
+        locator.slot_index -= 1;
 
-        lock := bucket_array_find(*spinlock_storage, locator);
-        release(*lock);
+        lock := bucket_array_find_pointer(*spinlock_storage, locator);
+        release(lock);
     }
 }
 

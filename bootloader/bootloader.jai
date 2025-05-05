@@ -195,14 +195,14 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
                 index -= 1;
             }
 
-            // 8Mb higher-half memory for the kernel.
             virtual_base : u64 : 0xffff_ffff_8000_0000;
             pml4[0x1ff] = cast(u64) pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
             pdpt[0x1fe] = cast(u64) pd.data   | PAGE_PRESENT | PAGE_READ_WRITE;
 
+            // 16Mb memory within the top two gigabytes, for the kernel binary.
             // Todo: these page directory indeces are hardcoded in a few places below.
             // Maybe have a table that defines the map of the top two gigabytes of virtual memory.
-            for 0..3 {
+            for 0..7 {
                 address := cast(u64) kernel_base + cast(u64) it * 0x20_0000;
                 pd[it] = address | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             }
@@ -212,7 +212,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
             for pd: 0..direct_pd.count-1 {
                 direct_pdpt[pd] = cast(u64) direct_pd[pd].data | PAGE_PRESENT | PAGE_READ_WRITE;
-                
+
                 for pt: 0..0x1ff {
                     address := cast(u64) (pd*0x4000_0000 + pt*0x20_0000);
                     direct_pd[pd][pt] = address | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
@@ -222,21 +222,24 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             offset := cast(u64) boot_data.framebuffer.buffer & 0x1fffff;
 
             // Map the framebuffer. Todo: enable write combining for this memory
-            pd[4] = (cast(u64) boot_data.framebuffer.buffer - offset)             | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-            pd[5] = (cast(u64) boot_data.framebuffer.buffer - offset + 0x20_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            pd[8]  = (cast(u64) boot_data.framebuffer.buffer - offset)             | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            pd[9]  = (cast(u64) boot_data.framebuffer.buffer - offset + 0x20_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            pd[10] = (cast(u64) boot_data.framebuffer.buffer - offset + 0x40_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            pd[11] = (cast(u64) boot_data.framebuffer.buffer - offset + 0x60_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
 
             // Translate framebuffer address to virtual
-            boot_data.framebuffer.buffer = cast(*u32) (virtual_base + 4*0x20_0000 + offset);
+            boot_data.framebuffer.buffer = cast(*u32) (virtual_base + 8*0x20_0000 + offset);
 
 
             // Map load_buffer, which contains the kernel ELF file, to be loaded into high virtual memory later.
             offset = cast(u64) load_buffer & 0x1fffff;
 
-            pd[6] = (cast(u64) load_buffer - offset)             | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
-            pd[7] = (cast(u64) load_buffer - offset + 0x20_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            pd[12] = (cast(u64) load_buffer - offset)             | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            pd[13] = (cast(u64) load_buffer - offset + 0x20_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+            pd[14] = (cast(u64) load_buffer - offset + 0x40_0000) | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
 
             // Translate load buffer address to virtual
-            load_buffer = cast(*void) (virtual_base + 6*0x20_0000 + offset);
+            load_buffer = cast(*void) (virtual_base + 12*0x20_0000 + offset);
 
 
             // Map the page frame descriptors
@@ -245,12 +248,12 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
             for 0..page_directories_needed-1 {
                 base := cast(u64) boot_data.large_pages.data - offset + cast(u64) it * 0x20_0000;
-                pd[8 + it] = base | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+                pd[15 + it] = base | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             }
 
             // Translate page frame descriptor array address to virtual
-            boot_data.large_pages.data = cast(*Large_Page) (virtual_base + 8*0x20_0000 + offset);
-            boot_data.page_directories_used = 8 + page_directories_needed;
+            boot_data.large_pages.data = cast(*Large_Page) (virtual_base + 14*0x20_0000 + offset);
+            boot_data.page_directories_used = 15 + page_directories_needed;
         }
 
         mmap_key = 0;
@@ -346,6 +349,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             }
         }
 
+        display("Exiting boot services.\r\n");
         while boot_services.ExitBootServices(loaded_image, mmap_key) == .InvalidParameter {
             // ExitBootServices itself can sometimes change the memory map, in which case you need to call it again.
             // Todo: does this mean we need to update the one we give the kernel?
@@ -354,6 +358,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             boot_services.GetMemoryMap(*mmap_size, xx memory_map, *mmap_key, null, null);
         }
 
+        serial_out("Loading page tables.\n");
         cr3 := boot_data.page_tables.pml4.data;
         #asm {
             cli;
@@ -361,8 +366,8 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         }
 
         {
+            serial_out("Loading kernel ELF.\n");
 
-            // Load kernel executable
             elf := load_buffer;
 
             elf_header := cast(*Elf64_Ehdr) elf;
@@ -388,6 +393,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
                 }
             }
 
+            serial_out("Jumping to the kernel.\n");
             entry_point := << cast(*() #no_context) *(elf_header.e_entry);
             entry_point();
         }

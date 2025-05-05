@@ -156,7 +156,12 @@ create_task :: (params: Create_Task_Parameters = .{}) -> *Task_Info {
     return new_task;
 }
 
-sleep_for :: (time: Apollo_Time) {
+sleep :: (n: s64, $units: enum {nanoseconds; microseconds; milliseconds; seconds;}) {
+    time := (#insert #run tprint("%_to_apollo(n);", units));
+    sleep(time);
+}
+
+sleep :: (time: Apollo_Time) {
     sleep_until(get_monotonic_system_time() + time);
 }
 
@@ -328,7 +333,7 @@ syscall_handler :: (data: *Syscall_Stack) #c_call {
         t.low  = data.rbx;
         t.high = cast(s64) data.rdx;
 
-        sleep_for(t);
+        sleep(t);
 
       case 4;
         s: string;
@@ -366,7 +371,6 @@ task_do_work :: () #c_call {
 
 task_do_work_in_ring_3 :: () #c_call {
     push_context {
-        make_kernel_context(*context);
 
         core := get_current_core_from_user_mode();
         thread := core.scheduler.current_task;

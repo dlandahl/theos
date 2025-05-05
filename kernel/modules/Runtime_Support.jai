@@ -66,27 +66,56 @@ write_number :: (n: s64, base := 10, to_standard_error := false) #no_context #no
     write_nonnegative_number(cast,no_check(u64) n, base, to_standard_error = to_standard_error);
 }
 
-runtime_support_assertion_failed :: (loc: Source_Code_Location, message: string) -> bool {
-    write_string("Default assertion failure...\n");
-    write_string(message);
-    write_string("\n");
-    write_loc(loc);
 
-    while true #asm { cli; hlt; }
-    return false;
+
+kernel_assertion_failed: (loc: Source_Code_Location, message: string) -> bool;
+kernel_default_logger: (message: string, data: *void, info: Log_Info);
+kernel_default_allocator_proc: (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void;
+
+// These must be constant values, as they're used as default values in Context_Base. To be able to set
+// custom implementations from the kernel code base, we forward each of them through a function pointer.
+// We also need to keep the default implementations at compile time, as #run,host uses the target workspaces
+// module import directories for some reason.
+
+runtime_support_assertion_failed :: (loc: Source_Code_Location, message: string) -> bool {
+    if #compile_time {
+        write_string("Default assertion failure...\n");
+        write_string(message);
+        write_string("\n");
+        write_loc(loc);
+
+        while true #asm { cli; hlt; }
+        return false;
+    }
+
+    return kernel_assertion_failed(loc, message);
 }
 
 runtime_support_default_logger :: (message: string, data: *void, info: Log_Info) {
-    if !message then return;
+    if #compile_time {
+        if !message then return;
 
-    to_standard_error := (info.common_flags & .ERROR) != 0;
+        to_standard_error := (info.common_flags & .ERROR) != 0;
 
-    if message[message.count-1] != #char "\n" {
-        write_strings(message, "\n", to_standard_error = to_standard_error);
-    } else {
-        write_string(message, to_standard_error = to_standard_error);
+        if message[message.count-1] != #char "\n" {
+            write_strings(message, "\n", to_standard_error = to_standard_error);
+        } else {
+            write_string(message, to_standard_error = to_standard_error);
+        }
     }
+    kernel_default_logger(message, data, info);
 }
+
+runtime_support_default_allocator_proc :: (mode: Allocator_Mode, size: s64, old_size: s64, old_memory: *void, allocator_data: *void) -> *void {
+    if #compile_time {
+        Default_Allocator :: #import "Default_Allocator";
+        return Default_Allocator.allocator_proc(mode, size, old_size, old_memory, allocator_data);
+    }
+
+    return kernel_default_allocator_proc(mode, size, old_size, old_memory, allocator_data);
+}
+
+
 
 c_style_strlen :: (str: *u8) -> s64 #no_context {
     p := str;
@@ -341,10 +370,6 @@ __instrumentation_second :: () {
         return 0;
     }
 }
-
-Default_Allocator :: #import "Default_Allocator";
-
-runtime_support_default_allocator_proc :: Default_Allocator.allocator_proc;
 
 #scope_export
 

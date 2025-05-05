@@ -92,7 +92,7 @@ read_configuration_space :: (base_address: u64, bus: int, device: int, function:
 }
 
 Pci_Configuration_Space :: struct {
-    start_marker: void;
+    start: void;
 
     vendor_id:       u16;
     device_id:       u16;
@@ -107,9 +107,12 @@ Pci_Configuration_Space :: struct {
     header_type:     u8;
     bist:            u8;
 
-#place start_marker;
-    offset: [0x34] u8;
+#place start; _: [0x34] u8;
     capability_pointer: u32;
+
+#place start; _: [0x3c] u8;
+    interrupt_line: u8;
+    interrupt_pin:  u8;
 }
 
 Pci_Capability :: struct {
@@ -567,6 +570,8 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
 
     parse_pci_capability_list(device);
     enable_msi_or_msi_x(device, int__i8254x_interrupt);
+
+    log("line: %, pin: %", device.interrupt_line, device.interrupt_pin);
 
     nic: I8254x_Network_Interface_Card;
 
