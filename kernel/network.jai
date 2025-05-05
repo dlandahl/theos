@@ -370,13 +370,13 @@ Network_Connection :: struct {
     adapter: I8254x_Network_Interface_Card;
 
     dhcp_handshake_state: enum {
-        not_started;
-        discover_transmitted;
-        offer_accepted;
-        arp_probe_1_transmitted;
-        arp_probe_2_transmitted;
-        arp_probe_3_transmitted;
-        completed;
+        NOT_STARTED;
+        DISCOVER_TRANSMITTED;
+        OFFER_ACCEPTED;
+        ARP_PROBE_1_TRANSMITTED;
+        ARP_PROBE_2_TRANSMITTED;
+        ARP_PROBE_3_TRANSMITTED;
+        COMPLETED;
     }
     arp_probe_transmitted_at: Apollo_Time;
 
@@ -399,7 +399,7 @@ establish_network_connection :: (using net: *Network_Connection) {
     log("Transmitting DHCP discover (XID %)...", hex(xid));
     i8254x_transmit_packet(*adapter, packet);
 
-    dhcp_handshake_state = .discover_transmitted;
+    dhcp_handshake_state = .DISCOVER_TRANSMITTED;
 
     // Let's spend 60 seconds trying to get an IP.
     wait_until := get_monotonic_system_time() + seconds_to_apollo(60);
@@ -409,11 +409,11 @@ establish_network_connection :: (using net: *Network_Connection) {
 
     while establishing_dhcp_connection := get_monotonic_system_time() < wait_until  {
 
-        if dhcp_handshake_state >= .arp_probe_1_transmitted && dhcp_handshake_state <= .arp_probe_3_transmitted {
+        if dhcp_handshake_state >= .ARP_PROBE_1_TRANSMITTED && dhcp_handshake_state <= .ARP_PROBE_3_TRANSMITTED {
             probe_time_elapsed := arp_probe_transmitted_at < get_monotonic_system_time() - seconds_to_apollo(1);
 
             if probe_time_elapsed {
-                if dhcp_handshake_state != .arp_probe_3_transmitted {
+                if dhcp_handshake_state != .ARP_PROBE_3_TRANSMITTED {
                     transmit_arp_probe(net);
                     log("ARP probe sent");
                 }
@@ -423,7 +423,7 @@ establish_network_connection :: (using net: *Network_Connection) {
             }
         }
 
-        if dhcp_handshake_state == .completed {
+        if dhcp_handshake_state == .COMPLETED {
             transmit_dns_query(net, "discord.gg");
             dhcp_handshake_state += 1;
         }
@@ -462,7 +462,7 @@ establish_network_connection :: (using net: *Network_Connection) {
 
             if get_dhcp_message_type(dhcp) == {
               case .offer;
-                if dhcp_handshake_state != .discover_transmitted {
+                if dhcp_handshake_state != .DISCOVER_TRANSMITTED {
                     // Let's just accept the first offer we get.
                     continue;
                 }
@@ -477,17 +477,17 @@ establish_network_connection :: (using net: *Network_Connection) {
                 packet := make_dhcp_request(net, xid);
                 i8254x_transmit_packet(*adapter, packet);
 
-                dhcp_handshake_state = .offer_accepted;
+                dhcp_handshake_state = .OFFER_ACCEPTED;
 
               case .ack;
-                if dhcp_handshake_state != .offer_accepted continue;
+                if dhcp_handshake_state != .OFFER_ACCEPTED continue;
 
                 log("DHCP request acknowledged. Sending ARP probe...");
 
                 transmit_arp_probe(net);
                 arp_probe_transmitted_at = get_monotonic_system_time();
 
-                dhcp_handshake_state = .arp_probe_1_transmitted;
+                dhcp_handshake_state = .ARP_PROBE_1_TRANSMITTED;
             }
         }
 

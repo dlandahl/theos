@@ -349,6 +349,7 @@ syscall_handler :: (data: *Syscall_Stack) #c_call {
     }
 }
 
+// This is needed by the syscall handler implemented in assembly in first.jai
 #program_export
 get_kernel_stack :: () -> *void #c_call {
     core := get_current_core();

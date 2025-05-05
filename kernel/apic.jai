@@ -518,12 +518,8 @@ uacpi_kernel_pci_read :: (bus_address: *uacpi_pci_address, offset: uacpi_size, b
         // Todo: This address is not necessarily covered by the direct mapping. The same issue exists in the rest of the PCI configuration space access code.
         address += DIRECT_MAPPING_BASE;
 
-        if byte_width == {
-            case 1; value.* = xx address.(*u8).*;
-            case 2; value.* = xx address.(*u16).*;
-            case 4; value.* = xx address.(*u32).*;
-            case; bluescreen();
-        }
+        value.* = address.(*u32).*.(u64);
+        value.* &= cast(u64, 1 << (byte_width*8)) - 1;
 
         return .OK;
     }
@@ -532,9 +528,29 @@ uacpi_kernel_pci_read :: (bus_address: *uacpi_pci_address, offset: uacpi_size, b
     return .INVALID_ARGUMENT;
 }
 
-#program_export uacpi_kernel_pci_write :: () #c_call {
-    write_string("uACPI kernel call: \"uacpi_kernel_pci_write\"\n");
+#program_export
+uacpi_kernel_pci_write :: (bus_address: *uacpi_pci_address, offset: uacpi_size, byte_width: u8, value: u64) -> uacpi_status #c_call {
+    using bus_address;
+
+    for kernel_globals.pci_ecam {
+        if it.segment_group != segment continue;
+
+        device_offset := cast(u64, bus * 256 + device * 8 + function);
+        address := it.base_address + device_offset * PCI_CONFIGURATION_SPACE_SIZE;
+
+        // Todo: we need to handle unaligned accesses here.
+        if address & 0b11 bluescreen();
+
+        // Todo: This address is not necessarily covered by the direct mapping. The same issue exists in the rest of the PCI configuration space access code.
+        address += DIRECT_MAPPING_BASE;
+
+        address.(*u32).* = value.(u32);
+
+        return .OK;
+    }
+
     bluescreen();
+    return .INVALID_ARGUMENT;
 }
 
 #program_export
@@ -746,7 +762,8 @@ next_event_handle: uacpi_handle = xx 1;
 }
 
 UACPI_IRQ_HANDLER :: #string END
-#program_export handle_uacpi_irq_%1 :: (stack: *void) #c_call {
+#program_export
+handle_uacpi_irq_%1 :: (stack: *void) #c_call {
     using kernel_globals.uacpi_state;
     irq := *irq_contexts[%1];
     irq.handler(irq.ctx);
@@ -766,6 +783,14 @@ init_uacpi_interrupt_handlers :: () {
 
     first_irq_handler_gate_index = kernel_globals.next_free_interrupt_gate;
     kernel_globals.next_free_interrupt_gate += irq_contexts.count;
+
+    #insert #run,host -> string {
+        builder: String_Builder;
+        for 0..7 {
+            print(*builder, "register_interrupt_gate(int__handle_uacpi_irq_%1, first_irq_handler_gate_index + %1);", it);
+        }
+        return builder_to_string(*builder);
+    };
 }
 
 #program_export
@@ -773,7 +798,6 @@ uacpi_kernel_install_interrupt_handler :: (irq: u32, handler: uacpi_interrupt_ha
     using kernel_globals.uacpi_state;
 
     push_context {
-
         if irq_contexts_used >= irq_contexts.count {
             log_error("Must allocate more IRQ handlers for uACPI.");
             bluescreen();

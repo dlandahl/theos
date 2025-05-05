@@ -256,6 +256,8 @@ kernel_entry :: () #no_context {
             establish_network_connection(*kernel_globals.net);
         }
 
+        init_uacpi_interrupt_handlers();
+
         if uacpi_initialize(0) != .OK bluescreen();
         if uacpi_namespace_load() != .OK bluescreen();
         if uacpi_namespace_initialize() != .OK bluescreen();
@@ -264,17 +266,21 @@ kernel_entry :: () #no_context {
 
         uacpi_install_fixed_event_handler(.POWER_BUTTON, (ctx: uacpi_handle) -> uacpi_interrupt_ret #c_call {
             write_string("Shutting down the PC...\n");
+            write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
+
+            uacpi_prepare_for_sleep_state(.S5);
+            uacpi_enter_sleep_state(.S5);
+
             return UACPI_INTERRUPT_HANDLED;
         }, null);
 
         if uacpi_finalize_gpe_initialization() != .OK bluescreen();
 
-        // uacpi_prepare_for_sleep_state(.S5);
-        // uacpi_enter_sleep_state(.S5);
-
         namespace_root := uacpi_namespace_root();
 
         PCI_BRIDGE_PNP_ID :: "PNP0A03";
+
+        while true {}
 
         uacpi_find_devices(PCI_BRIDGE_PNP_ID, (user: *void, node: *uacpi_namespace_node, depth: u32) -> uacpi_iteration_decision #c_call {
             node_info: *uacpi_namespace_node_info;
