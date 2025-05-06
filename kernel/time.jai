@@ -22,6 +22,8 @@ get_monotonic_system_time :: () -> Apollo_Time {
     return get_kernel_timestamp() + kernel_globals.boot_time;
 }
 
+get_monotonic_time :: get_monotonic_system_time;
+
 native_calendar_to_apollo :: (ct: Calendar_Time) -> Apollo_Time {
     // Todo: Doesn't work with dates before 1 AD. It doesn't seem to work on Linux either, but I feel like it should definitely be made to work.
 

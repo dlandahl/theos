@@ -109,6 +109,84 @@ Arp_Packet :: struct {
 
 #assert size_of(Arp_Packet) == 28;
 
+transmit_arp_probe :: (net: *Network_Connection) {
+
+    probe: struct {
+        using eth: Ethernet_Header;
+        using arp: Arp_Packet;
+    }
+
+    packet: Network_Packet;
+    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
+
+    probe.destination_mac = BROADCAST_MAC;
+    probe.source_mac      = net.adapter.mac_address;
+    probe.ethertype       = .ARP;
+
+    probe.HTYPE__hardware_type = .ethernet;
+    probe.PTYPE__protocol_type = .IPv4;
+    probe.HLEN__hardware_length = 6;
+    probe.PLEN__protocol_length = 4;
+    probe.OPER__operation       = .request;
+
+    probe.SHA__sender_hardware_address = net.adapter.mac_address;
+    probe.SPA__sender_protocol_address = 0;
+    probe.THA__target_hardware_address = .[0,0,0,0,0,0];
+    probe.TPA__target_protocol_address = net.our_ip;
+
+    add_to_packet(*packet, probe);
+    i8254x_transmit_packet(*net.adapter, packet);
+
+    // Todo: actually respond to IP address conflicts
+
+    free_4k_page(cast(u64, packet.data - DIRECT_MAPPING_BASE));
+}
+
+handle_arp :: (net: *Network_Connection, eth: *Ethernet_Header) {
+
+    arp := cast(*Arp_Packet) (eth + 1);
+
+    if arp.SPA__sender_protocol_address == arp.TPA__target_protocol_address {
+        // Gratuitous ARP
+        table_add(*net.arp_table, arp.SPA__sender_protocol_address, arp.SHA__sender_hardware_address);
+        return;
+    }
+
+    if net.our_ip != arp.TPA__target_protocol_address return;
+    if arp.OPER__operation != .request return;
+
+    reply: struct {
+        using eth: Ethernet_Header;
+        using arp: Arp_Packet;
+    }
+
+    packet: Network_Packet;
+    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
+
+    reply.destination_mac = arp.SHA__sender_hardware_address;
+    reply.source_mac      = net.adapter.mac_address;
+    reply.ethertype       = .ARP;
+
+    reply.HTYPE__hardware_type = .ethernet;
+    reply.PTYPE__protocol_type = .IPv4;
+    reply.HLEN__hardware_length = 6;
+    reply.PLEN__protocol_length = 4;
+    reply.OPER__operation       = .reply;
+
+    reply.SHA__sender_hardware_address = net.adapter.mac_address;
+    reply.SPA__sender_protocol_address = net.our_ip;
+    reply.THA__target_hardware_address = arp.SHA__sender_hardware_address;
+    reply.TPA__target_protocol_address = arp.SPA__sender_protocol_address;
+
+    add_to_packet(*packet, reply);
+    i8254x_transmit_packet(*net.adapter, packet);
+    log("ARP reply sent");
+
+    free_4k_page(cast(u64, packet.data - DIRECT_MAPPING_BASE));
+
+    return;
+}
+
 
 
 Udp_Header :: struct {
@@ -254,326 +332,94 @@ get_dhcp_message_type :: (dhcp: *Dhcp_Message) -> Dhcp_Message_Type {
 DHCP_CLIENT_PORT :: 68;
 DHCP_SERVER_PORT :: 67;
 
+update_dhcp :: (using net: *Network_Connection) {
+    if dhcp_handshake_state == .NOT_STARTED {
+        packet:, dhcp_xid = make_dhcp_discover(net);
 
+        log("Transmitting DHCP discover (XID %)...", hex(dhcp_xid));
+        i8254x_transmit_packet(*adapter, packet);
 
-Icmp_Header :: struct {
-    control_message: enum u16 {
-        // Type and code (subtype) combined into one field
-
-        echo_reply   :: 0x00_00;
-        echo_request :: 0x00_08;
+        dhcp_handshake_state = .DISCOVER_TRANSMITTED;
     }
 
-    checksum: u16;
-    data: u32;
+    if dhcp_handshake_state >= .ARP_PROBE_1_TRANSMITTED && dhcp_handshake_state <= .ARP_PROBE_3_TRANSMITTED {
+        probe_time_elapsed := arp_probe_transmitted_at < get_monotonic_time() - seconds_to_apollo(1);
+
+        if probe_time_elapsed {
+            if dhcp_handshake_state != .ARP_PROBE_3_TRANSMITTED {
+                transmit_arp_probe(net);
+                log("ARP probe sent");
+            }
+
+            dhcp_handshake_state += 1;
+            arp_probe_transmitted_at = get_monotonic_time();
+        }
+    }
 }
 
-Icmp_Packet :: struct {
+Dhcp_Packet :: struct {
     eth: Ethernet_Header;
     ip: Ipv4_Header #align 1;
-    icmp: Icmp_Header #align 1;
+    udp: Udp_Header #align 1;
+    dhcp: Dhcp_Message #align 1;
 }
 
-make_pong :: (ping: *Icmp_Packet) -> Icmp_Packet {
-    using pong: Icmp_Packet;
+handle_dhcp_packet :: (using net: *Network_Connection, eth_: *Ethernet_Header) {
+    using packet := cast(*Dhcp_Packet) eth_;
 
-    eth.destination_mac = ping.eth.source_mac;
-    eth.source_mac      = ping.eth.destination_mac;
-    eth.ethertype       = .IPv4;
-
-    set(*ip, .version, 4);
-    set(*ip, .ihl, 5);
-    set(*ip, .total_length, size_of(Ipv4_Header) + size_of(Icmp_Header));
-
-    ip.time_to_live = 128;
-    ip.protocol = .ICMP;
-    ip.source_address = ping.ip.destination_address;
-    ip.destination_address = ping.ip.source_address;
-
-    byte_swap_ip(*ip);
-    ip.checksum = internet_checksum(ip);
-
-    icmp.control_message = .echo_reply;
-    icmp.data = ping.icmp.data;
-    icmp.checksum = internet_checksum(icmp);
-
-    return pong;
-}
-
-
-
-Dns_Header :: struct {
-    transaction_id: u16;
-
-    flags: u16;
-
-    questions: u16;
-    answers: u16;
-    authority_rrs: u16;
-    additional_rrs: u16;
-}
-
-byte_swap_dns_header :: (dns: *Dns_Header) {
-    dns.questions      = bs16(dns.questions);
-    dns.answers        = bs16(dns.answers);
-    dns.authority_rrs  = bs16(dns.authority_rrs);
-    dns.additional_rrs = bs16(dns.additional_rrs);
-}
-
-DNS_SERVER_PORT :: 53;
-
-
-
-Network_Packet :: struct {
-    data: *void;
-    length: int;
-}
-
-add_to_packet :: (packet: *Network_Packet, data: Any) {
-    if data.type.type == .STRING {
-        s := data.value_pointer.(*string).*;
-
-        memcpy(packet.data + packet.length, s.data, s.count);
-        packet.length += s.count;
-
+    if udp.length < size_of(Dhcp_Message) + size_of(Udp_Header) {
+        log_error("Bad DHCP packet, too small.");
         return;
     }
 
-    memcpy(packet.data + packet.length, data.value_pointer, data.type.runtime_size);
-    packet.length += data.type.runtime_size;
-}
+    byte_swap_dhcp_message(*dhcp);
 
-
-
-format_mac :: (mac: [6] u8) -> string {
-    Push_Print_Style(mac_address_print_style);
-    return tprint("%", mac);
-}
-
-format_ip :: (ip: u32) -> string {
-    ip_array := (*ip).(*[4]u8).*;
-
-    return tprint("%.%.%.%",
-        ip_array[0],
-        ip_array[1],
-        ip_array[2],
-        ip_array[3]
-    );
-}
-
-Network_Connection :: struct {
-    router_mac_address: [6] u8;
-
-    our_ip: u32;
-    router_ip: u32;
-
-    adapter: I8254x_Network_Interface_Card;
-
-    dhcp_handshake_state: enum {
-        NOT_STARTED;
-        DISCOVER_TRANSMITTED;
-        OFFER_ACCEPTED;
-        ARP_PROBE_1_TRANSMITTED;
-        ARP_PROBE_2_TRANSMITTED;
-        ARP_PROBE_3_TRANSMITTED;
-        COMPLETED;
+    if dhcp.magic != Dhcp_Message.MAGIC {
+        log_error("Bad DHCP packet, magic doesn't match.");
+        return;
     }
-    arp_probe_transmitted_at: Apollo_Time;
 
-    arp_table: Table(u32, [6]u8);
+    if _memcmp(dhcp.client_mac.data, adapter.mac_address.data, 6) != 0 {
+        return;
+    }
 
-    pings_in_flight: [..] struct {
-        id: u32;
-        destination_ip: u32;
-        sent_at: Apollo_Time;
-    };
+    if dhcp.xid != dhcp_xid {
+        log_error("Got DHCP message with invalid transaction ID.");
+        return;
+    }
 
-    spinlock: Spinlock;
-
-    FIRST_DYNAMIC_PORT :: 0xc000;
-    tcp_connections: [..] Tcp_Connection;
-}
-
-network_thread :: () #c_call {
-    push_context,defer_pop;
-
-    core := get_current_core();
-    release(*core.scheduler.spinlock);
-
-    Log_Category("Net");
-    using net := *kernel_globals.net;
-
-    packet, xid := make_dhcp_discover(net);
-
-    log("Transmitting DHCP discover (XID %)...", hex(xid));
-    i8254x_transmit_packet(*adapter, packet);
-
-    dhcp_handshake_state = .DISCOVER_TRANSMITTED;
-
-    // Let's spend 60 seconds trying to get an IP.
-    wait_until := get_monotonic_system_time() + seconds_to_apollo(60);
-    offer: *Dhcp_Message;
-
-    LOG_ALL_RECEIVED_ETHERNET_PACKETS :: false;
-
-    while establishing_dhcp_connection := get_monotonic_system_time() < wait_until  {
-
-        if dhcp_handshake_state >= .ARP_PROBE_1_TRANSMITTED && dhcp_handshake_state <= .ARP_PROBE_3_TRANSMITTED {
-            probe_time_elapsed := arp_probe_transmitted_at < get_monotonic_system_time() - seconds_to_apollo(1);
-
-            if probe_time_elapsed {
-                if dhcp_handshake_state != .ARP_PROBE_3_TRANSMITTED {
-                    transmit_arp_probe(net);
-                    log("ARP probe sent");
-                }
-
-                dhcp_handshake_state += 1;
-                arp_probe_transmitted_at = get_monotonic_system_time();
-            }
+    if get_dhcp_message_type(*dhcp) == {
+      case .offer;
+        if dhcp_handshake_state != .DISCOVER_TRANSMITTED {
+            log_error("Unexpected DHCP offer.");
+            return;
         }
 
-        if dhcp_handshake_state == .COMPLETED {
-            transmit_dns_query(net, "discord.gg");
-            dhcp_handshake_state += 1;
+        our_ip = dhcp.your_ip;
+        router_ip = ip.source_address;
+        router_mac_address = eth.source_mac;
+
+        log("Got DHCP offer for IP: %.", format_ip(our_ip));
+        log("Server IP: %, server MAC: %.", format_ip(router_ip), format_mac(router_mac_address));
+
+        packet := make_dhcp_request(net, dhcp_xid);
+        i8254x_transmit_packet(*adapter, packet);
+
+        dhcp_handshake_state = .OFFER_ACCEPTED;
+
+      case .ack;
+        if dhcp_handshake_state != .OFFER_ACCEPTED {
+            log_error("Unexpected DHCP ACK.");
+            return;
         }
 
-        packets := i8254x_get_newly_received_packets(*adapter);
+        log("DHCP request acknowledged. Sending ARP probe...");
 
-        for packets {
-            eth := cast(*Ethernet_Header) it.data;
+        transmit_arp_probe(net);
+        arp_probe_transmitted_at = get_monotonic_time();
 
-            if LOG_ALL_RECEIVED_ETHERNET_PACKETS {
-                Push_Print_Style(mac_address_print_style);
-                log("% => % (%)", eth.source_mac, eth.destination_mac, eth.ethertype);
-            }
-
-            if maybe_handle_arp(net, eth) continue;
-
-            if eth.ethertype != .IPv4 {
-                log("Received network packet with unsupported protocol %.", eth.ethertype);
-                continue;
-            }
-
-            ip := cast(*Ipv4_Header) (eth + 1);
-            assert(get(ip.*, .ihl) == 5);
-
-            if maybe_handle_echo(net, eth) continue;
-
-            dhcp := get_dhcp_message_if_one_is_contained(ip);
-
-            if dhcp == null    continue;
-            if dhcp.xid != xid continue;
-
-            // A DHCP offer can be sent by broadcast MAC, so check if the client MAC matches in the DHCP message.
-            if _memcmp(dhcp.client_mac.data, adapter.mac_address.data, 6) != 0 {
-                continue;
-            }
-
-            if get_dhcp_message_type(dhcp) == {
-              case .offer;
-                if dhcp_handshake_state != .DISCOVER_TRANSMITTED {
-                    // Let's just accept the first offer we get.
-                    continue;
-                }
-
-                our_ip = dhcp.your_ip;
-                router_ip = ip.source_address;
-                router_mac_address = eth.source_mac;
-
-                log("Got DHCP offer for IP: %.", format_ip(our_ip));
-                log("Server IP: %, server MAC: %.", format_ip(router_ip), format_mac(router_mac_address));
-
-                packet := make_dhcp_request(net, xid);
-                i8254x_transmit_packet(*adapter, packet);
-
-                dhcp_handshake_state = .OFFER_ACCEPTED;
-
-              case .ack;
-                if dhcp_handshake_state != .OFFER_ACCEPTED continue;
-
-                log("DHCP request acknowledged. Sending ARP probe...");
-
-                transmit_arp_probe(net);
-                arp_probe_transmitted_at = get_monotonic_system_time();
-
-                dhcp_handshake_state = .ARP_PROBE_1_TRANSMITTED;
-            }
-        }
-
-        sleep(50, .milliseconds);
+        dhcp_handshake_state = .ARP_PROBE_1_TRANSMITTED;
     }
-}
-
-transmit_dns_query :: (net: *Network_Connection, url: string) {
-    packet: Network_Packet;
-    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
-
-    xid := cast(u16) rdtsc();
-
-    eth: Ethernet_Header;
-    eth.destination_mac = net.router_mac_address;
-    eth.source_mac = net.adapter.mac_address;
-    eth.ethertype = .IPv4;
-
-    add_to_packet(*packet, eth);
-
-    ip_packet_length := size_of(Ipv4_Header)
-        + size_of(Udp_Header)
-        + size_of(Dns_Header)
-        + cast(u16) url.count + 6; // 6 because TYPE, CLASS, first label length, and zero terminator.
-
-    ip: Ipv4_Header;
-    set(*ip, .version, 4);
-    set(*ip, .ihl, 5);
-    set(*ip, .total_length, ip_packet_length);
-
-    ip.time_to_live = 128;
-    ip.protocol = .UDP;
-    ip.source_address = net.our_ip;
-    ip.destination_address = net.router_ip;
-
-    byte_swap_ip(*ip);
-    ip.checksum = internet_checksum(ip);
-
-    add_to_packet(*packet, ip);
-
-    udp: Udp_Header;
-    udp.source_port = 0x1234;
-    udp.destination_port = DNS_SERVER_PORT;
-    udp.length = size_of(Udp_Header)
-        + size_of(Dns_Header)
-        + cast(u16) url.count + 6;
-
-    byte_swap_udp_header(*udp);
-    add_to_packet(*packet, udp);
-
-    dns: Dns_Header;
-    dns.transaction_id = xx rdtsc();
-    dns.flags = 1;
-    dns.questions = 1;
-
-    byte_swap_dns_header(*dns);
-    add_to_packet(*packet, dns);
-
-    current_label_length: u8;
-
-    remaining := url;
-
-    while true {
-        found, left, right := split_from_left(remaining, #char ".");
-        add_to_packet(*packet, left.count.(u8));
-        add_to_packet(*packet, left);
-
-        if !found break;
-
-        remaining = right;
-    }
-    add_to_packet(*packet, (0).(u8));
-
-    add_to_packet(*packet, bs16(1).(u16)); // TYPE
-    add_to_packet(*packet, bs16(1).(u16)); // CLASS
-
-    i8254x_transmit_packet(*net.adapter, packet);
 }
 
 make_dhcp_discover :: (net: *Network_Connection) -> Network_Packet, u32 {
@@ -732,57 +578,38 @@ make_dhcp_request :: (net: *Network_Connection, xid: u32) -> Network_Packet {
     return packet;
 }
 
-get_dhcp_message_if_one_is_contained :: (ip: *Ipv4_Header) -> *Dhcp_Message {
-    if ip.protocol != .UDP {
-        return null;
+
+
+Icmp_Header :: struct {
+    control_message: enum u16 {
+        // Type and code (subtype) combined into one field
+
+        echo_reply   :: 0x00_00;
+        echo_request :: 0x00_08;
     }
 
-    udp := cast(*Udp_Header) (ip + 1);
-    byte_swap_udp_header(udp);
-
-    // Got UDP packet, see if it's DHCP
-    if udp.destination_port != DHCP_CLIENT_PORT return null;
-    if udp.length < size_of(Dhcp_Message) + size_of(Udp_Header) return null;
-
-    dhcp := cast(*Dhcp_Message) (udp + 1);
-    byte_swap_dhcp_message(dhcp);
-
-    if dhcp.magic != Dhcp_Message.MAGIC return null;
-
-    return dhcp;
+    checksum: u16;
+    data: u32;
 }
 
-maybe_handle_echo :: (net: *Network_Connection, eth: *Ethernet_Header) -> handled: bool {
-    ip := cast(*Ipv4_Header) (eth + 1);
+Icmp_Packet :: struct {
+    eth: Ethernet_Header;
+    ip: Ipv4_Header #align 1;
+    using icmp: Icmp_Header #align 1;
+}
 
-    if ip.protocol != .ICMP {
-        return false;
-    }
-
-    icmp := cast(*Icmp_Header) (ip + 1);
+handle_icmp_packet :: (net: *Network_Connection, eth: *Ethernet_Header) {
+    icmp := cast(*Icmp_Packet) eth;
 
     if icmp.control_message == {
       case .echo_request;
-        log("Got pinged, sending pong");
-
-        ping := cast(*Icmp_Packet) eth;
-        pong := make_pong(ping);
-
-        packet: Network_Packet;
-        packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
-
-        add_to_packet(*packet, pong);
-
-        i8254x_transmit_packet(*net.adapter, packet);
-
-        free_4k_page(cast(u64, packet.data - DIRECT_MAPPING_BASE));
+        log("Got pinged by %, sending pong", format_ip(icmp.ip.source_address));
+        transmit_pong(net, icmp);
 
       case .echo_reply;
-        pong := cast(*Icmp_Packet) eth;
-
         for net.pings_in_flight {
-            if it.id == pong.icmp.data {
-                time := get_monotonic_system_time();
+            if it.id == icmp.data {
+                time := get_monotonic_time();
 
                 delta_us := to_milliseconds(time - it.sent_at);
                 log("Ping % = %ms", format_ip(it.destination_ip), delta_us);
@@ -792,8 +619,38 @@ maybe_handle_echo :: (net: *Network_Connection, eth: *Ethernet_Header) -> handle
             }
         }
     }
+}
 
-    return true;
+transmit_pong :: (net: *Network_Connection, ping: *Icmp_Packet) {
+    using pong: Icmp_Packet;
+
+    packet: Network_Packet;
+    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
+    defer free_4k_page(cast(u64, packet.data - DIRECT_MAPPING_BASE));
+
+    eth.destination_mac = ping.eth.source_mac;
+    eth.source_mac      = ping.eth.destination_mac;
+    eth.ethertype       = .IPv4;
+
+    set(*ip, .version, 4);
+    set(*ip, .ihl, 5);
+    set(*ip, .total_length, size_of(Ipv4_Header) + size_of(Icmp_Header));
+
+    ip.time_to_live = 128;
+    ip.protocol = .ICMP;
+    ip.source_address = ping.ip.destination_address;
+    ip.destination_address = ping.ip.source_address;
+
+    byte_swap_ip(*ip);
+    ip.checksum = internet_checksum(ip);
+
+    icmp.control_message = .echo_reply;
+    icmp.data = ping.icmp.data;
+    icmp.checksum = internet_checksum(icmp);
+
+    add_to_packet(*packet, pong);
+
+    i8254x_transmit_packet(*net.adapter, packet);
 }
 
 transmit_ping :: (net: *Network_Connection, destination_ip: u32) {
@@ -824,7 +681,7 @@ transmit_ping :: (net: *Network_Connection, destination_ip: u32) {
 
     add_to_packet(*packet, ping);
 
-    time := get_monotonic_system_time();
+    time := get_monotonic_time();
     success := i8254x_transmit_packet(*net.adapter, packet);
     if !success bluescreen();
 
@@ -835,79 +692,272 @@ transmit_ping :: (net: *Network_Connection, destination_ip: u32) {
     });
 }
 
-transmit_arp_probe :: (net: *Network_Connection) {
 
-    probe: struct {
-        using eth: Ethernet_Header;
-        using arp: Arp_Packet;
-    }
 
-    packet: Network_Packet;
-    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
+Dns_Header :: struct {
+    transaction_id: u16;
 
-    probe.destination_mac = BROADCAST_MAC;
-    probe.source_mac      = net.adapter.mac_address;
-    probe.ethertype       = .ARP;
+    flags: u16;
 
-    probe.HTYPE__hardware_type = .ethernet;
-    probe.PTYPE__protocol_type = .IPv4;
-    probe.HLEN__hardware_length = 6;
-    probe.PLEN__protocol_length = 4;
-    probe.OPER__operation       = .request;
-
-    probe.SHA__sender_hardware_address = net.adapter.mac_address;
-    probe.SPA__sender_protocol_address = 0;
-    probe.THA__target_hardware_address = .[0,0,0,0,0,0];
-    probe.TPA__target_protocol_address = net.our_ip;
-
-    add_to_packet(*packet, probe);
-    i8254x_transmit_packet(*net.adapter, packet);
-
-    free_4k_page(cast(u64, packet.data - DIRECT_MAPPING_BASE));
+    questions: u16;
+    answers: u16;
+    authority_rrs: u16;
+    additional_rrs: u16;
 }
 
-maybe_handle_arp :: (net: *Network_Connection, eth: *Ethernet_Header) -> bool {
-    if eth.ethertype != .ARP return false;
+byte_swap_dns_header :: (dns: *Dns_Header) {
+    dns.questions      = bs16(dns.questions);
+    dns.answers        = bs16(dns.answers);
+    dns.authority_rrs  = bs16(dns.authority_rrs);
+    dns.additional_rrs = bs16(dns.additional_rrs);
+}
 
-    arp := cast(*Arp_Packet) (eth + 1);
+DNS_SERVER_PORT :: 53;
 
-    if arp.SPA__sender_protocol_address == arp.TPA__target_protocol_address {
-        // Gratuitous ARP
-        table_add(*net.arp_table, arp.SPA__sender_protocol_address, arp.SHA__sender_hardware_address);
-        return true;
-    }
-
-    if net.our_ip != arp.TPA__target_protocol_address return true;
-    if arp.OPER__operation != .request return true;
-
-    reply: struct {
-        using eth: Ethernet_Header;
-        using arp: Arp_Packet;
-    }
-
+transmit_dns_query :: (net: *Network_Connection, url: string) {
     packet: Network_Packet;
     packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
 
-    reply.destination_mac = arp.SHA__sender_hardware_address;
-    reply.source_mac      = net.adapter.mac_address;
-    reply.ethertype       = .ARP;
+    xid := cast(u16) rdtsc();
 
-    reply.HTYPE__hardware_type = .ethernet;
-    reply.PTYPE__protocol_type = .IPv4;
-    reply.HLEN__hardware_length = 6;
-    reply.PLEN__protocol_length = 4;
-    reply.OPER__operation       = .reply;
+    eth: Ethernet_Header;
+    eth.destination_mac = net.router_mac_address;
+    eth.source_mac = net.adapter.mac_address;
+    eth.ethertype = .IPv4;
 
-    reply.SHA__sender_hardware_address = net.adapter.mac_address;
-    reply.SPA__sender_protocol_address = net.our_ip;
-    reply.THA__target_hardware_address = arp.SHA__sender_hardware_address;
-    reply.TPA__target_protocol_address = arp.SPA__sender_protocol_address;
+    add_to_packet(*packet, eth);
 
-    add_to_packet(*packet, reply);
+    ip_packet_length := size_of(Ipv4_Header)
+        + size_of(Udp_Header)
+        + size_of(Dns_Header)
+        + cast(u16) url.count + 6; // 6 because TYPE, CLASS, first label length, and zero terminator.
+
+    ip: Ipv4_Header;
+    set(*ip, .version, 4);
+    set(*ip, .ihl, 5);
+    set(*ip, .total_length, ip_packet_length);
+
+    ip.time_to_live = 128;
+    ip.protocol = .UDP;
+    ip.source_address = net.our_ip;
+    ip.destination_address = net.router_ip;
+
+    byte_swap_ip(*ip);
+    ip.checksum = internet_checksum(ip);
+
+    add_to_packet(*packet, ip);
+
+    udp: Udp_Header;
+    udp.source_port = 0x1234;
+    udp.destination_port = DNS_SERVER_PORT;
+    udp.length = size_of(Udp_Header)
+        + size_of(Dns_Header)
+        + cast(u16) url.count + 6;
+
+    byte_swap_udp_header(*udp);
+    add_to_packet(*packet, udp);
+
+    dns: Dns_Header;
+    dns.transaction_id = xx rdtsc();
+    dns.flags = 1;
+    dns.questions = 1;
+
+    byte_swap_dns_header(*dns);
+    add_to_packet(*packet, dns);
+
+    current_label_length: u8;
+
+    remaining := url;
+
+    while true {
+        found, left, right := split_from_left(remaining, #char ".");
+        add_to_packet(*packet, left.count.(u8));
+        add_to_packet(*packet, left);
+
+        if !found break;
+
+        remaining = right;
+    }
+    add_to_packet(*packet, (0).(u8));
+
+    add_to_packet(*packet, bs16(1).(u16)); // TYPE
+    add_to_packet(*packet, bs16(1).(u16)); // CLASS
+
     i8254x_transmit_packet(*net.adapter, packet);
-    log("ARP reply sent");
 
-    free_4k_page(cast(u64, packet.data - DIRECT_MAPPING_BASE));
+    new_query := array_add(*net.dns_queries_in_flight);
+    new_query.id = dns.transaction_id;
+    new_query.url = url;
+    new_query.sent_at = get_monotonic_time();
+}
 
-    return true;
+Dns_Packet :: struct {
+    eth: Ethernet_Header;
+    ip: Ipv4_Header #align 1;
+    udp: Udp_Header #align 1;
+    dns: Dns_Header #align 1;
+}
+
+handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
+    using packet := cast(*Dns_Packet) eth_;
+    log("Got DNS response.");
+
+    for net.dns_queries_in_flight {
+        if it.id != dns.transaction_id {
+            continue;
+        }
+
+        log("Got DNS response from %.", format_ip(ip.source_address));
+        remove it;
+
+        return;
+    }
+
+    log_error("Got unexpected DNS response from %.", format_ip(ip.source_address));
+}
+
+
+
+
+Network_Packet :: struct {
+    data: *void;
+    length: int;
+}
+
+add_to_packet :: (packet: *Network_Packet, data: Any) {
+    if data.type.type == .STRING {
+        s := data.value_pointer.(*string).*;
+
+        memcpy(packet.data + packet.length, s.data, s.count);
+        packet.length += s.count;
+
+        return;
+    }
+
+    memcpy(packet.data + packet.length, data.value_pointer, data.type.runtime_size);
+    packet.length += data.type.runtime_size;
+}
+
+
+
+format_mac :: (mac: [6] u8) -> string {
+    Push_Print_Style(mac_address_print_style);
+    return tprint("%", mac);
+}
+
+format_ip :: (ip: u32) -> string {
+    ip_array := (*ip).(*[4]u8).*;
+
+    return tprint("%.%.%.%",
+        ip_array[0],
+        ip_array[1],
+        ip_array[2],
+        ip_array[3]
+    );
+}
+
+Network_Connection :: struct {
+    router_mac_address: [6] u8;
+
+    our_ip: u32;
+    router_ip: u32;
+
+    adapter: I8254x_Network_Interface_Card;
+
+    dhcp_xid: u32;
+
+    dhcp_handshake_state: enum {
+        NOT_STARTED;
+        DISCOVER_TRANSMITTED;
+        OFFER_ACCEPTED;
+        ARP_PROBE_1_TRANSMITTED;
+        ARP_PROBE_2_TRANSMITTED;
+        ARP_PROBE_3_TRANSMITTED;
+        COMPLETED;
+    }
+    arp_probe_transmitted_at: Apollo_Time;
+    arp_table: Table(u32, [6]u8);
+
+    pings_in_flight: [..] struct {
+        id: u32;
+        destination_ip: u32;
+        sent_at: Apollo_Time;
+    };
+
+    dns_queries_in_flight: [..] struct {
+        id: u16;
+        url: string;
+        sent_at: Apollo_Time;
+    };
+
+    FIRST_DYNAMIC_PORT :: 0xc000;
+    tcp_connections: [..] Tcp_Connection;
+
+    spinlock: Spinlock;
+}
+
+network_thread :: () #c_call {
+    push_context,defer_pop;
+
+    core := get_current_core();
+    release(*core.scheduler.spinlock);
+
+    Log_Category("Net");
+    using net := *kernel_globals.net;
+
+    LOG_ALL_RECEIVED_ETHERNET_PACKETS :: false;
+
+    while true  {
+        acquire(*spinlock);
+
+        if dhcp_handshake_state != .COMPLETED {
+            update_dhcp(net);
+        }
+
+        packets := i8254x_get_newly_received_packets(*adapter);
+
+        for packets {
+            eth := cast(*Ethernet_Header) it.data;
+
+            if LOG_ALL_RECEIVED_ETHERNET_PACKETS {
+                Push_Print_Style(mac_address_print_style);
+                log("% => % (%)", eth.source_mac, eth.destination_mac, eth.ethertype);
+            }
+
+            if eth.ethertype == .ARP {
+                handle_arp(net, eth);
+                continue;
+            }
+
+            if eth.ethertype != .IPv4 {
+                log("Received network packet with unsupported protocol %.", eth.ethertype);
+                continue;
+            }
+
+            ip := cast(*Ipv4_Header) (eth + 1);
+            assert(get(ip.*, .ihl) == 5);
+
+            if ip.protocol == {
+              case .ICMP;
+                handle_icmp_packet(net, eth);
+              case .UDP;
+                udp := cast(*Udp_Header) (ip + 1);
+                byte_swap_udp_header(udp);
+
+                if udp.destination_port == DHCP_CLIENT_PORT {
+                    handle_dhcp_packet(net, eth);
+                }
+
+                if udp.source_port == DNS_SERVER_PORT {
+                    handle_dns_packet(net, eth);
+                }
+              case;
+                log("Received IP packet with unsupported protocol %.", ip.protocol);
+            }
+        }
+
+        release(*spinlock);
+
+        sleep(50, .milliseconds);
+    }
 }

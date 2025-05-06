@@ -259,6 +259,13 @@ kernel_entry :: () #no_context {
             put_task_on_core(task, *processor_cores[1]);
         }
 
+        while net.dhcp_handshake_state < .COMPLETED {};
+
+        acquire(*net.spinlock);
+        log("Sending DNS Query");
+        transmit_dns_query(*net, "en.wikipedia.org");
+        release(*net.spinlock);
+
         #asm { sti; }
 
         while true {
