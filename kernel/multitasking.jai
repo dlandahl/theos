@@ -343,8 +343,8 @@ task_do_work :: () #c_call {
 }
 
 task_do_work_in_ring_3 :: () #c_call {
-    push_context {
 
+    push_context {
         core := get_current_core_from_user_mode();
         thread := core.scheduler.current_task;
 

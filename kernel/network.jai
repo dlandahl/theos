@@ -215,7 +215,7 @@ Tcp_Header :: struct {
 
     data_offset: u16;
 
-    flags: enum u8 {
+    flags: enum_flags u8 {
         CWR;
         ECE;
         URG;
@@ -706,6 +706,7 @@ Dns_Header :: struct {
 }
 
 byte_swap_dns_header :: (dns: *Dns_Header) {
+    dns.transaction_id = bs16(dns.transaction_id);
     dns.questions      = bs16(dns.questions);
     dns.answers        = bs16(dns.answers);
     dns.authority_rrs  = bs16(dns.authority_rrs);
@@ -758,7 +759,7 @@ transmit_dns_query :: (net: *Network_Connection, url: string) {
     add_to_packet(*packet, udp);
 
     dns: Dns_Header;
-    dns.transaction_id = xx rdtsc();
+    dns.transaction_id = xid;
     dns.flags = 1;
     dns.questions = 1;
 
@@ -785,10 +786,11 @@ transmit_dns_query :: (net: *Network_Connection, url: string) {
 
     i8254x_transmit_packet(*net.adapter, packet);
 
-    new_query := array_add(*net.dns_queries_in_flight);
-    new_query.id = dns.transaction_id;
-    new_query.url = url;
-    new_query.sent_at = get_monotonic_time();
+    array_add(*net.dns_queries_in_flight, .{
+        id = xid,
+        url = url,
+        sent_at = get_monotonic_time(),
+    });
 }
 
 Dns_Packet :: struct {
@@ -796,26 +798,79 @@ Dns_Packet :: struct {
     ip: Ipv4_Header #align 1;
     udp: Udp_Header #align 1;
     dns: Dns_Header #align 1;
+} #no_padding
+
+Dns_Record_Type :: enum u16 {
+    A     :: 0x0100;
+    CNAME :: 0x0500;
 }
 
 handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
     using packet := cast(*Dns_Packet) eth_;
-    log("Got DNS response.");
 
-    for net.dns_queries_in_flight {
-        if it.id != dns.transaction_id {
+    // Todo: parsing DNS records is very hardcoded right now
+
+    byte_swap_dns_header(*packet.dns);
+
+    for* query: net.dns_queries_in_flight {
+        if query.id != dns.transaction_id {
             continue;
         }
 
-        log("Got DNS response from %.", format_ip(ip.source_address));
-        remove it;
+        query.complete = true;
 
-        return;
+        Skip_Name :: () #expand {
+            while cursor.* != 0 {
+                cursor += cursor.*;
+                cursor += 1;
+            }
+            cursor += 1;
+        }
+
+        cursor := cast(*u8, *dns + 1);
+        for 0..dns.questions-1 {
+            // Skip all the questions.
+            Skip_Name();
+
+            cursor += 2; // TYPE
+            cursor += 2; // CLASS
+        }
+
+        // Should now be at the answers. Find a host address.
+
+        for 0..dns.answers-1{
+            // Detect if it's a pointer
+            if (cursor[0] >> 6) == 0b11 {
+                cursor += 2;
+            } else {
+                Skip_Name();
+            }
+
+            type := cursor.(*Dns_Record_Type).*;
+
+            cursor += 8; // Class, type, TTL
+            data_length := bs16(cursor.(*u16).*);
+
+            cursor += 2; // Data length
+
+            if type == .A {
+                if data_length != 4 {
+                    log_error("DNS response address is not IPv4");
+                    return;
+                }
+
+                query.answer = cursor.(*u32).*;
+
+                log("Got DNS response regarding %. IP is %", query.url, format_ip(query.answer));
+                return;
+            } else {
+                cursor += data_length;
+            }
+        }
     }
 
     log_error("Got unexpected DNS response from %.", format_ip(ip.source_address));
 }
-
 
 
 
@@ -888,6 +943,8 @@ Network_Connection :: struct {
         id: u16;
         url: string;
         sent_at: Apollo_Time;
+        complete: bool;
+        answer: u32;
     };
 
     FIRST_DYNAMIC_PORT :: 0xc000;
@@ -958,6 +1015,6 @@ network_thread :: () #c_call {
 
         release(*spinlock);
 
-        sleep(50, .milliseconds);
+        sleep(5, .milliseconds);
     }
 }

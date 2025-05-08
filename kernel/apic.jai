@@ -346,7 +346,7 @@ page_fault :: (stack: *Interrupt_Stack(true)) #c_call {
     cr2 := _cr2;
 
     context.print_style.default_format_int.base = 16;
-    print("Virtual Address: 0x%\n\n", cr2);
+    print("Virtual Address: 0x%\n", cr2);
 
     Flags :: enum_flags u32 {
         PRESENT;
@@ -424,6 +424,8 @@ initialize_uacpi :: () {
 
         uacpi_prepare_for_sleep_state(.S5);
         uacpi_enter_sleep_state(.S5);
+
+        write_apic_register(.EOI__END_OF_INTERRUPT, 0x0);
 
         return UACPI_INTERRUPT_HANDLED;
     }, null);

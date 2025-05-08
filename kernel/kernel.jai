@@ -249,12 +249,11 @@ kernel_entry :: () #no_context {
             }
         }
 
+        // initialize_uacpi();
+
         network_adapter_initialized := kernel_globals.net.adapter.mmio != null;
 
         if network_adapter_initialized {
-            // It seems like the VirtualBox network bridge is not ready to transmit packets until a few seconds after we initalize the emulated NIC.
-            sleep(5, .seconds);
-
             task := create_task(network_thread);
             put_task_on_core(task, *processor_cores[1]);
         }

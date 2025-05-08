@@ -186,68 +186,65 @@ read_msr :: (msr: Ia32_Model_Specific_Register) -> u64 #no_context {
 
 
 
-enable_cpu_features :: () #no_context {
-    push_context {
-        cpu_features := get_cpu_info().feature_leaves;
+enable_cpu_features :: () {
+    cpu_features := get_cpu_info().feature_leaves;
 
-        CR0_MP         :=   1 << 1;
-        CR0_EM_CLEAR   := ~(1 << 2);
+    CR0_MP         :=   1 << 1;
+    CR0_EM_CLEAR   := ~(1 << 2);
 
-        CR4_OSFXSR     :=   1 << 9;
-        CR4_OSXMMEXCPT :=   1 << 10;
-        CR4_FSGSBASE   :=   1 << 16;
-        CR4_PCIDE      :=   1 << 17;
-        CR4_OSXSAVE    :=   1 << 18;
+    CR4_OSFXSR     :=   1 << 9;
+    CR4_OSXMMEXCPT :=   1 << 10;
+    CR4_FSGSBASE   :=   1 << 16;
+    CR4_PCIDE      :=   1 << 17;
+    CR4_OSXSAVE    :=   1 << 18;
 
-        if check_feature(cpu_features, .SSE) {
-            #asm {
-                get_cr0 cr0:;
-                and cr0, CR0_EM_CLEAR;
-                or  cr0, CR0_MP;
-                set_cr0 cr0;
-
-                get_cr4 cr4:;
-                or  cr4, CR4_OSFXSR;
-                or  cr4, CR4_OSXMMEXCPT;
-                set_cr4 cr4;
-            }
-        }
-
-        if check_feature(cpu_features, .PCID) {
-            #asm {
-                get_cr4 cr4:;
-                or  cr4, CR4_PCIDE;
-                set_cr4 cr4;
-            }
-        }
-
-        if check_feature(cpu_features, .FSGSBASE) {
-            #asm {
-                get_cr4 cr4:;
-                or  cr4, CR4_FSGSBASE;
-                set_cr4 cr4;
-            }
-        } else {
-            write_string("Error: FSGSBASE is not supported.\n");
-            bluescreen();
-        }
-
-        if check_feature(cpu_features, .XSAVE) {
-            #asm {
-                get_cr4 cr4:;
-                or  cr4, CR4_OSXSAVE;
-                set_cr4 cr4;
-            }
-        }
-
-
-        // Mask out all the FP exceptions for now
-        mxcsr := Mxcsr.MASK_ALL;
-        pmxcsr := *mxcsr;
-
+    if check_feature(cpu_features, .SSE) {
         #asm {
-            ldmxcsr [pmxcsr];
+            get_cr0 cr0:;
+            and cr0, CR0_EM_CLEAR;
+            or  cr0, CR0_MP;
+            set_cr0 cr0;
+
+            get_cr4 cr4:;
+            or  cr4, CR4_OSFXSR;
+            or  cr4, CR4_OSXMMEXCPT;
+            set_cr4 cr4;
         }
+    }
+
+    if check_feature(cpu_features, .PCID) {
+        #asm {
+            get_cr4 cr4:;
+            or  cr4, CR4_PCIDE;
+            set_cr4 cr4;
+        }
+    }
+
+    if check_feature(cpu_features, .FSGSBASE) {
+        #asm {
+            get_cr4 cr4:;
+            or  cr4, CR4_FSGSBASE;
+            set_cr4 cr4;
+        }
+    } else {
+        write_string("Error: FSGSBASE is not supported.\n");
+        bluescreen();
+    }
+
+    if check_feature(cpu_features, .XSAVE) {
+        #asm {
+            get_cr4 cr4:;
+            or  cr4, CR4_OSXSAVE;
+            set_cr4 cr4;
+        }
+    }
+
+    // Mask out all the FP exceptions for now
+    mxcsr := Mxcsr.MASK_ALL;
+    pmxcsr := *mxcsr;
+
+    #asm {
+        ldmxcsr [pmxcsr];
     }
 }
 
