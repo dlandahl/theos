@@ -22,6 +22,17 @@ Ethertype :: enum u16 {
     UNKNOWN   :: 0xF086;
 }
 
+init_ethernet_header :: (net: *Network_Connection) -> Ethernet_Header {
+    eth: Ethernet_Header;
+    eth.destination_mac = net.router_mac_address;
+    eth.source_mac = net.adapter.mac_address;
+    eth.ethertype = .IPv4;
+
+    return eth;
+}
+
+
+
 Ipv4_Header :: struct {
 
     #as bitfield: enum u64 {
@@ -81,6 +92,31 @@ internet_checksum :: (header: $H) -> u16 {
     }
 
     return ~bs16(xx sum);
+}
+
+init_ip_header :: (
+    net: *Network_Connection,
+    protocol: type_of(Ipv4_Header.protocol),
+    destination_ip: u32,
+    total_length: int
+) -> Ipv4_Header {
+
+    assert(total_length >= size_of(Ipv4_Header) && total_length < 0xffff);
+
+    ip: Ipv4_Header;
+    set(*ip, .version, 4);
+    set(*ip, .ihl, 5);
+    set(*ip, .total_length, total_length);
+
+    ip.time_to_live = 128;
+    ip.protocol = protocol;
+    ip.source_address = net.our_ip;
+    ip.destination_address = destination_ip;
+
+    byte_swap_ip(*ip);
+    ip.checksum = internet_checksum(ip);
+
+    return ip;
 }
 
 
@@ -204,6 +240,8 @@ byte_swap_udp_header :: (udp: *Udp_Header) {
     udp.checksum         = bs16(udp.checksum);
 }
 
+FIRST_EPHEMERAL_PORT :: 0xc000;
+
 
 
 Tcp_Header :: struct {
@@ -255,6 +293,35 @@ Tcp_Connection :: struct {
     }
 
     sequence_number: u32;
+}
+
+update_tcp_connections :: (net: *Network_Connection) {
+
+}
+
+initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_port: u16) {
+    port := allocate_port(net);
+
+     new_connection := Tcp_Connection.{
+        port,
+        remote_port,
+        remote_ip,
+        .NOT_STARTED,
+        xx rdtsc()
+    };
+
+    array_add(*net.tcp_connections, new_connection);
+
+    // Transmit SYN:
+    packet: Network_Packet;
+    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
+
+    eth := init_ethernet_header(net);
+    add_to_packet(*packet, eth);
+
+    datagram_length := size_of(Ipv4_Header) + size_of(Tcp_Header);
+    ip := init_ip_header(net, .TCP, remote_ip, datagram_length);
+    add_to_packet(*packet, ip);
 }
 
 
@@ -441,24 +508,12 @@ make_dhcp_discover :: (net: *Network_Connection) -> Network_Packet, u32 {
 
     dhcp_options_length : u16 = dhcp_opt_discover.count + dhcp_opt_prl.count;
 
-    ip_packet_length := size_of(Ipv4_Header)
+    ip_length := size_of(Ipv4_Header)
         + size_of(Udp_Header)
         + size_of(Dhcp_Message)
         + dhcp_options_length;
 
-    ip: Ipv4_Header;
-    set(*ip, .version, 4);
-    set(*ip, .ihl, 5);
-    set(*ip, .total_length, ip_packet_length);
-
-    ip.time_to_live = 128;
-    ip.protocol = .UDP;
-    ip.source_address = 0;
-    ip.destination_address = 0xff_ff_ff_ff;
-
-    byte_swap_ip(*ip);
-    ip.checksum = internet_checksum(ip);
-
+    ip := init_ip_header(net, .UDP, 0xff_ff_ff_ff, ip_length);
     add_to_packet(*packet, ip);
 
     udp: Udp_Header;
@@ -529,24 +584,12 @@ make_dhcp_request :: (net: *Network_Connection, xid: u32) -> Network_Packet {
 
     dhcp_options_length : u16 = dhcp_opt_request.count + dhcp_opt_server.count + dhcp_opt_requested_ip.count;
 
-    ip_packet_length := size_of(Ipv4_Header)
+    ip_length := size_of(Ipv4_Header)
         + size_of(Udp_Header)
         + size_of(Dhcp_Message)
         + dhcp_options_length;
 
-    ip: Ipv4_Header;
-    set(*ip, .version, 4);
-    set(*ip, .ihl, 5);
-    set(*ip, .total_length, ip_packet_length);
-
-    ip.time_to_live = 128;
-    ip.protocol = .UDP;
-    ip.source_address = 0;
-    ip.destination_address = 0xff_ff_ff_ff;
-
-    byte_swap_ip(*ip);
-    ip.checksum = internet_checksum(ip);
-
+    ip := init_ip_header(net, .UDP, 0xff_ff_ff_ff, ip_length);
     add_to_packet(*packet, ip);
 
     udp: Udp_Header;
@@ -632,17 +675,7 @@ transmit_pong :: (net: *Network_Connection, ping: *Icmp_Packet) {
     eth.source_mac      = ping.eth.destination_mac;
     eth.ethertype       = .IPv4;
 
-    set(*ip, .version, 4);
-    set(*ip, .ihl, 5);
-    set(*ip, .total_length, size_of(Ipv4_Header) + size_of(Icmp_Header));
-
-    ip.time_to_live = 128;
-    ip.protocol = .ICMP;
-    ip.source_address = ping.ip.destination_address;
-    ip.destination_address = ping.ip.source_address;
-
-    byte_swap_ip(*ip);
-    ip.checksum = internet_checksum(ip);
+    ip = init_ip_header(net, .ICMP, ping.ip.source_address, size_of(Ipv4_Header) + size_of(Icmp_Header));
 
     icmp.control_message = .echo_reply;
     icmp.data = ping.icmp.data;
@@ -656,21 +689,8 @@ transmit_pong :: (net: *Network_Connection, ping: *Icmp_Packet) {
 transmit_ping :: (net: *Network_Connection, destination_ip: u32) {
     using ping: Icmp_Packet;
 
-    eth.destination_mac = net.router_mac_address;
-    eth.source_mac = net.adapter.mac_address;
-    eth.ethertype = .IPv4;
-    
-    set(*ip, .version, 4);
-    set(*ip, .ihl, 5);
-    set(*ip, .total_length, size_of(Ipv4_Header) + size_of(Icmp_Header));
-
-    ip.time_to_live = 64;
-    ip.protocol = .ICMP;
-    ip.source_address = net.our_ip;
-    ip.destination_address = destination_ip;
-
-    byte_swap_ip(*ip);
-    ip.checksum = internet_checksum(ip);
+    eth = init_ethernet_header(net);
+    ip = init_ip_header(net, .ICMP, destination_ip, size_of(Ipv4_Header) + size_of(Icmp_Header));
 
     icmp.control_message = .echo_request;
     icmp.data = xx rdtsc() & 0xffff;
@@ -681,9 +701,10 @@ transmit_ping :: (net: *Network_Connection, destination_ip: u32) {
 
     add_to_packet(*packet, ping);
 
-    time := get_monotonic_time();
     success := i8254x_transmit_packet(*net.adapter, packet);
     if !success bluescreen();
+
+    time := get_monotonic_time();
 
     array_add(*net.pings_in_flight, .{
         id = icmp.data,
@@ -721,35 +742,19 @@ transmit_dns_query :: (net: *Network_Connection, url: string) {
 
     xid := cast(u16) rdtsc();
 
-    eth: Ethernet_Header;
-    eth.destination_mac = net.router_mac_address;
-    eth.source_mac = net.adapter.mac_address;
-    eth.ethertype = .IPv4;
-
+    eth := init_ethernet_header(net);
     add_to_packet(*packet, eth);
 
-    ip_packet_length := size_of(Ipv4_Header)
+    ip_length := size_of(Ipv4_Header)
         + size_of(Udp_Header)
         + size_of(Dns_Header)
         + cast(u16) url.count + 6; // 6 because TYPE, CLASS, first label length, and zero terminator.
 
-    ip: Ipv4_Header;
-    set(*ip, .version, 4);
-    set(*ip, .ihl, 5);
-    set(*ip, .total_length, ip_packet_length);
-
-    ip.time_to_live = 128;
-    ip.protocol = .UDP;
-    ip.source_address = net.our_ip;
-    ip.destination_address = net.router_ip;
-
-    byte_swap_ip(*ip);
-    ip.checksum = internet_checksum(ip);
-
+    ip := init_ip_header(net, .UDP, net.router_ip, ip_length);
     add_to_packet(*packet, ip);
 
     udp: Udp_Header;
-    udp.source_port = 0x1234;
+    udp.source_port = allocate_port(net);
     udp.destination_port = DNS_SERVER_PORT;
     udp.length = size_of(Udp_Header)
         + size_of(Dns_Header)
@@ -817,7 +822,9 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
             continue;
         }
 
-        query.complete = true;
+        if query.complete {
+            continue;
+        }
 
         Skip_Name :: () #expand {
             while cursor.* != 0 {
@@ -838,7 +845,7 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
 
         // Should now be at the answers. Find a host address.
 
-        for 0..dns.answers-1{
+        for 0..dns.answers-1 {
             // Detect if it's a pointer
             if (cursor[0] >> 6) == 0b11 {
                 cursor += 2;
@@ -861,7 +868,9 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
 
                 query.answer = cursor.(*u32).*;
 
-                log("Got DNS response regarding %. IP is %", query.url, format_ip(query.answer));
+                log("Got DNS response regarding \"%\". IP is %", query.url, format_ip(query.answer));
+
+                query.complete = true;
                 return;
             } else {
                 cursor += data_length;
@@ -947,10 +956,17 @@ Network_Connection :: struct {
         answer: u32;
     };
 
-    FIRST_DYNAMIC_PORT :: 0xc000;
     tcp_connections: [..] Tcp_Connection;
+    next_port: u16;
 
     spinlock: Spinlock;
+}
+
+allocate_port :: (net: *Network_Connection) -> u16 {
+    port := net.next_port;
+    net.next_port += 1;
+
+    return port;
 }
 
 network_thread :: () #c_call {
@@ -961,6 +977,7 @@ network_thread :: () #c_call {
 
     Log_Category("Net");
     using net := *kernel_globals.net;
+    next_port = FIRST_EPHEMERAL_PORT;
 
     LOG_ALL_RECEIVED_ETHERNET_PACKETS :: false;
 
@@ -997,6 +1014,7 @@ network_thread :: () #c_call {
             if ip.protocol == {
               case .ICMP;
                 handle_icmp_packet(net, eth);
+
               case .UDP;
                 udp := cast(*Udp_Header) (ip + 1);
                 byte_swap_udp_header(udp);
@@ -1008,6 +1026,7 @@ network_thread :: () #c_call {
                 if udp.source_port == DNS_SERVER_PORT {
                     handle_dns_packet(net, eth);
                 }
+
               case;
                 log("Received IP packet with unsupported protocol %.", ip.protocol);
             }

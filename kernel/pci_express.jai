@@ -729,7 +729,7 @@ i8254x_get_newly_received_packets :: (nic: *I8254x_Network_Interface_Card) -> []
     return packets_received;
 }
 
-i8254x_transmit_packet :: (nic: *I8254x_Network_Interface_Card, packet: Network_Packet) -> bool {
+i8254x_transmit_packet :: (nic: *I8254x_Network_Interface_Card, packet: Network_Packet, call := #caller_location) -> bool {
     Log_Category("8254x");
 
     if !packet.data || !packet.length {
@@ -749,7 +749,7 @@ i8254x_transmit_packet :: (nic: *I8254x_Network_Interface_Card, packet: Network_
     nic.TDT__transmit_descriptor_tail = nic.tx_queue_tail;
 
     if Timeout(nic.TPT__total_packets_transmitted) {
-        log_error("Failed to transmit network packet.");
+        log_error("Failed to transmit network packet. (%)", call);
         success = false;
     }
 

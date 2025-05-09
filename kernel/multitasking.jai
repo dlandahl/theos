@@ -83,7 +83,7 @@ core_begin_multitasking :: () {
             delay := kernel_globals.tsc_frequency / 10;
             write_msr(.TSC_DEADLINE, rdtsc() + delay);
         } else {
-            write_apic_register(.TIC__TIMER_INITIAL, 0x4000_0000);
+            write_apic_register(.TIC__TIMER_INITIAL, 0x0040_0000);
             set(*lapic_timer, .timer_mode, APIC_TIMER_MODE_PERIODIC);
         }
 

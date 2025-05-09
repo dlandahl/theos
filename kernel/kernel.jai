@@ -263,7 +263,21 @@ kernel_entry :: () #no_context {
         acquire(*net.spinlock);
         log("Sending DNS Query");
         transmit_dns_query(*net, "en.wikipedia.org");
+        transmit_dns_query(*net, "www.twitch.tv");
+        transmit_dns_query(*net, "discord.com");
+        transmit_dns_query(*net, "www.wighthoney.uk");
         release(*net.spinlock);
+
+        while true {
+            for* net.dns_queries_in_flight {
+                if !it.complete continue;
+
+                transmit_ping(*net, it.answer);
+                remove it;
+            }
+
+            sleep(50, .milliseconds);
+        }
 
         #asm { sti; }
 
