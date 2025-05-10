@@ -63,7 +63,7 @@ Kernel_Globals :: struct {
 
     high_precision_timer: HPET;
 
-    tasks: Bucket_Array(Task_Info, 256, always_iterate_by_pointer=true);
+    tasks: Bucket_Array(Task_Info, 128, always_iterate_by_pointer=true);
     next_task_id: int;
     add_task_info_struct_spinlock: Spinlock;
 
@@ -263,20 +263,19 @@ kernel_entry :: () #no_context {
         acquire(*net.spinlock);
         log("Sending DNS Query");
         transmit_dns_query(*net, "en.wikipedia.org");
-        transmit_dns_query(*net, "www.twitch.tv");
-        transmit_dns_query(*net, "discord.com");
-        transmit_dns_query(*net, "www.wighthoney.uk");
         release(*net.spinlock);
 
         while true {
-            for* net.dns_queries_in_flight {
-                if !it.complete continue;
+            sleep(5, .milliseconds);
 
-                transmit_ping(*net, it.answer);
-                remove it;
+            acquire(*net.spinlock);
+            if net.dns_queries_in_flight[0].complete {
+                initiate_tcp_connection(*net, net.dns_queries_in_flight[0].answer, HTTP_SERVER_PORT);
+
+                release(*net.spinlock);
+                break;
             }
-
-            sleep(50, .milliseconds);
+            release(*net.spinlock);
         }
 
         #asm { sti; }

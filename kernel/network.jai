@@ -251,17 +251,17 @@ Tcp_Header :: struct {
     sequence_number: u32;
     ack_number: u32;
 
-    data_offset: u16;
+    data_offset: u8;
 
     flags: enum_flags u8 {
-        CWR;
-        ECE;
-        URG;
-        ACK;
-        PSH;
-        RST;
-        SYN;
         FIN;
+        SYN;
+        RST;
+        PSH;
+        ACK;
+        URG;
+        ECE;
+        CWR;
     };
 
     window: u16;
@@ -274,7 +274,6 @@ byte_swap_tcp_header :: (tcp: *Tcp_Header) {
     tcp.destination_port = bs16(tcp.destination_port);
     tcp.sequence_number  = bs32(tcp.sequence_number);
     tcp.ack_number       = bs32(tcp.ack_number);
-    tcp.data_offset      = bs16(tcp.data_offset);
     tcp.window           = bs16(tcp.window);
     tcp.checksum         = bs16(tcp.checksum);
     tcp.urgent_pointer   = bs16(tcp.urgent_pointer);
@@ -292,25 +291,45 @@ Tcp_Connection :: struct {
         ACK_SENT;
     }
 
-    sequence_number: u32;
+    our_sequence_number: u32;
+    peer_sequence_number: u32;
+
+    bytes_transmitted: u32;
+    bytes_received: u32;
 }
 
-update_tcp_connections :: (net: *Network_Connection) {
+tcp_checksum :: (tcp: Tcp_Header, source: u32, dest: u32) -> u16 {
+    Pseudo_Header :: struct {
+        source_address: u32;
+        destination_address: u32;
+        zeroes: u8;
+        protocol: type_of(Ipv4_Header.protocol);
+        tcp_length: u16;
 
+        using tcp: Tcp_Header;
+    }
+
+    pseudo: Pseudo_Header;
+    pseudo.tcp = tcp;
+    pseudo.source_address = source;
+    pseudo.destination_address = dest;
+    pseudo.protocol = .TCP;
+    pseudo.tcp_length = bs16(size_of(Tcp_Header));
+
+    return internet_checksum(pseudo);
 }
 
 initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_port: u16) {
     port := allocate_port(net);
 
-     new_connection := Tcp_Connection.{
-        port,
-        remote_port,
-        remote_ip,
-        .NOT_STARTED,
-        xx rdtsc()
-    };
-
-    array_add(*net.tcp_connections, new_connection);
+    con := array_add(*net.tcp_connections);
+    con.* = .{
+        port = port,
+        remote_port = remote_port,
+        remote_ip = remote_ip,
+        handshake_state = .NOT_STARTED,
+        our_sequence_number = xx rdtsc(),
+    }; 
 
     // Transmit SYN:
     packet: Network_Packet;
@@ -322,7 +341,94 @@ initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_por
     datagram_length := size_of(Ipv4_Header) + size_of(Tcp_Header);
     ip := init_ip_header(net, .TCP, remote_ip, datagram_length);
     add_to_packet(*packet, ip);
+
+    tcp: Tcp_Header;
+    tcp.source_port = port;
+    tcp.destination_port = remote_port;
+    tcp.sequence_number = con.our_sequence_number;
+    tcp.data_offset = 5 << 4;
+    tcp.flags = .SYN;
+
+    byte_swap_tcp_header(*tcp);
+    tcp.checksum = tcp_checksum(tcp, ip.source_address, ip.destination_address);
+
+    add_to_packet(*packet, tcp);
+    i8254x_transmit_packet(*net.adapter, packet);
+
+    con.bytes_transmitted += 1;
+    con.handshake_state = .SYN_SENT;
 }
+
+transmit_tcp_ack :: (net: *Network_Connection, con: *Tcp_Connection) {
+    packet: Network_Packet;
+    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
+
+    eth := init_ethernet_header(net);
+    add_to_packet(*packet, eth);
+
+    datagram_length := size_of(Ipv4_Header) + size_of(Tcp_Header);
+    ip := init_ip_header(net, .TCP, con.remote_ip, datagram_length);
+    add_to_packet(*packet, ip);
+
+    tcp: Tcp_Header;
+    tcp.source_port = con.port;
+    tcp.destination_port = con.remote_port;
+    tcp.sequence_number = con.our_sequence_number + con.bytes_transmitted;
+    tcp.ack_number = con.peer_sequence_number + con.bytes_received;
+    tcp.data_offset = 5 << 4;
+    tcp.flags = .ACK;
+
+    byte_swap_tcp_header(*tcp);
+    tcp.checksum = tcp_checksum(tcp, ip.source_address, ip.destination_address);
+
+    add_to_packet(*packet, tcp);
+    i8254x_transmit_packet(*net.adapter, packet);
+
+    con.bytes_transmitted += 1;
+    con.handshake_state = .ACK_SENT;
+}
+
+handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
+
+    Tcp_Packet :: struct {
+        eth: Ethernet_Header;
+        ip: Ipv4_Header #align 1;
+        tcp: Tcp_Header #align 1;
+    }
+
+    using packet := cast(*Tcp_Packet) eth_;
+
+    byte_swap_tcp_header(*tcp);
+
+    con: *Tcp_Connection;
+    for* net.tcp_connections {
+        if it.port != tcp.destination_port continue;
+        con = it;
+        break;
+    }
+
+    if !con {
+        log_error("Got TCP message for nonexistent connection on port %", tcp.destination_port);
+        return;
+    }
+
+    if tcp.flags & .SYN {
+        if con.handshake_state == {
+          case .ACK_SENT;
+            // It is likely a retransmission.
+
+          case .SYN_SENT;
+            con.peer_sequence_number = tcp.sequence_number;
+        }
+    }
+
+    if tcp.flags & .ACK {
+        con.bytes_received += 1;
+        transmit_tcp_ack(net, con);
+    }
+}
+
+HTTP_SERVER_PORT :: 80;
 
 
 
@@ -1026,6 +1132,9 @@ network_thread :: () #c_call {
                 if udp.source_port == DNS_SERVER_PORT {
                     handle_dns_packet(net, eth);
                 }
+
+              case .TCP;
+                handle_tcp_packet(net, eth);
 
               case;
                 log("Received IP packet with unsupported protocol %.", ip.protocol);
