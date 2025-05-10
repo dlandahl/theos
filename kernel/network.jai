@@ -244,6 +244,37 @@ FIRST_EPHEMERAL_PORT :: 0xc000;
 
 
 
+tcp_checksum :: (tcp: Tcp_Header, source: u32, dest: u32) -> u16 {
+    Pseudo_Header :: struct {
+        source_address: u32;
+        destination_address: u32;
+        zeroes: u8;
+        protocol: type_of(Ipv4_Header.protocol);
+        tcp_length: u16;
+
+        using tcp: Tcp_Header;
+    }
+
+    pseudo: Pseudo_Header;
+    pseudo.tcp = tcp;
+    pseudo.source_address = source;
+    pseudo.destination_address = dest;
+    pseudo.protocol = .TCP;
+    pseudo.tcp_length = bs16(size_of(Tcp_Header));
+
+    return internet_checksum(pseudo);
+}
+
+byte_swap_tcp_header :: (tcp: *Tcp_Header) {
+    tcp.source_port      = bs16(tcp.source_port);
+    tcp.destination_port = bs16(tcp.destination_port);
+    tcp.sequence_number  = bs32(tcp.sequence_number);
+    tcp.ack_number       = bs32(tcp.ack_number);
+    tcp.window           = bs16(tcp.window);
+    tcp.checksum         = bs16(tcp.checksum);
+    tcp.urgent_pointer   = bs16(tcp.urgent_pointer);
+}
+
 Tcp_Header :: struct {
     source_port: u16;
     destination_port: u16;
@@ -269,14 +300,31 @@ Tcp_Header :: struct {
     urgent_pointer: u16;
 }
 
-byte_swap_tcp_header :: (tcp: *Tcp_Header) {
-    tcp.source_port      = bs16(tcp.source_port);
-    tcp.destination_port = bs16(tcp.destination_port);
-    tcp.sequence_number  = bs32(tcp.sequence_number);
-    tcp.ack_number       = bs32(tcp.ack_number);
-    tcp.window           = bs16(tcp.window);
-    tcp.checksum         = bs16(tcp.checksum);
-    tcp.urgent_pointer   = bs16(tcp.urgent_pointer);
+Tcp_Transmission_Info :: struct {
+    // There should be an instance of this for each unacknowledged transmitted packet in a connection.
+    // Except for ACKs sent by us, as we don't expect to receive an ACK for those.
+
+    last_sent_at: Apollo_Time; // To detect if we need to retransmit
+    sequence: u32;
+    packet: Network_Packet;
+}
+
+transmit_tcp_packet :: (net: *Network_Connection, con: *Tcp_Connection, packet: Network_Packet) {
+    // Procedure to transmit a packet and handle bookkeeping for retransmission/acknowledgement.
+
+    bytes_to_transmit := packet.length - (size_of(Ethernet_Header) + size_of(Ipv4_Header) + size_of(Tcp_Header));
+    if bytes_to_transmit == 0 bytes_to_transmit = 1;
+    con.our_sequence_number += cast(u32) bytes_to_transmit;
+
+    info := array_add(*con.in_flight);
+    info.last_sent_at = get_monotonic_time();
+    info.packet = packet;
+
+    // The sequence number in the ACK will include the bytes transmitted in this packet, so store that.
+    // The sequence number of the packet we're transmitting right now does not match this sequence number, as it describes the first byte being transmitted in that packet.
+    info.sequence = con.our_sequence_number;
+
+    i8254x_transmit_packet(*net.adapter, packet);
 }
 
 Tcp_Connection :: struct {
@@ -288,39 +336,24 @@ Tcp_Connection :: struct {
     handshake_state: enum {
         NOT_STARTED;
         SYN_SENT;
-        ACK_SENT;
+        ESTABLISHED;
     }
 
+    // Accumulated each time we transmit new bytes that have not been transmitted before
     our_sequence_number: u32;
-    peer_sequence_number: u32;
 
-    bytes_transmitted: u32;
-    bytes_received: u32;
-}
+    // The next sequence number we expect to see is always this + 1.
+    // Peer sequence numbers less than this have been acknowledged before.
+    last_received_byte: u32;
 
-tcp_checksum :: (tcp: Tcp_Header, source: u32, dest: u32) -> u16 {
-    Pseudo_Header :: struct {
-        source_address: u32;
-        destination_address: u32;
-        zeroes: u8;
-        protocol: type_of(Ipv4_Header.protocol);
-        tcp_length: u16;
-
-        using tcp: Tcp_Header;
-    }
-
-    pseudo: Pseudo_Header;
-    pseudo.tcp = tcp;
-    pseudo.source_address = source;
-    pseudo.destination_address = dest;
-    pseudo.protocol = .TCP;
-    pseudo.tcp_length = bs16(size_of(Tcp_Header));
-
-    return internet_checksum(pseudo);
+    in_flight: [..] Tcp_Transmission_Info;
 }
 
 initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_port: u16) {
     port := allocate_port(net);
+
+    // Clear the high bit to ensure we have at least a couple gigabytes of headroom until we add code to handle overflow.
+    sequence_number := cast(u32, random_get() & 0x7fff_ffff);
 
     con := array_add(*net.tcp_connections);
     con.* = .{
@@ -328,7 +361,7 @@ initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_por
         remote_port = remote_port,
         remote_ip = remote_ip,
         handshake_state = .NOT_STARTED,
-        our_sequence_number = xx rdtsc(),
+        our_sequence_number = sequence_number,
     }; 
 
     // Transmit SYN:
@@ -351,12 +384,26 @@ initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_por
 
     byte_swap_tcp_header(*tcp);
     tcp.checksum = tcp_checksum(tcp, ip.source_address, ip.destination_address);
-
     add_to_packet(*packet, tcp);
-    i8254x_transmit_packet(*net.adapter, packet);
 
-    con.bytes_transmitted += 1;
+    transmit_tcp_packet(net, con, packet);
     con.handshake_state = .SYN_SENT;
+}
+
+update_tcp_connection :: (net: *Network_Connection, con: *Tcp_Connection) {
+    // Periodically check if something needs to be retransmitted.
+    time_now := get_monotonic_time();
+
+    // Maybe we should have a back-off system.
+    RETRANSMISSION_TIME :: #run seconds_to_apollo(1);
+
+    for* info: con.in_flight {
+        if time_now - info.last_sent_at > RETRANSMISSION_TIME {
+            // Retransmit the packet
+            i8254x_transmit_packet(*net.adapter, info.packet);
+            info.last_sent_at = time_now;
+        }
+    }
 }
 
 transmit_tcp_ack :: (net: *Network_Connection, con: *Tcp_Connection) {
@@ -373,8 +420,8 @@ transmit_tcp_ack :: (net: *Network_Connection, con: *Tcp_Connection) {
     tcp: Tcp_Header;
     tcp.source_port = con.port;
     tcp.destination_port = con.remote_port;
-    tcp.sequence_number = con.our_sequence_number + con.bytes_transmitted;
-    tcp.ack_number = con.peer_sequence_number + con.bytes_received;
+    tcp.sequence_number = con.our_sequence_number;
+    tcp.ack_number = con.last_received_byte + 1;
     tcp.data_offset = 5 << 4;
     tcp.flags = .ACK;
 
@@ -384,8 +431,7 @@ transmit_tcp_ack :: (net: *Network_Connection, con: *Tcp_Connection) {
     add_to_packet(*packet, tcp);
     i8254x_transmit_packet(*net.adapter, packet);
 
-    con.bytes_transmitted += 1;
-    con.handshake_state = .ACK_SENT;
+    con.our_sequence_number += 1;
 }
 
 handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
@@ -412,20 +458,33 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
         return;
     }
 
-    if tcp.flags & .SYN {
+    if tcp.flags == .SYN | .ACK {
         if con.handshake_state == {
-          case .ACK_SENT;
+          case .ESTABLISHED;
             // It is likely a retransmission.
 
           case .SYN_SENT;
-            con.peer_sequence_number = tcp.sequence_number;
+            con.last_received_byte = tcp.sequence_number;
+            transmit_tcp_ack(net, con);
+            con.handshake_state = .ESTABLISHED;
         }
+
+        return;
     }
 
     if tcp.flags & .ACK {
-        con.bytes_received += 1;
-        transmit_tcp_ack(net, con);
+        // Handle the fact that something we transmitted was acknowledged.
+
+        for* info: con.in_flight {
+            if info.sequence <= tcp.ack_number {
+                // Any package that has been acknowledged (bytes later than it have been received) will never need to be retransmitted.
+                free_4k_page(cast(u64, info.packet.data - DIRECT_MAPPING_BASE));
+                remove info;
+            }
+        }
     }
+
+    
 }
 
 HTTP_SERVER_PORT :: 80;
@@ -599,7 +658,7 @@ make_dhcp_discover :: (net: *Network_Connection) -> Network_Packet, u32 {
     packet: Network_Packet;
     packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
 
-    xid := cast(u32) rdtsc();
+    xid := cast(u32) random_get();
 
     eth: Ethernet_Header;
     eth.destination_mac = BROADCAST_MAC;
@@ -799,7 +858,7 @@ transmit_ping :: (net: *Network_Connection, destination_ip: u32) {
     ip = init_ip_header(net, .ICMP, destination_ip, size_of(Ipv4_Header) + size_of(Icmp_Header));
 
     icmp.control_message = .echo_request;
-    icmp.data = xx rdtsc() & 0xffff;
+    icmp.data = xx random_get() & 0xffff;
     icmp.checksum = internet_checksum(icmp);
 
     packet: Network_Packet;
@@ -846,7 +905,7 @@ transmit_dns_query :: (net: *Network_Connection, url: string) {
     packet: Network_Packet;
     packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
 
-    xid := cast(u16) rdtsc();
+    xid := cast(u16) random_get();
 
     eth := init_ethernet_header(net);
     add_to_packet(*packet, eth);

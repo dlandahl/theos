@@ -5,6 +5,7 @@
 #import "Bit_Operations";
 #import "Hash_Table";
 #import "String";
+#import "Random";
 
 #import "Bitfield"(false);
 set :: bitfield_set;
@@ -262,7 +263,7 @@ kernel_entry :: () #no_context {
 
         acquire(*net.spinlock);
         log("Sending DNS Query");
-        transmit_dns_query(*net, "en.wikipedia.org");
+        transmit_dns_query(*net, "example.com");
         release(*net.spinlock);
 
         while true {
