@@ -259,24 +259,35 @@ kernel_entry :: () #no_context {
             put_task_on_core(task, *processor_cores[1]);
         }
 
-        while net.dhcp_handshake_state < .COMPLETED {};
+        while net.dhcp_handshake_state < .COMPLETED #asm { pause; };
 
         acquire(*net.spinlock);
         log("Sending DNS Query");
         transmit_dns_query(*net, "example.com");
         release(*net.spinlock);
 
+        ip_address: u32;
+
         while true {
             sleep(5, .milliseconds);
 
-            acquire(*net.spinlock);
-            if net.dns_queries_in_flight[0].complete {
-                initiate_tcp_connection(*net, net.dns_queries_in_flight[0].answer, HTTP_SERVER_PORT);
+            Scoped_Acquire(*net.spinlock);
+            query := net.dns_queries_in_flight[0];
 
-                release(*net.spinlock);
-                break;
-            }
-            release(*net.spinlock);
+            if !query.complete continue;
+
+            ip_address = query.answer;
+            break;
+        }
+
+        initiate_tcp_connection(*net, ip_address, HTTP_SERVER_PORT);
+
+        while net.tcp_connections[0].handshake_state < .COMPLETED #asm { pause; }
+
+        {
+            Scoped_Acquire(*net.spinlock);
+            request := "GET / HTTP/1.1\r\nHost: example.com\r\nAccept: text/html\r\n\r\n";
+            transmit_tcp_packet(*net, *net.tcp_connections[0], .ACK | .PSH, request);
         }
 
         #asm { sti; }

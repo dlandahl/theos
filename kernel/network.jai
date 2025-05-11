@@ -71,14 +71,15 @@ byte_swap_ip :: (header: *Ipv4_Header) {
 }
 
 internet_checksum :: (header: $H) -> u16 {
-    assert(header.checksum == 0);
+    return internet_checksum(cast(*u8, *header), size_of(H));
+}
 
-    bytes := cast(*u8) *header;
+internet_checksum :: (bytes: *u8, count: int) -> u16 {
     sum: u32 = 0;
 
-    assert(size_of(H) % 2 == 0); // Todo
+    assert(count % 2 == 0); // Todo
 
-    num_words := size_of(H) / size_of(u16);
+    num_words := count / size_of(u16);
 
     for 0..num_words-1 {
         high := bytes[it*2    ].(u16) << 8;
@@ -179,7 +180,6 @@ transmit_arp_probe :: (net: *Network_Connection) {
 }
 
 handle_arp :: (net: *Network_Connection, eth: *Ethernet_Header) {
-
     arp := cast(*Arp_Packet) (eth + 1);
 
     if arp.SPA__sender_protocol_address == arp.TPA__target_protocol_address {
@@ -244,7 +244,7 @@ FIRST_EPHEMERAL_PORT :: 0xc000;
 
 
 
-tcp_checksum :: (tcp: Tcp_Header, source: u32, dest: u32) -> u16 {
+tcp_checksum :: (tcp: Tcp_Header, source: u32, dest: u32, payload := "") -> u16 {
     Pseudo_Header :: struct {
         source_address: u32;
         destination_address: u32;
@@ -252,7 +252,9 @@ tcp_checksum :: (tcp: Tcp_Header, source: u32, dest: u32) -> u16 {
         protocol: type_of(Ipv4_Header.protocol);
         tcp_length: u16;
 
-        using tcp: Tcp_Header;
+        tcp: Tcp_Header;
+
+        payload: [0x100] u8;
     }
 
     pseudo: Pseudo_Header;
@@ -260,9 +262,14 @@ tcp_checksum :: (tcp: Tcp_Header, source: u32, dest: u32) -> u16 {
     pseudo.source_address = source;
     pseudo.destination_address = dest;
     pseudo.protocol = .TCP;
-    pseudo.tcp_length = bs16(size_of(Tcp_Header));
+    pseudo.tcp_length = bs16(cast(u16, size_of(Tcp_Header) + payload.count));
 
-    return internet_checksum(pseudo);
+    memcpy(pseudo.payload.data, payload.data, payload.count);
+
+    count := payload.count;
+    if count % 2 count += 1;
+
+    return internet_checksum(cast(*u8, *pseudo), size_of(Pseudo_Header) + count - 0x100);
 }
 
 byte_swap_tcp_header :: (tcp: *Tcp_Header) {
@@ -271,8 +278,23 @@ byte_swap_tcp_header :: (tcp: *Tcp_Header) {
     tcp.sequence_number  = bs32(tcp.sequence_number);
     tcp.ack_number       = bs32(tcp.ack_number);
     tcp.window           = bs16(tcp.window);
-    tcp.checksum         = bs16(tcp.checksum);
     tcp.urgent_pointer   = bs16(tcp.urgent_pointer);
+}
+
+init_tcp_header :: (net: *Network_Connection, con: *Tcp_Connection, flags: Tcp_Header.Flags, payload := "") -> Tcp_Header {
+    tcp: Tcp_Header;
+    tcp.source_port = con.port;
+    tcp.destination_port = con.remote_port;
+    tcp.sequence_number = con.our_sequence_number;
+    tcp.ack_number = con.last_received_byte+1;
+    tcp.data_offset = 5 << 4;
+    tcp.flags = flags;
+    tcp.window = 4096;
+
+    byte_swap_tcp_header(*tcp);
+    tcp.checksum = tcp_checksum(tcp, net.our_ip, con.remote_ip, payload);
+
+    return tcp;
 }
 
 Tcp_Header :: struct {
@@ -284,7 +306,7 @@ Tcp_Header :: struct {
 
     data_offset: u8;
 
-    flags: enum_flags u8 {
+    Flags :: enum_flags u8 {
         FIN;
         SYN;
         RST;
@@ -293,11 +315,37 @@ Tcp_Header :: struct {
         URG;
         ECE;
         CWR;
-    };
+    }
+
+    flags: Flags;
 
     window: u16;
     checksum: u16;
     urgent_pointer: u16;
+}
+
+Tcp_Connection :: struct {
+    port: u16;
+
+    remote_port: u16;
+    remote_ip: u32;
+
+    handshake_state: enum {
+        NOT_STARTED;
+        SYN_SENT;
+        COMPLETED;
+    }
+
+    // Accumulated each time we transmit new bytes that have not been transmitted before
+    our_sequence_number: u32;
+
+    // The next sequence number we expect to see is always this + 1.
+    // Peer sequence numbers less than this have been acknowledged before.
+    last_received_byte: u32;
+
+    in_flight: [..] Tcp_Transmission_Info;
+
+    received_segments: [..] string;
 }
 
 Tcp_Transmission_Info :: struct {
@@ -309,8 +357,7 @@ Tcp_Transmission_Info :: struct {
     packet: Network_Packet;
 }
 
-transmit_tcp_packet :: (net: *Network_Connection, con: *Tcp_Connection, packet: Network_Packet) {
-    // Procedure to transmit a packet and handle bookkeeping for retransmission/acknowledgement.
+record_tcp_packet_for_potential_retransmission :: (net: *Network_Connection, con: *Tcp_Connection, packet: Network_Packet) {
 
     bytes_to_transmit := packet.length - (size_of(Ethernet_Header) + size_of(Ipv4_Header) + size_of(Tcp_Header));
     if bytes_to_transmit == 0 bytes_to_transmit = 1;
@@ -323,34 +370,33 @@ transmit_tcp_packet :: (net: *Network_Connection, con: *Tcp_Connection, packet: 
     // The sequence number in the ACK will include the bytes transmitted in this packet, so store that.
     // The sequence number of the packet we're transmitting right now does not match this sequence number, as it describes the first byte being transmitted in that packet.
     info.sequence = con.our_sequence_number;
+}
+
+transmit_tcp_packet :: (net: *Network_Connection, con: *Tcp_Connection, header_flags: Tcp_Header.Flags, payload := "", needs_acknowledgement := true) {
+    packet: Network_Packet;
+    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
+
+    eth := init_ethernet_header(net);
+    add_to_packet(*packet, eth);
+
+    datagram_length := size_of(Ipv4_Header) + size_of(Tcp_Header) + payload.count;
+    ip := init_ip_header(net, .TCP, con.remote_ip, datagram_length);
+    add_to_packet(*packet, ip);
+
+    tcp := init_tcp_header(net, con, header_flags, payload);
+    add_to_packet(*packet, tcp);
+
+    add_to_packet(*packet, payload);
+
+    if needs_acknowledgement {
+        record_tcp_packet_for_potential_retransmission(net, con, packet);
+    }
 
     i8254x_transmit_packet(*net.adapter, packet);
 }
 
-Tcp_Connection :: struct {
-    port: u16;
-
-    remote_port: u16;
-    remote_ip: u32;
-
-    handshake_state: enum {
-        NOT_STARTED;
-        SYN_SENT;
-        ESTABLISHED;
-    }
-
-    // Accumulated each time we transmit new bytes that have not been transmitted before
-    our_sequence_number: u32;
-
-    // The next sequence number we expect to see is always this + 1.
-    // Peer sequence numbers less than this have been acknowledged before.
-    last_received_byte: u32;
-
-    in_flight: [..] Tcp_Transmission_Info;
-}
-
 initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_port: u16) {
-    port := allocate_port(net);
+    port := FIRST_EPHEMERAL_PORT + cast(u16, rdtsc() & 0xfff);
 
     // Clear the high bit to ensure we have at least a couple gigabytes of headroom until we add code to handle overflow.
     sequence_number := cast(u32, random_get() & 0x7fff_ffff);
@@ -362,31 +408,10 @@ initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_por
         remote_ip = remote_ip,
         handshake_state = .NOT_STARTED,
         our_sequence_number = sequence_number,
+        last_received_byte = 0xffff_ffff,
     }; 
 
-    // Transmit SYN:
-    packet: Network_Packet;
-    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
-
-    eth := init_ethernet_header(net);
-    add_to_packet(*packet, eth);
-
-    datagram_length := size_of(Ipv4_Header) + size_of(Tcp_Header);
-    ip := init_ip_header(net, .TCP, remote_ip, datagram_length);
-    add_to_packet(*packet, ip);
-
-    tcp: Tcp_Header;
-    tcp.source_port = port;
-    tcp.destination_port = remote_port;
-    tcp.sequence_number = con.our_sequence_number;
-    tcp.data_offset = 5 << 4;
-    tcp.flags = .SYN;
-
-    byte_swap_tcp_header(*tcp);
-    tcp.checksum = tcp_checksum(tcp, ip.source_address, ip.destination_address);
-    add_to_packet(*packet, tcp);
-
-    transmit_tcp_packet(net, con, packet);
+    transmit_tcp_packet(net, con, .SYN, needs_acknowledgement=false);
     con.handshake_state = .SYN_SENT;
 }
 
@@ -399,39 +424,11 @@ update_tcp_connection :: (net: *Network_Connection, con: *Tcp_Connection) {
 
     for* info: con.in_flight {
         if time_now - info.last_sent_at > RETRANSMISSION_TIME {
-            // Retransmit the packet
+            // Retransmit the segment
             i8254x_transmit_packet(*net.adapter, info.packet);
             info.last_sent_at = time_now;
         }
     }
-}
-
-transmit_tcp_ack :: (net: *Network_Connection, con: *Tcp_Connection) {
-    packet: Network_Packet;
-    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
-
-    eth := init_ethernet_header(net);
-    add_to_packet(*packet, eth);
-
-    datagram_length := size_of(Ipv4_Header) + size_of(Tcp_Header);
-    ip := init_ip_header(net, .TCP, con.remote_ip, datagram_length);
-    add_to_packet(*packet, ip);
-
-    tcp: Tcp_Header;
-    tcp.source_port = con.port;
-    tcp.destination_port = con.remote_port;
-    tcp.sequence_number = con.our_sequence_number;
-    tcp.ack_number = con.last_received_byte + 1;
-    tcp.data_offset = 5 << 4;
-    tcp.flags = .ACK;
-
-    byte_swap_tcp_header(*tcp);
-    tcp.checksum = tcp_checksum(tcp, ip.source_address, ip.destination_address);
-
-    add_to_packet(*packet, tcp);
-    i8254x_transmit_packet(*net.adapter, packet);
-
-    con.our_sequence_number += 1;
 }
 
 handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
@@ -445,6 +442,7 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
     using packet := cast(*Tcp_Packet) eth_;
 
     byte_swap_tcp_header(*tcp);
+    byte_swap_ip(*ip);
 
     con: *Tcp_Connection;
     for* net.tcp_connections {
@@ -460,13 +458,14 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
 
     if tcp.flags == .SYN | .ACK {
         if con.handshake_state == {
-          case .ESTABLISHED;
-            // It is likely a retransmission.
+          case .COMPLETED;
+            // It looks like the server missed the ACK the first time. Todo.
 
           case .SYN_SENT;
             con.last_received_byte = tcp.sequence_number;
-            transmit_tcp_ack(net, con);
-            con.handshake_state = .ESTABLISHED;
+            con.our_sequence_number += 1;
+            transmit_tcp_packet(net, con, .ACK, needs_acknowledgement=false);
+            con.handshake_state = .COMPLETED;
         }
 
         return;
@@ -477,14 +476,32 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
 
         for* info: con.in_flight {
             if info.sequence <= tcp.ack_number {
-                // Any package that has been acknowledged (bytes later than it have been received) will never need to be retransmitted.
+                // Any segment that has been acknowledged (bytes later than it have been received) will never need to be retransmitted.
                 free_4k_page(cast(u64, info.packet.data - DIRECT_MAPPING_BASE));
                 remove info;
             }
         }
     }
 
-    
+    if tcp.sequence_number == con.last_received_byte + 1 {
+        length := get(ip, .total_length) - size_of(Ipv4_Header) - size_of(Tcp_Header);
+
+        if length == 0 {
+            // It's just an ACK or FIN, handled above.
+            return;
+        }
+
+        con.last_received_byte += length.(u32);
+
+        // Transmit ACK
+        transmit_tcp_packet(net, con, .ACK, needs_acknowledgement=false);
+
+        packet_data: string;
+        packet_data.data = cast(*u8, *tcp + 1);
+        packet_data.count = length.(s64);
+
+        array_add(*con.received_segments, packet_data);
+    }
 }
 
 HTTP_SERVER_PORT :: 80;
@@ -1045,6 +1062,7 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
 
     log_error("Got unexpected DNS response from %.", format_ip(ip.source_address));
 }
+
 
 
 
