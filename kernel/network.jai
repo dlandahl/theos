@@ -505,6 +505,51 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
 }
 
 HTTP_SERVER_PORT :: 80;
+HTTPS_SERVER_PORT :: 443;
+
+
+
+Tls_Record_Header :: struct {
+    content_type: enum u8 {
+        CHANGE_CIPHER_SPEC :: 20;
+        ALERT              :: 21;
+        HANDSHAKE          :: 22;
+        APPLICATION_DATA   :: 23;
+    }
+
+    version: Tls_Version;
+    length: u16;
+}
+
+Tls_Handshake_Type :: enum u8 {
+    HELLO_REQUEST          :: 0;
+    CLIENT_HELLO           :: 1;
+    SERVER_HELLO           :: 2;
+    CERTIFICATE            :: 11;
+    SERVER_KEY_EXCHANGE    :: 12;
+    CERTIFICATE_REQUEST    :: 13;
+    SERVER_HELLO_DONE      :: 14;
+    CERTIFICATE_VERIFY     :: 15;
+    CLIENT_KEY_EXCHANGE    :: 16;
+    FINISHED               :: 20;
+}
+
+Tls_Client_Hello :: struct {
+    client_version: Tls_Version;
+    random: Tls_Random;
+    cipher_squite: Tls_Cipher_Suite;
+}
+
+Tls_Cipher_Suite :: enum u16 { }
+
+Tls_Version :: enum u16 {
+    TLS_1_2 :: 0x0303;
+}
+
+Tls_Random :: struct {
+    unix_time: u32 #align 1;
+    bytes: [28] u8;
+}
 
 
 
