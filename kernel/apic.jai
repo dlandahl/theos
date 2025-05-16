@@ -345,7 +345,7 @@ page_fault :: (stack: *Interrupt_Stack(true)) #c_call {
     #asm { get_cr2 _cr2; }
     cr2 := _cr2;
 
-    context.print_style.default_format_int.base = 16;
+    Push_Print_Style().default_format_int.base = 16;
     print("Virtual Address: 0x%\n", cr2);
 
     Flags :: enum_flags u32 {
@@ -377,7 +377,7 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
 
         print("General Protection Fault    (On core %, running thread %)\n", core.id, task.id);
 
-        context.print_style.default_format_int.base = 16;
+        Push_Print_Style().default_format_int.base = 16;
         print("RIP: 0x%\n", stack.ip);
         print("RSP: 0x%\n", stack.sp);
         print("SS: %\n", stack.ss);

@@ -11,6 +11,8 @@
 set :: bitfield_set;
 get :: bitfield_get;
 
+#import "Aes";
+
 #load "../boot_data.jai";
 
 #load "apic.jai";
@@ -249,6 +251,18 @@ kernel_entry :: () #no_context {
                 kernel_globals.net.adapter = init_i8254x(it);
             }
         }
+
+        key: i128;
+        key.array = .[0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
+                      0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c];
+
+        keys := aes128_expand_key(key);
+        text := "0123456789123456";
+
+        cipher := aes128_encrypt_block(xx text.data, keys);
+
+        Push_Print_Style().default_format_int.base = 16;
+        log("Ciphertext: %", cipher.array);
 
         // initialize_uacpi();
 
@@ -1287,7 +1301,7 @@ allocate_interrupt_gate :: (loc := #caller_location) -> int {
 
 debug_print_physical_memory_map :: () {
     using kernel_globals;
-    context.print_style.default_format_float.trailing_width = 2;
+    Push_Print_Style().default_format_float.trailing_width = 2;
 
     #if false {
         total_by_type: [5] float;
@@ -1311,7 +1325,7 @@ debug_print_physical_memory_map :: () {
 
         print("\n\n\n");
 
-        context.print_style.default_format_float.trailing_width = 2;
+        Push_Print_Style().default_format_float.trailing_width = 2;
         for total_by_type {
             print("Total (%) % MB\n=======\n", cast(type_of(Memory_Region.type)) it_index, it / 256);
         }

@@ -635,7 +635,7 @@ calibrate_tsc_interrupt :: () {
 }
 
 debug_measure_tsc_drift :: () {
-    context.print_style.default_format_int.base = 10;
+    Push_Print_Style().default_format_int.base = 10;
 
     #asm { cli; }
 
@@ -657,7 +657,7 @@ debug_measure_tsc_drift :: () {
 }
 
 debug_run_tsc_timer :: () {
-    context.print_style.default_format_int.base = 10;
+    Push_Print_Style().default_format_int.base = 10;
 
     #asm { cli; }
 

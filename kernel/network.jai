@@ -501,6 +501,11 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
         packet_data.count = length.(s64);
 
         array_add(*con.received_segments, packet_data);
+
+        if tcp.flags & .PSH {
+            log("%", con.received_segments);
+            array_reset(*con.received_segments);
+        }
     }
 }
 
@@ -537,7 +542,14 @@ Tls_Handshake_Type :: enum u8 {
 Tls_Client_Hello :: struct {
     client_version: Tls_Version;
     random: Tls_Random;
-    cipher_squite: Tls_Cipher_Suite;
+
+    session_id: u8;
+
+    num_cipher_suites: u16;
+    cipher_suite: [1] u16;
+
+    num_compression_methods: u8;
+    compression_method: [1] u8;
 }
 
 Tls_Cipher_Suite :: enum u16 { }
@@ -550,6 +562,8 @@ Tls_Random :: struct {
     unix_time: u32 #align 1;
     bytes: [28] u8;
 }
+
+TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 : u16 : 0xc02f;
 
 
 
@@ -1013,8 +1027,8 @@ transmit_dns_query :: (net: *Network_Connection, url: string) {
     }
     add_to_packet(*packet, (0).(u8));
 
-    add_to_packet(*packet, bs16(1).(u16)); // TYPE
-    add_to_packet(*packet, bs16(1).(u16)); // CLASS
+    add_to_packet(*packet, bs16(1)); // TYPE
+    add_to_packet(*packet, bs16(1)); // CLASS
 
     i8254x_transmit_packet(*net.adapter, packet);
 
@@ -1202,6 +1216,8 @@ network_thread :: () #c_call {
 
     core := get_current_core();
     release(*core.scheduler.spinlock);
+
+    sleep(10, .seconds);
 
     Log_Category("Net");
     using net := *kernel_globals.net;
