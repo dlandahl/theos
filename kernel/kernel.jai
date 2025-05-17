@@ -87,7 +87,7 @@ Kernel_Globals :: struct {
         cursor_x: int;
         cursor_y: int;
 
-        font: Pnm;
+        font: Netpbm_Image;
 
         // Recursive, so that errors generated during text rendering can be displayed on the screen.
         spinlock: Recursive_Spinlock;
@@ -204,7 +204,7 @@ kernel_entry :: () #no_context {
             root_acpi_table = xx (rsdp.rsdt_address + DIRECT_MAPPING_BASE);
         }
 
-        temporary_text_drawing_state.font = parse_pnm(font_file);
+        temporary_text_drawing_state.font = parse_netpbm(font_file);
         temporary_text_drawing_state.font_loaded = true;
 
         initialize_apic();
@@ -225,7 +225,7 @@ kernel_entry :: () #no_context {
         // Don't use Basic.calendar_to_apollo, because it's OS specific
         boot_time = native_calendar_to_apollo(boot_calendar_time);
 
-        init_tsc();
+        initialize_tsc();
 
         draw_text("Hello, Sailor!\nWelcome to the operating system.\n");
 
@@ -252,17 +252,22 @@ kernel_entry :: () #no_context {
             }
         }
 
-        key: i128;
-        key.array = .[0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
-                      0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c];
+        {
+            Push_Print_Style().default_format_int.base = 16;
 
-        keys := aes128_expand_key(key);
-        text := "0123456789123456";
+            key: i128;
+            key.bytes = .[0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
+                          0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c];
 
-        cipher := aes128_encrypt_block(xx text.data, keys);
+            key_schedule := aes128_expand_key(key);
+            for key_schedule log("%\n", it.bytes);
 
-        Push_Print_Style().default_format_int.base = 16;
-        log("Ciphertext: %", cipher.array);
+            text := "0123456789123456";
+
+            aes128_gcm_encrypt_stream_in_place(cast([]u8) text, key, .[0, 0, 0], .[]);
+
+            log("Ciphertext: %", cast([]u8) text);
+        }
 
         // initialize_uacpi();
 
@@ -277,7 +282,7 @@ kernel_entry :: () #no_context {
 
         acquire(*net.spinlock);
         log("Sending DNS Query");
-        transmit_dns_query(*net, "example.com");
+        transmit_dns_query(*net, "google.com");
         release(*net.spinlock);
 
         ip_address: u32;
@@ -300,7 +305,7 @@ kernel_entry :: () #no_context {
 
         {
             Scoped_Acquire(*net.spinlock);
-            request := "GET / HTTP/1.1\r\nHost: example.com\r\nAccept: text/html\r\n\r\n";
+            request := "GET / HTTP/1.1\r\nHost: google.com\r\nAccept: text/html\r\n\r\n";
             transmit_tcp_packet(*net, *net.tcp_connections[0], .ACK | .PSH, request);
         }
 
@@ -1280,7 +1285,7 @@ LRU_TAIL      :: -1;
 
 
 
-allocate_interrupt_gate :: (loc := #caller_location) -> int {
+allocate_interrupt_gate :: () -> int {
     using kernel_globals;
 
     if next_free_interrupt_gate == TASK_SWITCH_GATE {
@@ -1437,20 +1442,28 @@ draw_text :: (text: string) #no_context {
     char_height  :: 16;
     margin       :: 10;
 
-    line_height := char_height + line_spacing;
+    line_height  :: char_height + line_spacing;
+
+    // The lowest and highest ASCII codes that are included in the font bitmap.
+    first_code   :: #char " ";
+    last_code    :: #char "~";
 
     framebuffer := kernel_globals.framebuffer;
 
     for text {
-        if it == 0 continue;
-        if it == #char "\r" continue;
         if it == #char "\n" {
             cursor_y += 1;
             cursor_x = 0;
             continue;
         }
 
-        if (cursor_x + 1) * char_width >= framebuffer.x_resolution {
+        if it < first_code || it > last_code {
+            it = #char "?";
+        }
+
+        max_x := (cursor_x + 1) * char_width + margin * 2;
+
+        if max_x >= framebuffer.x_resolution {
             cursor_y += 1;
             cursor_x = 0;
         }
@@ -1458,7 +1471,7 @@ draw_text :: (text: string) #no_context {
         screen_x := cursor_x * char_width + margin;
         screen_y := cursor_y * line_height + margin;
 
-        if screen_y + line_height + margin > framebuffer.y_resolution {
+        while screen_y + line_height + margin > framebuffer.y_resolution {
             source := (line_height + margin) * framebuffer.stride;
             target := margin * framebuffer.stride;
 
@@ -1471,7 +1484,7 @@ draw_text :: (text: string) #no_context {
             screen_y -= line_height;
         }
 
-        source_top_left := char_width * (cast(int) it - 0x20);
+        source_top_left := char_width * (cast(int) it - first_code);
         target_top_left := screen_x + screen_y * framebuffer.stride;
 
         for char_y: 0..char_height-1 {
@@ -1490,7 +1503,7 @@ draw_text :: (text: string) #no_context {
     }
 }
 
-Pnm :: struct {
+Netpbm_Image :: struct {
     width: int;
     height: int;
 
@@ -1507,13 +1520,13 @@ Pnm :: struct {
     data: *u8;
 }
 
-parse_pnm :: (file: [] u8) -> Pnm {
+parse_netpbm :: (file: [] u8) -> Netpbm_Image {
     buffer := file.data;
     assert(buffer[0] == #char "P");
 
-    pnm: Pnm;
-    pnm.type = xx (buffer[1] - #char "0");
-    assert(pnm.type == .GRAYMAP || pnm.type == .PIXMAP);
+    netpbm: Netpbm_Image;
+    netpbm.type = xx (buffer[1] - #char "0");
+    assert(netpbm.type == .GRAYMAP || netpbm.type == .PIXMAP);
 
     is_whitespace :: (char: u8) -> bool {
         return char == 0x20
@@ -1551,11 +1564,11 @@ parse_pnm :: (file: [] u8) -> Pnm {
     cursor := 2;
     skip_whitespace_and_comments();
 
-    pnm.width = parse_int();
+    netpbm.width = parse_int();
 
     skip_whitespace_and_comments();
 
-    pnm.height = parse_int();
+    netpbm.height = parse_int();
 
     skip_whitespace_and_comments();
 
@@ -1564,7 +1577,7 @@ parse_pnm :: (file: [] u8) -> Pnm {
 
     skip_whitespace_and_comments();
 
-    pnm.data = buffer + cursor;
+    netpbm.data = buffer + cursor;
 
-    return pnm;
+    return netpbm;
 }

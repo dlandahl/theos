@@ -936,13 +936,6 @@ uacpi_kernel_free_spinlock :: (handle: uacpi_handle) #c_call {
     }
 }
 
-bucket_array_find_pointer :: (using array: *Bucket_Array, locator: Bucket_Locator) -> *array.type {
-    bucket := all_buckets[locator.bucket_index];
-    assert(bucket.occupied[locator.slot_index] == true);
-    result := *bucket.data[locator.slot_index];
-    return result;
-}
-
 #program_export
 uacpi_kernel_lock_spinlock :: (handle: uacpi_handle) -> uacpi_cpu_flags #c_call {
     using kernel_globals.uacpi_state;

@@ -471,7 +471,7 @@ hpet_get_monotonic_time :: () -> Apollo_Time {
 
 
 
-init_tsc :: () {
+initialize_tsc :: () {
 
     // Check for TSC hardware support.
 

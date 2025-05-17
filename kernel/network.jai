@@ -285,8 +285,8 @@ init_tcp_header :: (net: *Network_Connection, con: *Tcp_Connection, flags: Tcp_H
     tcp: Tcp_Header;
     tcp.source_port = con.port;
     tcp.destination_port = con.remote_port;
-    tcp.sequence_number = con.our_sequence_number;
-    tcp.ack_number = con.last_received_byte+1;
+    tcp.sequence_number = con.sequence_number;
+    tcp.ack_number = con.ack_number+1;
     tcp.data_offset = 5 << 4;
     tcp.flags = flags;
     tcp.window = 4096;
@@ -337,11 +337,11 @@ Tcp_Connection :: struct {
     }
 
     // Accumulated each time we transmit new bytes that have not been transmitted before
-    our_sequence_number: u32;
+    sequence_number: u32;
 
     // The next sequence number we expect to see is always this + 1.
     // Peer sequence numbers less than this have been acknowledged before.
-    last_received_byte: u32;
+    ack_number: u32;
 
     in_flight: [..] Tcp_Transmission_Info;
 
@@ -361,7 +361,7 @@ record_tcp_packet_for_potential_retransmission :: (net: *Network_Connection, con
 
     bytes_to_transmit := packet.length - (size_of(Ethernet_Header) + size_of(Ipv4_Header) + size_of(Tcp_Header));
     if bytes_to_transmit == 0 bytes_to_transmit = 1;
-    con.our_sequence_number += cast(u32) bytes_to_transmit;
+    con.sequence_number += cast(u32) bytes_to_transmit;
 
     info := array_add(*con.in_flight);
     info.last_sent_at = get_monotonic_time();
@@ -369,7 +369,7 @@ record_tcp_packet_for_potential_retransmission :: (net: *Network_Connection, con
 
     // The sequence number in the ACK will include the bytes transmitted in this packet, so store that.
     // The sequence number of the packet we're transmitting right now does not match this sequence number, as it describes the first byte being transmitted in that packet.
-    info.sequence = con.our_sequence_number;
+    info.sequence = con.sequence_number;
 }
 
 transmit_tcp_packet :: (net: *Network_Connection, con: *Tcp_Connection, header_flags: Tcp_Header.Flags, payload := "", needs_acknowledgement := true) {
@@ -407,8 +407,8 @@ initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_por
         remote_port = remote_port,
         remote_ip = remote_ip,
         handshake_state = .NOT_STARTED,
-        our_sequence_number = sequence_number,
-        last_received_byte = 0xffff_ffff,
+        sequence_number = sequence_number,
+        ack_number = 0xffff_ffff,
     }; 
 
     transmit_tcp_packet(net, con, .SYN, needs_acknowledgement=false);
@@ -462,8 +462,8 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
             // It looks like the server missed the ACK the first time. Todo.
 
           case .SYN_SENT;
-            con.last_received_byte = tcp.sequence_number;
-            con.our_sequence_number += 1;
+            con.ack_number = tcp.sequence_number;
+            con.sequence_number += 1;
             transmit_tcp_packet(net, con, .ACK, needs_acknowledgement=false);
             con.handshake_state = .COMPLETED;
         }
@@ -483,7 +483,7 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
         }
     }
 
-    if tcp.sequence_number == con.last_received_byte + 1 {
+    if tcp.sequence_number == con.ack_number + 1 {
         length := get(ip, .total_length) - size_of(Ipv4_Header) - size_of(Tcp_Header);
 
         if length == 0 {
@@ -491,7 +491,7 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
             return;
         }
 
-        con.last_received_byte += length.(u32);
+        con.ack_number += length.(u32);
 
         // Transmit ACK
         transmit_tcp_packet(net, con, .ACK, needs_acknowledgement=false);
@@ -651,7 +651,7 @@ update_dhcp :: (using net: *Network_Connection) {
     }
 
     if dhcp_handshake_state >= .ARP_PROBE_1_TRANSMITTED && dhcp_handshake_state <= .ARP_PROBE_3_TRANSMITTED {
-        probe_time_elapsed := arp_probe_transmitted_at < get_monotonic_time() - seconds_to_apollo(1);
+        probe_time_elapsed := arp_probe_transmitted_at < get_monotonic_time() - milliseconds_to_apollo(250);
 
         if probe_time_elapsed {
             if dhcp_handshake_state != .ARP_PROBE_3_TRANSMITTED {
@@ -1034,7 +1034,7 @@ transmit_dns_query :: (net: *Network_Connection, url: string) {
 
     array_add(*net.dns_queries_in_flight, .{
         id = xid,
-        url = url,
+        url = copy_string(url),
         sent_at = get_monotonic_time(),
     });
 }
