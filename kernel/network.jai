@@ -189,7 +189,16 @@ handle_arp :: (net: *Network_Connection, eth: *Ethernet_Header) {
     }
 
     if net.our_ip != arp.TPA__target_protocol_address return;
-    if arp.OPER__operation != .request return;
+
+    if arp.OPER__operation == .reply {
+        if net.dhcp_handshake_state >= .ARP_PROBE_1_TRANSMITTED && net.dhcp_handshake_state <= .ARP_PROBE_3_TRANSMITTED {
+            // Response to ARP probe that was sent in response to DHCP offer.
+            // Here we need to transmit DHCP DECLINE to tell the router about the address conflict.
+            transmit_dhcp_decline(net);
+            net.dhcp_handshake_state == .NOT_STARTED;
+        }
+        return;
+    }
 
     reply: struct {
         using eth: Ethernet_Header;
@@ -641,26 +650,32 @@ DHCP_CLIENT_PORT :: 68;
 DHCP_SERVER_PORT :: 67;
 
 update_dhcp :: (using net: *Network_Connection) {
+    if dhcp_handshake_state == .COMPLETED {
+        return;
+    }
+
     if dhcp_handshake_state == .NOT_STARTED {
-        packet:, dhcp_xid = make_dhcp_discover(net);
+        log("Transmitting DHCP discover...");
 
-        log("Transmitting DHCP discover (XID %)...", hex(dhcp_xid));
-        i8254x_transmit_packet(*adapter, packet);
-
+        transmit_dhcp_discover(net);
         dhcp_handshake_state = .DISCOVER_TRANSMITTED;
     }
 
-    if dhcp_handshake_state >= .ARP_PROBE_1_TRANSMITTED && dhcp_handshake_state <= .ARP_PROBE_3_TRANSMITTED {
-        probe_time_elapsed := arp_probe_transmitted_at < get_monotonic_time() - milliseconds_to_apollo(250);
+    probe_time_elapsed := arp_probe_transmitted_at < get_monotonic_time() - milliseconds_to_apollo(100);
 
-        if probe_time_elapsed {
-            if dhcp_handshake_state != .ARP_PROBE_3_TRANSMITTED {
-                transmit_arp_probe(net);
-                log("ARP probe sent");
-            }
+    if probe_time_elapsed {
+        if dhcp_handshake_state >= .ARP_PROBE_1_TRANSMITTED && dhcp_handshake_state < .ARP_PROBE_3_TRANSMITTED {
+
+            transmit_arp_probe(net);
 
             dhcp_handshake_state += 1;
             arp_probe_transmitted_at = get_monotonic_time();
+        }
+
+        if dhcp_handshake_state == .ARP_PROBE_3_TRANSMITTED {
+            log("No address conflicts found, accepting DHCP offer.");
+            transmit_dhcp_request(net);
+            dhcp_handshake_state = .OFFER_ACCEPTED;
         }
     }
 }
@@ -710,10 +725,10 @@ handle_dhcp_packet :: (using net: *Network_Connection, eth_: *Ethernet_Header) {
         log("Got DHCP offer for IP: %.", format_ip(our_ip));
         log("Server IP: %, server MAC: %.", format_ip(router_ip), format_mac(router_mac_address));
 
-        packet := make_dhcp_request(net, dhcp_xid);
-        i8254x_transmit_packet(*adapter, packet);
+        transmit_arp_probe(net);
+        arp_probe_transmitted_at = get_monotonic_time();
 
-        dhcp_handshake_state = .OFFER_ACCEPTED;
+        dhcp_handshake_state = .ARP_PROBE_1_TRANSMITTED;
 
       case .ack;
         if dhcp_handshake_state != .OFFER_ACCEPTED {
@@ -721,20 +736,19 @@ handle_dhcp_packet :: (using net: *Network_Connection, eth_: *Ethernet_Header) {
             return;
         }
 
-        log("DHCP request acknowledged. Sending ARP probe...");
+        dhcp_handshake_state = .COMPLETED;
 
-        transmit_arp_probe(net);
-        arp_probe_transmitted_at = get_monotonic_time();
-
-        dhcp_handshake_state = .ARP_PROBE_1_TRANSMITTED;
+      case .nak;
+        dhcp_handshake_state = .NOT_STARTED;
+        log_error("DHCP NAK.");
     }
 }
 
-make_dhcp_discover :: (net: *Network_Connection) -> Network_Packet, u32 {
+transmit_dhcp_discover :: (net: *Network_Connection) {
     packet: Network_Packet;
     packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
 
-    xid := cast(u32) random_get();
+    net.dhcp_xid = cast(u32) random_get();
 
     eth: Ethernet_Header;
     eth.destination_mac = BROADCAST_MAC;
@@ -767,27 +781,55 @@ make_dhcp_discover :: (net: *Network_Connection) -> Network_Packet, u32 {
     byte_swap_udp_header(*udp);
     add_to_packet(*packet, udp);
 
-    dhcp: Dhcp_Message;
-    dhcp.opcode = 0x1;
-    dhcp.hardware_type = 0x1;
-    dhcp.mac_length = 0x6;
-    dhcp.xid = xid;
-    dhcp.client_mac = net.adapter.mac_address;
-
-    dhcp.magic = Dhcp_Message.MAGIC;
-
-    byte_swap_dhcp_message(*dhcp);
+    dhcp := init_dhcp_message(net);
     add_to_packet(*packet, dhcp);
 
     add_to_packet(*packet, dhcp_opt_discover);
     add_to_packet(*packet, dhcp_opt_prl);
 
-    return packet, xid;
+    i8254x_transmit_packet(*net.adapter, packet);
 }
 
-make_dhcp_request :: (net: *Network_Connection, xid: u32) -> Network_Packet {
+transmit_dhcp_decline :: (net: *Network_Connection) {
+    packet: Network_Packet;
+    packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
 
-    // Largely copy-pasted from "make_dhcp_discover"...
+    eth: Ethernet_Header;
+    eth.destination_mac = BROADCAST_MAC;
+    eth.source_mac = net.adapter.mac_address;
+    eth.ethertype = .IPv4;
+
+    add_to_packet(*packet, eth);
+
+    dhcp_opt_decline := u8.[0x35, 0x01, 0x04];
+
+    ip_length := size_of(Ipv4_Header)
+        + size_of(Udp_Header)
+        + size_of(Dhcp_Message)
+        + dhcp_opt_decline.count.(u16);
+
+    ip := init_ip_header(net, .UDP, 0xff_ff_ff_ff, ip_length);
+    add_to_packet(*packet, ip);
+
+    udp: Udp_Header;
+    udp.source_port = DHCP_CLIENT_PORT;
+    udp.destination_port = DHCP_SERVER_PORT;
+    udp.length = size_of(Udp_Header)
+        + size_of(Dhcp_Message)
+        + dhcp_opt_decline.count.(u16);
+
+    byte_swap_udp_header(*udp);
+    add_to_packet(*packet, udp);
+
+    dhcp := init_dhcp_message(net);
+    add_to_packet(*packet, dhcp);
+
+    add_to_packet(*packet, dhcp_opt_decline);
+
+    i8254x_transmit_packet(*net.adapter, packet);
+}
+
+transmit_dhcp_request :: (net: *Network_Connection) {
 
     packet: Network_Packet;
     packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
@@ -843,23 +885,29 @@ make_dhcp_request :: (net: *Network_Connection, xid: u32) -> Network_Packet {
     byte_swap_udp_header(*udp);
     add_to_packet(*packet, udp);
 
-    dhcp: Dhcp_Message;
-    dhcp.opcode = 0x1;
-    dhcp.hardware_type = 0x1;
-    dhcp.mac_length = 0x6;
-    dhcp.xid = xid;
-    dhcp.client_mac = net.adapter.mac_address;
-    dhcp.server_ip = net.router_ip;
-    dhcp.magic = Dhcp_Message.MAGIC;
-
-    byte_swap_dhcp_message(*dhcp);
+    dhcp := init_dhcp_message(net);
     add_to_packet(*packet, dhcp);
 
     add_to_packet(*packet, dhcp_opt_request);
     add_to_packet(*packet, dhcp_opt_server);
     add_to_packet(*packet, dhcp_opt_requested_ip);
 
-    return packet;
+    i8254x_transmit_packet(*net.adapter, packet);
+}
+
+init_dhcp_message :: (net: *Network_Connection) -> Dhcp_Message {
+    dhcp: Dhcp_Message;
+    dhcp.opcode = 0x1;
+    dhcp.hardware_type = 0x1;
+    dhcp.mac_length = 0x6;
+    dhcp.xid = net.dhcp_xid;
+    dhcp.client_mac = net.adapter.mac_address;
+    dhcp.server_ip = net.router_ip;
+    dhcp.magic = Dhcp_Message.MAGIC;
+
+    byte_swap_dhcp_message(*dhcp);
+
+    return dhcp;
 }
 
 
@@ -1175,10 +1223,10 @@ Network_Connection :: struct {
     dhcp_handshake_state: enum {
         NOT_STARTED;
         DISCOVER_TRANSMITTED;
-        OFFER_ACCEPTED;
         ARP_PROBE_1_TRANSMITTED;
         ARP_PROBE_2_TRANSMITTED;
         ARP_PROBE_3_TRANSMITTED;
+        OFFER_ACCEPTED;
         COMPLETED;
     }
     arp_probe_transmitted_at: Apollo_Time;
