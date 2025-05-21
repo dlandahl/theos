@@ -527,6 +527,21 @@ bluescreen :: (loc := #caller_location) #no_context {
 
     write_string("Bluescreen!\nSource code location:\n");
     write_loc(loc);
+    write_string("\n");
+
+    {
+        // Temporary hack to make debugging easier. If one core dies and leaks
+        // the serial port spinlock, other CPU cores should still be able to
+        // keep running.
+
+        core := get_current_core();
+        lock := *kernel_globals.serial_port_spinlock;
+
+        if lock.lock && lock.held_by_core == core.id {
+            lock.recursion_count = 0;
+            release(lock);
+        }
+    }
 
     while true #asm {
         cli;

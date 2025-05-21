@@ -343,6 +343,7 @@ Tcp_Connection :: struct {
         NOT_STARTED;
         SYN_SENT;
         COMPLETED;
+        CONNECTION_CLOSED;
     }
 
     // Accumulated each time we transmit new bytes that have not been transmitted before
@@ -360,10 +361,11 @@ Tcp_Connection :: struct {
 Tcp_Transmission_Info :: struct {
     // There should be an instance of this for each unacknowledged transmitted packet in a connection.
     // Except for ACKs sent by us, as we don't expect to receive an ACK for those.
+    packet: Network_Packet;
+    sequence: u32;
 
     last_sent_at: Apollo_Time; // To detect if we need to retransmit
-    sequence: u32;
-    packet: Network_Packet;
+    attempts: int;
 }
 
 record_tcp_packet_for_potential_retransmission :: (net: *Network_Connection, con: *Tcp_Connection, packet: Network_Packet) {
@@ -382,6 +384,11 @@ record_tcp_packet_for_potential_retransmission :: (net: *Network_Connection, con
 }
 
 transmit_tcp_packet :: (net: *Network_Connection, con: *Tcp_Connection, header_flags: Tcp_Header.Flags, payload := "", needs_acknowledgement := true) {
+    if con.handshake_state == .CONNECTION_CLOSED {
+        log_error("Trying to transmit TCP packet over a connection that has already been closed.");
+        return;
+    }
+
     packet: Network_Packet;
     packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
 
@@ -407,6 +414,7 @@ transmit_tcp_packet :: (net: *Network_Connection, con: *Tcp_Connection, header_f
 initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_port: u16) {
     port := FIRST_EPHEMERAL_PORT + cast(u16, rdtsc() & 0xfff);
 
+    log("Initating TCP connection with %:%", format_ip(remote_ip), remote_port);
     // Clear the high bit to ensure we have at least a couple gigabytes of headroom until we add code to handle overflow.
     sequence_number := cast(u32, random_get() & 0x7fff_ffff);
 
@@ -434,8 +442,11 @@ update_tcp_connection :: (net: *Network_Connection, con: *Tcp_Connection) {
     for* info: con.in_flight {
         if time_now - info.last_sent_at > RETRANSMISSION_TIME {
             // Retransmit the segment
+            log("TCP retransmit %", info.sequence);
             i8254x_transmit_packet(*net.adapter, info.packet);
+
             info.last_sent_at = time_now;
+            info.attempts += 1;
         }
     }
 }
@@ -455,6 +466,7 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
 
     con: *Tcp_Connection;
     for* net.tcp_connections {
+        if it.handshake_state == .CONNECTION_CLOSED continue;
         if it.port != tcp.destination_port continue;
         con = it;
         break;
@@ -469,12 +481,15 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
         if con.handshake_state == {
           case .COMPLETED;
             // It looks like the server missed the ACK the first time. Todo.
+            log("TCP unexpected SYN-ACK.");
 
           case .SYN_SENT;
             con.ack_number = tcp.sequence_number;
             con.sequence_number += 1;
             transmit_tcp_packet(net, con, .ACK, needs_acknowledgement=false);
             con.handshake_state = .COMPLETED;
+
+            log("TCP connection with %:% successfully established.", format_ip(con.remote_ip), con.remote_port);
         }
 
         return;
@@ -490,6 +505,12 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
                 remove info;
             }
         }
+    }
+
+    if tcp.flags & .FIN {
+        transmit_tcp_packet(net, con, .FIN | .ACK, needs_acknowledgement=false);
+        con.handshake_state = .CONNECTION_CLOSED;
+        return;
     }
 
     if tcp.sequence_number == con.ack_number + 1 {
@@ -511,10 +532,15 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
 
         array_add(*con.received_segments, packet_data);
 
+        log("Received TCP segment from %:%, (% bytes)", format_ip(con.remote_ip), con.remote_port, length);
+
         if tcp.flags & .PSH {
             log("%", con.received_segments);
             array_reset(*con.received_segments);
         }
+    } else {
+        // We need to handle receiving data out of order here.
+        log_error("TCP sequence number mismatch. Expected %, got %.", con.ack_number+1, tcp.sequence_number);
     }
 }
 
@@ -550,7 +576,7 @@ Tls_Handshake_Type :: enum u8 {
 
 Tls_Client_Hello :: struct {
     client_version: Tls_Version;
-    random: Tls_Random;
+    random: Tls_Random #align 2;
 
     session_id: u8;
 
@@ -559,6 +585,8 @@ Tls_Client_Hello :: struct {
 
     num_compression_methods: u8;
     compression_method: [1] u8;
+
+    extensions_length: u16;
 }
 
 Tls_Cipher_Suite :: enum u16 { }
@@ -568,11 +596,12 @@ Tls_Version :: enum u16 {
 }
 
 Tls_Random :: struct {
-    unix_time: u32 #align 1;
-    bytes: [28] u8;
+    bytes: [32] u8;
+#place bytes;
+    ints: [4] u64;
 }
 
-TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 : u16 : 0xc02f;
+TLS_DHE_RSA_WITH_AES_128_GCM_SHA256 : u16 : 0x009e;
 
 
 
@@ -654,11 +683,22 @@ update_dhcp :: (using net: *Network_Connection) {
         return;
     }
 
+    if dhcp_handshake_state == .DISCOVER_TRANSMITTED {
+        if dhcp_discover_transmitted_at < get_monotonic_time() - seconds_to_apollo(1) {
+            // Keep trying to discover.
+            dhcp_handshake_state = .NOT_STARTED;
+        }
+    }
+
     if dhcp_handshake_state == .NOT_STARTED {
         log("Transmitting DHCP discover...");
 
         transmit_dhcp_discover(net);
+
         dhcp_handshake_state = .DISCOVER_TRANSMITTED;
+        dhcp_discover_transmitted_at = get_monotonic_time();
+
+        return;
     }
 
     probe_time_elapsed := arp_probe_transmitted_at < get_monotonic_time() - milliseconds_to_apollo(100);
@@ -1019,6 +1059,7 @@ byte_swap_dns_header :: (dns: *Dns_Header) {
     dns.transaction_id = bs16(dns.transaction_id);
     dns.questions      = bs16(dns.questions);
     dns.answers        = bs16(dns.answers);
+    dns.flags          = bs16(dns.flags);
     dns.authority_rrs  = bs16(dns.authority_rrs);
     dns.additional_rrs = bs16(dns.additional_rrs);
 }
@@ -1054,7 +1095,7 @@ transmit_dns_query :: (net: *Network_Connection, url: string) {
 
     dns: Dns_Header;
     dns.transaction_id = xid;
-    dns.flags = 1;
+    dns.flags = 0x1 | 0x100; // Recursive query. Todo: magic number
     dns.questions = 1;
 
     byte_swap_dns_header(*dns);
@@ -1099,6 +1140,19 @@ Dns_Record_Type :: enum u16 {
     CNAME :: 0x0500;
 }
 
+Dns_Result_Code :: enum {
+    NOERROR   :: 0;
+    FORMERR   :: 1;
+    SERVFAIL  :: 2;
+    NXDOMAIN  :: 3;
+    NOTIMP    :: 4;
+    REFUSED   :: 5;
+    YXDOMAIN  :: 6;
+    XRRSET    :: 7;
+    NOTAUTH   :: 8;
+    NOTZONE   :: 9;
+}
+
 handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
     using packet := cast(*Dns_Packet) eth_;
 
@@ -1115,6 +1169,19 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
             continue;
         }
 
+        result_code := cast(Dns_Result_Code)(dns.flags & 0xf);
+
+        if result_code {
+            if result_code == {
+                case .NXDOMAIN; log("DNS query regarding domain name \"%\" returned \"No such name\".", query.url);
+                case .FORMERR;  log("DNS query regarding domain name \"%\" returned \"Format error\".", query.url);
+                case;           log("DNS query regarding domain name \"%\" returned result code %.", query.url, result_code);
+            }
+
+            query.complete = true;
+            return;
+        }
+
         Skip_Name :: () #expand {
             while cursor.* != 0 {
                 cursor += cursor.*;
@@ -1124,18 +1191,25 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
         }
 
         cursor := cast(*u8, *dns + 1);
-        for 0..dns.questions-1 {
+
+        // Must cast this or it may underflow and loop for very many iterations.
+        for 0..cast(s16)dns.questions-1 {
+
             // Skip all the questions.
             Skip_Name();
 
+            type := cursor.(*Dns_Record_Type).*;
             cursor += 2; // TYPE
+
+            class := cursor.(*u16).*;
             cursor += 2; // CLASS
         }
 
         // Should now be at the answers. Find a host address.
 
-        for 0..dns.answers-1 {
+        for 0..cast(s16)dns.answers-1 {
             // Detect if it's a pointer
+
             if (cursor[0] >> 6) == 0b11 {
                 cursor += 2;
             } else {
@@ -1229,6 +1303,8 @@ Network_Connection :: struct {
         OFFER_ACCEPTED;
         COMPLETED;
     }
+    dhcp_discover_transmitted_at: Apollo_Time;
+
     arp_probe_transmitted_at: Apollo_Time;
     arp_table: Table(u32, [6]u8);
 
@@ -1265,7 +1341,7 @@ network_thread :: () #c_call {
     core := get_current_core();
     release(*core.scheduler.spinlock);
 
-    sleep(10, .seconds);
+    sleep(5, .seconds);
 
     Log_Category("Net");
     using net := *kernel_globals.net;

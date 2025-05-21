@@ -323,6 +323,7 @@ ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, gate_nu
 DEFAULT_ISA_FAULT_HANDLER :: #string END
 #program_export default_isa_fault_handler_%1 :: (stack: *void) #c_call {
     core := get_current_core();
+    Scoped_Acquire(*kernel_globals.serial_port_spinlock);
 
     write_string("Something bad happened (%1) on core ");
     write_number(core.id);
@@ -335,6 +336,8 @@ END;
 #program_export
 page_fault :: (stack: *Interrupt_Stack(true)) #c_call {
     push_context,defer_pop;
+
+    Scoped_Acquire(*kernel_globals.serial_port_spinlock);
 
     core := get_current_core();
     task := core.scheduler.current_task;
@@ -372,6 +375,8 @@ page_fault :: (stack: *Interrupt_Stack(true)) #c_call {
 #program_export
 general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c_call {
     push_context {
+        Scoped_Acquire(*kernel_globals.serial_port_spinlock);
+
         core := get_current_core();
         task := core.scheduler.current_task;
 
