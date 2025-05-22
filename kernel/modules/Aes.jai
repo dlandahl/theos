@@ -9,7 +9,7 @@ i128 :: union {
 
 aes128_expand_key :: (key: i128) -> [11]i128 {
 
-    key_schedule: [11] i128;
+    key_schedule: [11]i128;
     key_schedule[0] = key;
 
     GenerateRoundKey :: (key: i128, $round: u8) -> i128 {
@@ -114,7 +114,7 @@ galois_multiply :: (X: i128, Y: i128) -> i128 {
 }
 
 inc32 :: (a: *i128) {
-    #no_abc {
+    #no_aoc {
         a.dwords[0] += 1;
     }
 }

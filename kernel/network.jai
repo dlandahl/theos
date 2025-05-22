@@ -592,6 +592,7 @@ Tls_Client_Hello :: struct {
 Tls_Cipher_Suite :: enum u16 { }
 
 Tls_Version :: enum u16 {
+    TLS_1_0 :: 0x0103;
     TLS_1_2 :: 0x0303;
 }
 
@@ -679,18 +680,9 @@ DHCP_CLIENT_PORT :: 68;
 DHCP_SERVER_PORT :: 67;
 
 update_dhcp :: (using net: *Network_Connection) {
-    if dhcp_handshake_state == .COMPLETED {
-        return;
-    }
 
-    if dhcp_handshake_state == .DISCOVER_TRANSMITTED {
-        if dhcp_discover_transmitted_at < get_monotonic_time() - seconds_to_apollo(1) {
-            // Keep trying to discover.
-            dhcp_handshake_state = .NOT_STARTED;
-        }
-    }
-
-    if dhcp_handshake_state == .NOT_STARTED {
+    if dhcp_handshake_state == {
+      case .NOT_STARTED;
         log("Transmitting DHCP discover...");
 
         transmit_dhcp_discover(net);
@@ -698,25 +690,37 @@ update_dhcp :: (using net: *Network_Connection) {
         dhcp_handshake_state = .DISCOVER_TRANSMITTED;
         dhcp_discover_transmitted_at = get_monotonic_time();
 
-        return;
-    }
+      case .DISCOVER_TRANSMITTED;
+        if dhcp_discover_transmitted_at < get_monotonic_time() - DHCP_DISCOVER_INTERVAL {
+            dhcp_handshake_state = .NOT_STARTED;
+        }
 
-    probe_time_elapsed := arp_probe_transmitted_at < get_monotonic_time() - milliseconds_to_apollo(100);
+      case .ARP_PROBE_1_TRANSMITTED; #through;
+      case .ARP_PROBE_2_TRANSMITTED;
+        probe_time_elapsed := arp_probe_transmitted_at < get_monotonic_time() - DHCP_ARP_PROBE_INTERVAL;
 
-    if probe_time_elapsed {
-        if dhcp_handshake_state >= .ARP_PROBE_1_TRANSMITTED && dhcp_handshake_state < .ARP_PROBE_3_TRANSMITTED {
-
+        if probe_time_elapsed {
             transmit_arp_probe(net);
 
             dhcp_handshake_state += 1;
             arp_probe_transmitted_at = get_monotonic_time();
         }
 
-        if dhcp_handshake_state == .ARP_PROBE_3_TRANSMITTED {
+      case .ARP_PROBE_3_TRANSMITTED;
+        probe_time_elapsed := arp_probe_transmitted_at < get_monotonic_time() - DHCP_ARP_PROBE_INTERVAL;
+
+        if probe_time_elapsed {
             log("No address conflicts found, accepting DHCP offer.");
             transmit_dhcp_request(net);
             dhcp_handshake_state = .OFFER_ACCEPTED;
         }
+
+      case .OFFER_ACCEPTED;
+        // Nothing to do, just waiting for an ACK from the server
+
+      case .COMPLETED;
+
+      case; assert(false, "Invalid DHCP handshake state.");
     }
 }
 
@@ -1101,8 +1105,6 @@ transmit_dns_query :: (net: *Network_Connection, url: string) {
     byte_swap_dns_header(*dns);
     add_to_packet(*packet, dns);
 
-    current_label_length: u8;
-
     remaining := url;
 
     while true {
@@ -1116,8 +1118,8 @@ transmit_dns_query :: (net: *Network_Connection, url: string) {
     }
     add_to_packet(*packet, (0).(u8));
 
-    add_to_packet(*packet, bs16(1)); // TYPE
-    add_to_packet(*packet, bs16(1)); // CLASS
+    add_to_packet(*packet, Dns_Record_Type.A);
+    add_to_packet(*packet, Dns_Class.IN);
 
     i8254x_transmit_packet(*net.adapter, packet);
 
@@ -1140,7 +1142,11 @@ Dns_Record_Type :: enum u16 {
     CNAME :: 0x0500;
 }
 
-Dns_Result_Code :: enum {
+Dns_Class :: enum u16 {
+    IN    :: 0x0100;
+}
+
+Dns_Response_Code :: enum {
     NOERROR   :: 0;
     FORMERR   :: 1;
     SERVFAIL  :: 2;
@@ -1169,7 +1175,7 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
             continue;
         }
 
-        result_code := cast(Dns_Result_Code)(dns.flags & 0xf);
+        result_code := cast(Dns_Response_Code)(dns.flags & 0xf);
 
         if result_code {
             if result_code == {
@@ -1304,8 +1310,11 @@ Network_Connection :: struct {
         COMPLETED;
     }
     dhcp_discover_transmitted_at: Apollo_Time;
+    DHCP_DISCOVER_INTERVAL :: #run seconds_to_apollo(10);
 
     arp_probe_transmitted_at: Apollo_Time;
+    DHCP_ARP_PROBE_INTERVAL :: #run milliseconds_to_apollo(100);
+
     arp_table: Table(u32, [6]u8);
 
     pings_in_flight: [..] struct {
