@@ -271,11 +271,11 @@ Hpet_Register :: enum u64 {
 }
 
 read :: (reg: Hpet_Register) -> u64 #no_context {
-    return << cast(*u64, kernel_globals.high_precision_timer.base_address + cast(u64) reg);
+    return cast(*u64, kernel_globals.high_precision_timer.base_address + cast(u64) reg).*;
 }
 
 write :: (reg: Hpet_Register, value: u64) #no_context {
-    << cast(*u64, kernel_globals.high_precision_timer.base_address + cast(u64) reg) = value;
+    cast(*u64, kernel_globals.high_precision_timer.base_address + cast(u64) reg).* = value;
 }
 
 Hpet_Config_Flags :: enum_flags u64 {
@@ -610,7 +610,7 @@ calibrate_tsc :: () -> hz: u64 {
     return 0;
 }
 
-calibrate_tsc_interrupt :: () {
+calibrate_tsc_using_interrupt :: () {
     for 1..10 {
         hpet_configure_timer(
             timer_index = 1,

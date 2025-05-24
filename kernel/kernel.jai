@@ -255,6 +255,10 @@ kernel_entry :: () #no_context {
         {
             Push_Print_Style().default_format_int.base = 16;
 
+            if !aes128_check_intel_instruction_set_support() {
+                bluescreen();
+            }
+
             key: i128;
             key.bytes = .[0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
                           0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c];
@@ -282,7 +286,7 @@ kernel_entry :: () #no_context {
 
         acquire(*net.spinlock);
         log("Sending DNS Query");
-        transmit_dns_query(*net, "google.com");
+        transmit_dns_query(*net, "www.google.com");
         release(*net.spinlock);
 
         ip_address: u32;
@@ -305,7 +309,7 @@ kernel_entry :: () #no_context {
 
         {
             Scoped_Acquire(*net.spinlock);
-            request := "GET / HTTP/1.1\r\nHost: google.com\r\nAccept: text/html\r\n\r\n";
+            request := "GET / HTTP/1.1\r\nHost: www.google.com\r\nAccept: text/html\r\n\r\n";
             transmit_tcp_packet(*net, *net.tcp_connections[0], .ACK | .PSH, request);
         }
 
@@ -1539,9 +1543,9 @@ parse_netpbm :: (file: [] u8) -> Netpbm_Image {
     buffer := file.data;
     assert(buffer[0] == #char "P");
 
-    netpbm: Netpbm_Image;
-    netpbm.type = xx (buffer[1] - #char "0");
-    assert(netpbm.type == .GRAYMAP || netpbm.type == .PIXMAP);
+    image: Netpbm_Image;
+    image.type = xx (buffer[1] - #char "0");
+    assert(image.type == .GRAYMAP || image.type == .PIXMAP);
 
     is_whitespace :: (char: u8) -> bool {
         return char == 0x20
@@ -1579,11 +1583,11 @@ parse_netpbm :: (file: [] u8) -> Netpbm_Image {
     cursor := 2;
     skip_whitespace_and_comments();
 
-    netpbm.width = parse_int();
+    image.width = parse_int();
 
     skip_whitespace_and_comments();
 
-    netpbm.height = parse_int();
+    image.height = parse_int();
 
     skip_whitespace_and_comments();
 
@@ -1592,7 +1596,7 @@ parse_netpbm :: (file: [] u8) -> Netpbm_Image {
 
     skip_whitespace_and_comments();
 
-    netpbm.data = buffer + cursor;
+    image.data = buffer + cursor;
 
-    return netpbm;
+    return image;
 }

@@ -7,6 +7,18 @@ i128 :: union {
     dwords: [4]u32;
 }
 
+aes128_check_intel_instruction_set_support :: () -> bool {
+    ecx: u64;
+
+    #asm {
+        ecx === c;
+        mov eax: gpr === a, 1;
+        cpuid eax, ebx:, ecx, edx:;
+    }
+
+    return (ecx & 1 << 25).(bool);
+}
+
 aes128_expand_key :: (key: i128) -> [11]i128 {
 
     key_schedule: [11]i128;
@@ -77,11 +89,11 @@ aes128_gcm_encrypt_stream_in_place :: (padded_stream: []u8, key: i128, nonce: [3
     blocks.count = padded_stream.count / 16;
 
     for 0..blocks.count-1 {
+        inc32(*counter);
+
         E_k := aes128_encrypt_block(counter, key_schedule);
 
         blocks[it] ^= E_k;
-
-        inc32(*counter);
     }
 
     return .{};

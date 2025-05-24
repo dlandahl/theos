@@ -343,6 +343,7 @@ Tcp_Connection :: struct {
         NOT_STARTED;
         SYN_SENT;
         COMPLETED;
+        FIN_TRANSMITTED;
         CONNECTION_CLOSED;
     }
 
@@ -363,12 +364,13 @@ Tcp_Transmission_Info :: struct {
     // Except for ACKs sent by us, as we don't expect to receive an ACK for those.
     packet: Network_Packet;
     sequence: u32;
+    flags: Tcp_Header.Flags; // This value is stored in the packet header, but it seems cleaner to keep a separate copy of it rather than parsing it out of the packet.
 
     last_sent_at: Apollo_Time; // To detect if we need to retransmit
     attempts: int;
 }
 
-record_tcp_packet_for_potential_retransmission :: (net: *Network_Connection, con: *Tcp_Connection, packet: Network_Packet) {
+record_tcp_packet_for_potential_retransmission :: (net: *Network_Connection, con: *Tcp_Connection, packet: Network_Packet, flags: Tcp_Header.Flags) {
 
     bytes_to_transmit := packet.length - (size_of(Ethernet_Header) + size_of(Ipv4_Header) + size_of(Tcp_Header));
     if bytes_to_transmit == 0 bytes_to_transmit = 1;
@@ -381,6 +383,7 @@ record_tcp_packet_for_potential_retransmission :: (net: *Network_Connection, con
     // The sequence number in the ACK will include the bytes transmitted in this packet, so store that.
     // The sequence number of the packet we're transmitting right now does not match this sequence number, as it describes the first byte being transmitted in that packet.
     info.sequence = con.sequence_number;
+    info.flags = flags;
 }
 
 transmit_tcp_packet :: (net: *Network_Connection, con: *Tcp_Connection, header_flags: Tcp_Header.Flags, payload := "", needs_acknowledgement := true) {
@@ -405,7 +408,7 @@ transmit_tcp_packet :: (net: *Network_Connection, con: *Tcp_Connection, header_f
     add_to_packet(*packet, payload);
 
     if needs_acknowledgement {
-        record_tcp_packet_for_potential_retransmission(net, con, packet);
+        record_tcp_packet_for_potential_retransmission(net, con, packet, header_flags);
     }
 
     i8254x_transmit_packet(*net.adapter, packet);
@@ -466,14 +469,18 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
 
     con: *Tcp_Connection;
     for* net.tcp_connections {
-        if it.handshake_state == .CONNECTION_CLOSED continue;
-        if it.port != tcp.destination_port continue;
-        con = it;
-        break;
+        if it.port == tcp.destination_port {
+            con = it;
+            break;
+        }
     }
 
     if !con {
         log_error("Got TCP message for nonexistent connection on port %", tcp.destination_port);
+        return;
+    }
+
+    if con.handshake_state == .CONNECTION_CLOSED {
         return;
     }
 
@@ -495,9 +502,25 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
         return;
     }
 
+    if tcp.flags & .FIN && tcp.flags & .ACK {
+        // Check if this is acknowledging a client-initiated connection termination.
+
+        for* info: con.in_flight {
+            if info.sequence == tcp.ack_number {
+                if con.handshake_state == .FIN_TRANSMITTED {
+                    if info.flags & .FIN && tcp.flags & .FIN {
+                        transmit_tcp_packet(net, con, .ACK, needs_acknowledgement=false);
+                        con.handshake_state = .CONNECTION_CLOSED;
+
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     if tcp.flags & .ACK {
         // Handle the fact that something we transmitted was acknowledged.
-
         for* info: con.in_flight {
             if info.sequence <= tcp.ack_number {
                 // Any segment that has been acknowledged (bytes later than it have been received) will never need to be retransmitted.
@@ -508,6 +531,7 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
     }
 
     if tcp.flags & .FIN {
+        // Server-initiated connection termination. Acknowledged using a FIN-ACK.
         transmit_tcp_packet(net, con, .FIN | .ACK, needs_acknowledgement=false);
         con.handshake_state = .CONNECTION_CLOSED;
         return;
@@ -603,7 +627,6 @@ Tls_Random :: struct {
 }
 
 TLS_DHE_RSA_WITH_AES_128_GCM_SHA256 : u16 : 0x009e;
-
 
 
 Dhcp_Message :: struct {
