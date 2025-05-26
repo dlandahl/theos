@@ -7,7 +7,7 @@
 #import "String";
 #import "Random";
 
-#import "Bitfield"(false);
+#import "Bitfield"(true);
 set :: bitfield_set;
 get :: bitfield_get;
 

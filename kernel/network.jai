@@ -146,7 +146,7 @@ init_ip_header :: (
     ip: Ipv4_Header;
     set(*ip, .version, 4);
     set(*ip, .ihl, 5);
-    set(*ip, .total_length, byte_swap(total_length));
+    set(*ip, .total_length, bs16(xx total_length));
 
     ip.time_to_live = 128;
     ip.protocol = protocol;
