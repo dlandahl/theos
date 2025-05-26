@@ -316,6 +316,7 @@ ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, gate_nu
     builder: String_Builder;
     for 0..31 {
         print(*builder, DEFAULT_ISA_FAULT_HANDLER, it);
+        print(*builder, "\n");
     }
     return builder_to_string(*builder);
 };
@@ -862,6 +863,7 @@ END;
     builder: String_Builder;
     for 0..7 {
         print(*builder, UACPI_IRQ_HANDLER, it);
+        print(*builder, "\n");
     }
     return builder_to_string(*builder);
 };
@@ -875,7 +877,7 @@ init_uacpi_interrupt_handlers :: () {
     #insert #run,host -> string {
         builder: String_Builder;
         for 0..7 {
-            print(*builder, "register_interrupt_gate(int__handle_uacpi_irq_%1, first_irq_handler_gate_index + %1);", it);
+            print(*builder, "register_interrupt_gate(int__handle_uacpi_irq_%1, first_irq_handler_gate_index + %1);\n", it);
         }
         return builder_to_string(*builder);
     };

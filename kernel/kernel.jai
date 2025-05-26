@@ -231,7 +231,11 @@ kernel_entry :: () #no_context {
 
         core_begin_multitasking();
 
+        // Todo: replace with a call to random_seed when updating to a compiler version newer than 0.2.014
         time := get_monotonic_system_time();
+        context.random_state.low = time.low | 1;
+        context.random_state.high = cast,no_check(u64) time.high;
+
         calendar := native_apollo_to_calendar(time);
         print("Time: %\n", calendar_to_string(calendar));
 
@@ -291,7 +295,7 @@ kernel_entry :: () #no_context {
 
         ip_address: u32;
 
-        while false {
+        while true {
             sleep(5, .milliseconds);
 
             Scoped_Acquire(*net.spinlock);
@@ -299,6 +303,9 @@ kernel_entry :: () #no_context {
 
             if query.complete {
                 ip_address = query.answer;
+                if !ip_address {
+                    log_error("Host could not be resolved: %", query.url);
+                }
                 break;
             }
         }
@@ -306,12 +313,12 @@ kernel_entry :: () #no_context {
         // if !ip_address bluescreen();
 
         ip := u8.[192, 168, 1, 111];
-        initiate_tcp_connection(*net, bit_cast(ip, u32), 4443);
+        initiate_tcp_connection(*net, bit_cast(ip_address, u32), 4443);
 
         while net.tcp_connections[0].handshake_state < .COMPLETED #asm { pause; }
 
-        if true {
-            request := "GET kernel/kernel.jai HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/html\r\n\r\n";
+        if false {
+            request := "GET /server.py HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/x-python\r\n\r\n";
             transmit_tcp_packet(*net, *net.tcp_connections[0], .ACK | .PSH, request);
         }
 
@@ -324,19 +331,22 @@ kernel_entry :: () #no_context {
 
             record: Tls_Record_Header;
             record.content_type = .HANDSHAKE;
-            record.version = .TLS_1_2;
+            record.version = .TLS_1_0;
             record.length = size_of(Tls_Client_Hello);
+            byte_swap_protocol_header(*record);
             add_to_packet(*packet, record);
 
             hello: Tls_Client_Hello;
             hello.client_version = .TLS_1_2;
-            for* hello.random.ints it.* = random_get();
+            for* hello.random it.* = cast(u8) random_get();
             hello.session_id = 0;
             hello.num_cipher_suites = 2; // In bytes.
-            hello.cipher_suite[0] = TLS_DHE_RSA_WITH_AES_128_GCM_SHA256;
+            hello.cipher_suite = .TLS_DHE_RSA_WITH_AES_128_GCM_SHA256;
             hello.num_compression_methods = 1;
-            hello.compression_method[0] = 0;
-            add_to_packet(*packet, record);
+            hello.compression_method = 0;
+            // byte_swap_client_hello(*hello);
+            byte_swap_protocol_header(*hello);
+            add_to_packet(*packet, hello);
 
             payload: string;
             payload.data = packet.data;
