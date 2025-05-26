@@ -4,7 +4,7 @@
     Date:   01 May 2020
 */
 
-md5 :: (input: string) -> string #must {
+md5 :: (input: string) -> string {
 
     // pad size to nearest 512 bits, plus make sure there is
     // room for 64 bits at the end to include the original size

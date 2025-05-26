@@ -90,7 +90,7 @@ core_begin_multitasking :: () {
         set(*lapic_timer, .gate_index, kernel_globals.local_apic_timer_interrupt_gate);
         set(*lapic_timer, .mask,       0);
 
-        write_apic_register(.LVT__TIMER, (.*) cast(*u32) *lapic_timer);
+        write_apic_register(.LVT__TIMER, cast(u32)lapic_timer);
     }
 }
 

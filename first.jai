@@ -430,12 +430,6 @@ init_segment_registers:
     mov ss, ax
     ret
 
-global get_cpu_local_data
-align 0x10
-get_cpu_local_data:
-    mov rax, gs:0
-    ret
-
 END;
 
 
@@ -464,8 +458,8 @@ AP_STARTUP_CODE :: #string END
 [org 0x8000]
 [bits 16]
 
-%define segment_code     0x0008
-%define segment_data     0x0010
+%define code_segment     0x0008
+%define data_segment     0x0010
 
 ap_startup_asm:
 start equ $
@@ -493,7 +487,7 @@ start equ $
 
     lgdt [gdt]
 
-    jmp segment_code:ap_long_mode_start
+    jmp code_segment:ap_long_mode_start
 
 align 8
 gdt:
@@ -529,7 +523,7 @@ serial:
 [bits 64]
 
 ap_long_mode_start:
-    mov ax, segment_data
+    mov ax, data_segment
     mov ds, ax
     mov es, ax
     mov fs, ax

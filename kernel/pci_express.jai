@@ -753,7 +753,7 @@ i8254x_transmit_packet :: (nic: *I8254x_Network_Interface_Card, packet: Network_
         success = false;
     }
 
-    if desc.status != 1 {
+    if desc.status > 1 { // I don't know why it's sometimes 0... we expect it to always be at least 1 after transmission due to the RS__report status flag.
         log("Transmit descriptor status: %", desc.status);
     }
 

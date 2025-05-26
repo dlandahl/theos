@@ -124,7 +124,7 @@ initialize_apic :: () {
         AE__apic_enable      :: 1 << 11;
     }
 
-    apic_base := (.*) cast(*Apic_Base_Flags) *read_msr(.APIC_BASE);
+    apic_base := cast(Apic_Base_Flags)read_msr(.APIC_BASE);
     assert(apic_base & .BSC__boot_strap_core > 0);
 
     apic_base |= .AE__apic_enable;
@@ -360,7 +360,7 @@ page_fault :: (stack: *Interrupt_Stack(true)) #c_call {
         PROTECTION_KEY;
         SHADOW_STACK;
     }
-    flags := (.*) cast(*Flags) *stack.error_code;
+    flags := cast(Flags)stack.error_code;
     print("Error flags: %\n\n", flags);
 
     print("RIP: 0x%\n", stack.ip);

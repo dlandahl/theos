@@ -502,6 +502,8 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
         return;
     }
 
+    // The FIN handling code is spaghetti code and should be refactored at some point.
+
     if tcp.flags & .FIN && tcp.flags & .ACK {
         // Check if this is acknowledging a client-initiated connection termination.
 
@@ -562,9 +564,9 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
             log("%", con.received_segments);
             array_reset(*con.received_segments);
         }
-    } else {
-        // We need to handle receiving data out of order here.
-        log_error("TCP sequence number mismatch. Expected %, got %.", con.ack_number+1, tcp.sequence_number);
+    } else if tcp.sequence_number > con.ack_number + 1 {
+        // If we get a greater sequence number than expected, ACK the last packet we received to indicate to the peer that later packets may need to be retransmitted.
+        transmit_tcp_packet(net, con, .ACK, needs_acknowledgement=false);
     }
 }
 
@@ -605,7 +607,7 @@ Tls_Client_Hello :: struct {
     session_id: u8;
 
     num_cipher_suites: u16;
-    cipher_suite: [1] u16;
+    cipher_suite: [1] Tls_Cipher_Suite;
 
     num_compression_methods: u8;
     compression_method: [1] u8;
@@ -613,7 +615,9 @@ Tls_Client_Hello :: struct {
     extensions_length: u16;
 }
 
-Tls_Cipher_Suite :: enum u16 { }
+Tls_Cipher_Suite :: enum u16 {
+    TLS_DHE_RSA_WITH_AES_128_GCM_SHA256 :: 0x009e;
+}
 
 Tls_Version :: enum u16 {
     TLS_1_0 :: 0x0103;
@@ -625,8 +629,6 @@ Tls_Random :: struct {
 #place bytes;
     ints: [4] u64;
 }
-
-TLS_DHE_RSA_WITH_AES_128_GCM_SHA256 : u16 : 0x009e;
 
 
 Dhcp_Message :: struct {
@@ -711,10 +713,10 @@ update_dhcp :: (using net: *Network_Connection) {
         transmit_dhcp_discover(net);
 
         dhcp_handshake_state = .DISCOVER_TRANSMITTED;
-        dhcp_discover_transmitted_at = get_monotonic_time();
+        dhcp_message_transmitted_at = get_monotonic_time();
 
       case .DISCOVER_TRANSMITTED;
-        if dhcp_discover_transmitted_at < get_monotonic_time() - DHCP_DISCOVER_INTERVAL {
+        if dhcp_message_transmitted_at < get_monotonic_time() - DHCP_DISCOVER_INTERVAL {
             dhcp_handshake_state = .NOT_STARTED;
         }
 
@@ -734,12 +736,26 @@ update_dhcp :: (using net: *Network_Connection) {
 
         if probe_time_elapsed {
             log("No address conflicts found, accepting DHCP offer.");
+
             transmit_dhcp_request(net);
+            dhcp_request_attempts = 1;
+
             dhcp_handshake_state = .OFFER_ACCEPTED;
+            dhcp_message_transmitted_at = get_monotonic_time();
         }
 
       case .OFFER_ACCEPTED;
-        // Nothing to do, just waiting for an ACK from the server
+        if dhcp_message_transmitted_at < get_monotonic_time() - DHCP_REQUEST_INTERVAL {
+            if dhcp_request_attempts >= DHCP_MAX_REQUEST_ATTEMPTS {
+                dhcp_handshake_state = .NOT_STARTED;
+                dhcp_request_attempts = 0;
+            } else {
+                // Retransmit the request for the IP if we don't get an acknowledgement in time.
+                transmit_dhcp_request(net);
+                dhcp_message_transmitted_at = get_monotonic_time();
+                dhcp_request_attempts += 1;
+            }
+        }
 
       case .COMPLETED;
 
@@ -911,8 +927,8 @@ transmit_dhcp_request :: (net: *Network_Connection) {
     // DHCP options
     dhcp_opt_request := u8.[0x35, 0x01, 0x03];
 
-    router_ip := (*net.router_ip).(*[4]u8).*;
-    our_ip := (*net.our_ip).(*[4]u8).*;
+    router_ip := bit_cast(net.router_ip, [4]u8);
+    our_ip    := bit_cast(net.our_ip,    [4]u8);
 
     dhcp_opt_server := u8.[
         0x36, 0x04,
@@ -1303,7 +1319,7 @@ format_mac :: (mac: [6] u8) -> string {
 }
 
 format_ip :: (ip: u32) -> string {
-    ip_array := (*ip).(*[4]u8).*;
+    ip_array := bit_cast(ip, [4]u8);
 
     return tprint("%.%.%.%",
         ip_array[0],
@@ -1332,11 +1348,15 @@ Network_Connection :: struct {
         OFFER_ACCEPTED;
         COMPLETED;
     }
-    dhcp_discover_transmitted_at: Apollo_Time;
+    dhcp_message_transmitted_at: Apollo_Time;
     DHCP_DISCOVER_INTERVAL :: #run seconds_to_apollo(10);
 
     arp_probe_transmitted_at: Apollo_Time;
     DHCP_ARP_PROBE_INTERVAL :: #run milliseconds_to_apollo(100);
+
+    dhcp_request_attempts: int;
+    MAX_DHCP_REQUEST_ATTEMPTS :: 5;
+    DHCP_REQUEST_INTERVAL :: #run milliseconds_to_apollo(200);
 
     arp_table: Table(u32, [6]u8);
 
@@ -1400,6 +1420,10 @@ network_thread :: () #c_call {
 
             if eth.ethertype == .ARP {
                 handle_arp(net, eth);
+                continue;
+            }
+
+            if eth.ethertype == 0xe188 || eth.ethertype == 0x1289 {
                 continue;
             }
 

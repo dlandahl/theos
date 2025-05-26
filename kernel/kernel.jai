@@ -12,6 +12,7 @@ set :: bitfield_set;
 get :: bitfield_get;
 
 #import "Aes";
+#import "Jai_Crypto";
 
 #load "../boot_data.jai";
 
@@ -83,13 +84,12 @@ Kernel_Globals :: struct {
     // has said that TSC frequency is imprecise even if provided by CPUID, so will need to investigate that.
     tsc_deadline_support: bool;
 
-    temporary_text_drawing_state: struct {
+    text_drawing_state: struct {
         cursor_x: int;
         cursor_y: int;
 
         font: Netpbm_Image;
 
-        // Recursive, so that errors generated during text rendering can be displayed on the screen.
         spinlock: Recursive_Spinlock;
 
         font_loaded: bool;
@@ -204,8 +204,8 @@ kernel_entry :: () #no_context {
             root_acpi_table = xx (rsdp.rsdt_address + DIRECT_MAPPING_BASE);
         }
 
-        temporary_text_drawing_state.font = parse_netpbm(font_file);
-        temporary_text_drawing_state.font_loaded = true;
+        text_drawing_state.font = parse_netpbm(font_file);
+        text_drawing_state.font_loaded = true;
 
         initialize_apic();
 
@@ -286,31 +286,63 @@ kernel_entry :: () #no_context {
 
         acquire(*net.spinlock);
         log("Sending DNS Query");
-        transmit_dns_query(*net, "www.google.com");
+        transmit_dns_query(*net, "thinkpad");
         release(*net.spinlock);
 
         ip_address: u32;
 
-        while true {
+        while false {
             sleep(5, .milliseconds);
 
             Scoped_Acquire(*net.spinlock);
             query := net.dns_queries_in_flight[0];
 
-            if !query.complete continue;
-
-            ip_address = query.answer;
-            break;
+            if query.complete {
+                ip_address = query.answer;
+                break;
+            }
         }
 
-        initiate_tcp_connection(*net, ip_address, HTTP_SERVER_PORT);
+        // if !ip_address bluescreen();
+
+        ip := u8.[192, 168, 1, 111];
+        initiate_tcp_connection(*net, bit_cast(ip, u32), 4443);
 
         while net.tcp_connections[0].handshake_state < .COMPLETED #asm { pause; }
 
-        {
-            Scoped_Acquire(*net.spinlock);
-            request := "GET / HTTP/1.1\r\nHost: www.google.com\r\nAccept: text/html\r\n\r\n";
+        if true {
+            request := "GET kernel/kernel.jai HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/html\r\n\r\n";
             transmit_tcp_packet(*net, *net.tcp_connections[0], .ACK | .PSH, request);
+        }
+
+        if false {
+            Scoped_Acquire(*net.spinlock);
+
+            // Send TLS client hello.
+            packet: Network_Packet;
+            packet.data = cast(*void)get_4k_page() + DIRECT_MAPPING_BASE;
+
+            record: Tls_Record_Header;
+            record.content_type = .HANDSHAKE;
+            record.version = .TLS_1_2;
+            record.length = size_of(Tls_Client_Hello);
+            add_to_packet(*packet, record);
+
+            hello: Tls_Client_Hello;
+            hello.client_version = .TLS_1_2;
+            for* hello.random.ints it.* = random_get();
+            hello.session_id = 0;
+            hello.num_cipher_suites = 2; // In bytes.
+            hello.cipher_suite[0] = TLS_DHE_RSA_WITH_AES_128_GCM_SHA256;
+            hello.num_compression_methods = 1;
+            hello.compression_method[0] = 0;
+            add_to_packet(*packet, record);
+
+            payload: string;
+            payload.data = packet.data;
+            payload.count = packet.length;
+
+            transmit_tcp_packet(*net, *net.tcp_connections[0], .ACK | .PSH, payload);
         }
 
         #asm { sti; }
@@ -502,7 +534,7 @@ init_processor_core :: () {
         write_msr(.SFMASK__syscall_flags, 0);
 
         syscall_entry :: () #foreign Interrupts;
-        write_msr(.LSTAR__syscall_address, cast(u64) cast(*void) syscall_entry);
+        write_msr(.LSTAR__syscall_address, bit_cast(syscall_entry, u64));
 
         EFER_SCE__syscall_enable :: 1;
 
@@ -1450,7 +1482,7 @@ font_file :: #run,host -> [] u8 {
 }
 
 draw_text :: (text: string) #no_context {
-    using kernel_globals.temporary_text_drawing_state;
+    using kernel_globals.text_drawing_state;
 
     if !font_loaded return;
 
@@ -1599,4 +1631,8 @@ parse_netpbm :: (file: [] u8) -> Netpbm_Image {
     image.data = buffer + cursor;
 
     return image;
+}
+
+bit_cast :: (object: $T, $target_type: Type) -> target_type {
+    return (.*) cast(*target_type) *object;
 }
