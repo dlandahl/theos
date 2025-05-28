@@ -3,8 +3,8 @@ bs16 :: #bake_constants byte_swap(T=u16);
 bs32 :: #bake_constants byte_swap(T=u32);
 
 byte_swap_protocol_header :: (header: *$T) #modify {
-    is := cast(*Type_Info) T;
-    return is.type == .STRUCT;
+    ti := cast(*Type_Info) T;
+    return ti.type == .STRUCT;
 } {
     #insert -> string {
         builder: String_Builder;
@@ -16,6 +16,11 @@ byte_swap_protocol_header :: (header: *$T) #modify {
 
             if it.type.runtime_size < 2 {
                 // Don't need to byte-swap 1-byte fields.
+                continue;
+            }
+
+            if it.type == type_info(tls_u24) {
+                print(*builder, "    header.%1 = byte_swap_u24(header.%1);\n", it.name);
                 continue;
             }
 
@@ -38,7 +43,7 @@ byte_swap_protocol_header :: (header: *$T) #modify {
                 assert(false, "Auto-byteswapping field of type % is not implemented. Field: %.", it.type.type, it.name);
             }
 
-            // Todo: in a bitfield, we need to byte-swap anything that is larger than a byte.
+            // Todo: in a bitfield, we need to byte-swap anything that's larger than a byte.
         }
 
         return builder_to_string(*builder);
@@ -449,13 +454,14 @@ transmit_tcp_packet :: (net: *Network_Connection, con: *Tcp_Connection, header_f
     i8254x_transmit_packet(*net.adapter, packet);
 }
 
-initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_port: u16) {
+initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_port: u16) -> *Tcp_Connection {
     port := FIRST_EPHEMERAL_PORT + cast(u16, rdtsc() & 0xfff);
 
     log("Initating TCP connection with %:%", format_ip(remote_ip), remote_port);
     // Clear the high bit to ensure we have at least a couple gigabytes of headroom until we add code to handle overflow.
     sequence_number := cast(u32, random_get() & 0x7fff_ffff);
 
+    // Todo: this should be changed to a Bucket_Array for pointer stability.
     con := array_add(*net.tcp_connections);
     con.* = .{
         port = port,
@@ -468,6 +474,8 @@ initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_por
 
     transmit_tcp_packet(net, con, .SYN, needs_acknowledgement=false);
     con.handshake_state = .SYN_SENT;
+
+    return con;
 }
 
 update_tcp_connection :: (net: *Network_Connection, con: *Tcp_Connection) {
@@ -574,7 +582,7 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
     }
 
     if tcp.sequence_number == con.ack_number + 1 {
-        length := get(ip, .total_length) - size_of(Ipv4_Header) - size_of(Tcp_Header);
+        length := bs16(xx get(ip, .total_length)) - size_of(Ipv4_Header) - size_of(Tcp_Header);
 
         if length == 0 {
             // It's just an ACK or FIN, handled above.
@@ -616,6 +624,36 @@ HTTPS_SERVER_PORT :: 443;
 
 
 
+// The TLS protocol includes 24 bit integers. This type will be detected
+// by the byteswapping code and be handled correctly.
+tls_u24 :: #type,distinct [3]u8;
+
+set :: (u24: *tls_u24, value: u32) {
+    array := bit_cast(value, [4]u8);
+
+    assert(array[3] == 0);
+
+    u24.*[0] = array[0];
+    u24.*[1] = array[1];
+    u24.*[2] = array[2];
+}
+
+get :: (u24: *tls_u24) -> u32 {
+    result: u32;
+    memcpy(*result, u24, 3);
+    return result;
+}
+
+byte_swap_u24 :: (u24: tls_u24) -> tls_u24 {
+    result: tls_u24;
+    result[0] = u24[2];
+    result[1] = u24[1];
+    result[2] = u24[0];
+    return result;
+}
+
+
+
 Tls_Record_Header :: struct {
     content_type: enum u8 {
         CHANGE_CIPHER_SPEC :: 20;
@@ -642,22 +680,28 @@ Tls_Handshake_Type :: enum u8 {
 }
 
 Tls_Client_Hello :: struct {
+    type: Tls_Handshake_Type;
+    length: tls_u24;
+
     client_version: Tls_Version;
-    random: Tls_Random;
+    random: Tls_Random #align 1;  @DontByteswap
 
     session_id: u8;
 
-    num_cipher_suites: u16;
-    cipher_suite: Tls_Cipher_Suite;
+    num_cipher_suites: u16 #align 1;
+    cipher_suite: Tls_Cipher_Suite #align 1;
 
     num_compression_methods: u8;
     compression_method: u8;
 
-    extensions_length: u16;
+    extensions_length: u16 #align 1;
+
+    signature_algorithms: [8] u8;
+    sct: [4] u8;
 }
 
 Tls_Cipher_Suite :: enum u16 {
-    TLS_DHE_RSA_WITH_AES_128_GCM_SHA256 :: 0x9e00;
+    DHE_RSA_WITH_AES128_GCM_SHA256 :: 0x009e;
 }
 
 Tls_Version :: enum u16 {
@@ -665,7 +709,11 @@ Tls_Version :: enum u16 {
     TLS_1_2 :: 0x0303;
 }
 
-Tls_Random :: [32] u8;
+Tls_Random :: struct {
+    random: [4] u64;
+#place random;
+    unix_time: u32;
+}
 
 Tls_Alert :: struct {
     level: enum u8 {
@@ -702,6 +750,60 @@ Tls_Alert :: struct {
     }
 }
 
+initiate_tls_connection :: (net: *Network_Connection, con: *Tcp_Connection) -> struct {} {
+
+    if con.handshake_state != .COMPLETED {
+        log_error("Trying to create a TLS connection without an established TCP connection.");
+        return .{};
+    }
+
+    Scoped_Acquire(*net.spinlock);
+
+    // Send TLS client hello.
+    packet: Network_Packet;
+    packet.data = cast(*void)get_4k_page() + DIRECT_MAPPING_BASE;
+
+    record := Tls_Record_Header.{
+        content_type = .HANDSHAKE,
+        version      = .TLS_1_0,
+        length       = size_of(Tls_Client_Hello),
+    };
+
+    byte_swap_protocol_header(*record);
+    add_to_packet(*packet, record);
+
+    hello := Tls_Client_Hello.{
+        type                      = .CLIENT_HELLO,
+        client_version            = .TLS_1_2,
+        session_id                = 0,
+        num_cipher_suites         = 2,
+        cipher_suite              = .DHE_RSA_WITH_AES128_GCM_SHA256,
+        num_compression_methods   = 1,
+        compression_method        = 0,
+        extensions_length         = 12,
+        signature_algorithms      = .[0x0, 0xd, 0x0, 0x4, 0x0, 0x2, 0x4, 0x1],
+        sct                       = .[0x0, 0x12, 0x0, 0x0],
+    };
+
+    set(*hello.length, size_of(Tls_Client_Hello) - 4);
+
+    for* hello.random.random it.* = random_get();
+    ts := to_timespec(get_monotonic_time());
+    hello.random.unix_time = bs32(xx ts.tv_sec);
+
+    byte_swap_protocol_header(*hello);
+    add_to_packet(*packet, hello);
+
+    payload: string;
+    payload.data = packet.data;
+    payload.count = packet.length;
+
+    transmit_tcp_packet(net, con, .ACK | .PSH, payload);
+
+    return .{};
+}
+
+
 
 Dhcp_Message :: struct {
     opcode:        u8;
@@ -727,38 +829,38 @@ Dhcp_Message :: struct {
 }
 
 Dhcp_Message_Type :: enum u8 {
-    discover           :: 1;
-    offer              :: 2;
-    request            :: 3;
-    decline            :: 4;
-    ack                :: 5;
-    nak                :: 6;
-    release            :: 7;
-    inform             :: 8;
-    force_renew        :: 9;
-    lease_query        :: 10;
-    lease_unassigned   :: 11;
-    lease_unknown      :: 12;
-    lease_active       :: 13;
-    bulk_lease_query   :: 14;
-    lease_query_done   :: 15;
-    active_lease_query :: 16;
-    lease_query_status :: 17;
-    tls                :: 18;
+    DISCOVER           :: 1;
+    OFFER              :: 2;
+    REQUEST            :: 3;
+    DECLINE            :: 4;
+    ACK                :: 5;
+    NAK                :: 6;
+    RELEASE            :: 7;
+    INFORM             :: 8;
+    FORCE_RENEW        :: 9;
+    LEASE_QUERY        :: 10;
+    LEASE_UNASSIGNED   :: 11;
+    LEASE_UNKNOWN      :: 12;
+    LEASE_ACTIVE       :: 13;
+    BULK_LEASE_QUERY   :: 14;
+    LEASE_QUERY_DONE   :: 15;
+    ACTIVE_LEASE_QUERY :: 16;
+    LEASE_QUERY_STATUS :: 17;
+    TLS                :: 18;
 }
 
 Dhcp_Option_Code :: enum u8 {
-    request_ip   :: 0x32;
-    message_type :: 0x35;
-    prl          :: 0x37;
-    terminator   :: 0xff;
+    REQUEST_IP   :: 0x32;
+    MESSAGE_TYPE :: 0x35;
+    PRL          :: 0x37;
+    TERMINATOR   :: 0xff;
 }
 
 get_dhcp_message_type :: (dhcp: *Dhcp_Message) -> Dhcp_Message_Type {
     options := cast(*Dhcp_Option_Code, dhcp + 1);
 
-    while options.* != .terminator {
-        if options.* != .message_type {
+    while options.* != .TERMINATOR {
+        if options.* != .MESSAGE_TYPE {
             options += cast(u8) options[1] + 2;
         }
 
@@ -862,7 +964,7 @@ handle_dhcp_packet :: (using net: *Network_Connection, eth_: *Ethernet_Header) {
     }
 
     if get_dhcp_message_type(*dhcp) == {
-      case .offer;
+      case .OFFER;
         if dhcp_handshake_state != .DISCOVER_TRANSMITTED {
             log_error("Unexpected DHCP offer.");
             return;
@@ -880,7 +982,7 @@ handle_dhcp_packet :: (using net: *Network_Connection, eth_: *Ethernet_Header) {
 
         dhcp_handshake_state = .ARP_PROBE_1_TRANSMITTED;
 
-      case .ack;
+      case .ACK;
         if dhcp_handshake_state != .OFFER_ACCEPTED {
             log_error("Unexpected DHCP ACK.");
             return;
@@ -888,7 +990,7 @@ handle_dhcp_packet :: (using net: *Network_Connection, eth_: *Ethernet_Header) {
 
         dhcp_handshake_state = .COMPLETED;
 
-      case .nak;
+      case .NAK;
         dhcp_handshake_state = .NOT_STARTED;
         log_error("DHCP NAK.");
     }
@@ -1105,11 +1207,12 @@ handle_icmp_packet :: (net: *Network_Connection, eth: *Ethernet_Header) {
 }
 
 transmit_pong :: (net: *Network_Connection, ping: *Icmp_Packet) {
-    using pong: Icmp_Packet;
-
     packet: Network_Packet;
+
     packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
     defer free_4k_page(cast(u64, packet.data - DIRECT_MAPPING_BASE));
+
+    using pong: Icmp_Packet;
 
     eth.destination_mac = ping.eth.source_mac;
     eth.source_mac      = ping.eth.destination_mac;
@@ -1172,7 +1275,9 @@ Dns_Header :: struct {
 
 DNS_SERVER_PORT :: 53;
 
-transmit_dns_query :: (net: *Network_Connection, url: string) {
+transmit_dns_query :: (net: *Network_Connection, url: string) -> *Dns_Query {
+    Scoped_Acquire(*net.spinlock);
+
     packet: Network_Packet;
     packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
 
@@ -1225,11 +1330,21 @@ transmit_dns_query :: (net: *Network_Connection, url: string) {
 
     i8254x_transmit_packet(*net.adapter, packet);
 
-    array_add(*net.dns_queries_in_flight, .{
-        id = xid,
-        url = copy_string(url),
-        sent_at = get_monotonic_time(),
-    });
+    // Todo: bucket array.
+    new_query := array_add(*net.dns_queries_in_flight);
+    new_query.transaction_id = xid;
+    new_query.url = copy_string(url);
+    new_query.sent_at = get_monotonic_time();
+
+    return new_query;
+}
+
+Dns_Query :: struct {
+    transaction_id: u16;
+    url: string;
+    sent_at: Apollo_Time;
+    complete: bool;
+    answer: u32;
 }
 
 Dns_Packet :: struct {
@@ -1269,7 +1384,7 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
     byte_swap_protocol_header(*packet.dns);
 
     for* query: net.dns_queries_in_flight {
-        if query.id != dns.transaction_id {
+        if query.transaction_id != dns.transaction_id {
             continue;
         }
 
@@ -1428,13 +1543,8 @@ Network_Connection :: struct {
         sent_at: Apollo_Time;
     };
 
-    dns_queries_in_flight: [..] struct {
-        id: u16;
-        url: string;
-        sent_at: Apollo_Time;
-        complete: bool;
-        answer: u32;
-    };
+    // Todo: bucket array.
+    dns_queries_in_flight: [..] Dns_Query;
 
     tcp_connections: [..] Tcp_Connection;
     next_port: u16;
@@ -1452,6 +1562,7 @@ allocate_port :: (net: *Network_Connection) -> u16 {
 network_thread :: () #c_call {
     push_context,defer_pop;
 
+    // All task entry points must release the scheduler spinlock.
     core := get_current_core();
     release(*core.scheduler.spinlock);
 
@@ -1491,7 +1602,7 @@ network_thread :: () #c_call {
                 continue;
             }
 
-            if eth.ethertype == 0xe188 || eth.ethertype == 0x1289 {
+            if eth.ethertype == 0x88e1 || eth.ethertype == 0x8912 {
                 // Related to powerline adapters.
                 continue;
             }

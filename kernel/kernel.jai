@@ -286,73 +286,23 @@ kernel_entry :: () #no_context {
             put_task_on_core(task, *processor_cores[1]);
         }
 
-        while net.dhcp_handshake_state < .COMPLETED #asm { pause; };
+        Timeout(net.dhcp_handshake_state == .COMPLETED, 60_000);
 
-        acquire(*net.spinlock);
         log("Sending DNS Query");
-        transmit_dns_query(*net, "thinkpad");
-        release(*net.spinlock);
+        dns_query := transmit_dns_query(*net, "thinkpad");
 
-        ip_address: u32;
+        Timeout(dns_query.complete, 60_000);
+        assert(dns_query.answer != 0);
 
-        while true {
-            sleep(5, .milliseconds);
+        connection := initiate_tcp_connection(*net, dns_query.answer, 4443);
 
-            Scoped_Acquire(*net.spinlock);
-            query := net.dns_queries_in_flight[0];
+        Timeout(connection.handshake_state == .COMPLETED, 60_000);
 
-            if query.complete {
-                ip_address = query.answer;
-                if !ip_address {
-                    log_error("Host could not be resolved: %", query.url);
-                }
-                break;
-            }
-        }
-
-        // if !ip_address bluescreen();
-
-        ip := u8.[192, 168, 1, 111];
-        initiate_tcp_connection(*net, bit_cast(ip_address, u32), 4443);
-
-        while net.tcp_connections[0].handshake_state < .COMPLETED #asm { pause; }
+        tls := initiate_tls_connection(*net, connection);
 
         if false {
             request := "GET /server.py HTTP/1.1\r\nHost: thinkpad\r\nAccept: text/x-python\r\n\r\n";
             transmit_tcp_packet(*net, *net.tcp_connections[0], .ACK | .PSH, request);
-        }
-
-        if false {
-            Scoped_Acquire(*net.spinlock);
-
-            // Send TLS client hello.
-            packet: Network_Packet;
-            packet.data = cast(*void)get_4k_page() + DIRECT_MAPPING_BASE;
-
-            record: Tls_Record_Header;
-            record.content_type = .HANDSHAKE;
-            record.version = .TLS_1_0;
-            record.length = size_of(Tls_Client_Hello);
-            byte_swap_protocol_header(*record);
-            add_to_packet(*packet, record);
-
-            hello: Tls_Client_Hello;
-            hello.client_version = .TLS_1_2;
-            for* hello.random it.* = cast(u8) random_get();
-            hello.session_id = 0;
-            hello.num_cipher_suites = 2; // In bytes.
-            hello.cipher_suite = .TLS_DHE_RSA_WITH_AES_128_GCM_SHA256;
-            hello.num_compression_methods = 1;
-            hello.compression_method = 0;
-            // byte_swap_client_hello(*hello);
-            byte_swap_protocol_header(*hello);
-            add_to_packet(*packet, hello);
-
-            payload: string;
-            payload.data = packet.data;
-            payload.count = packet.length;
-
-            transmit_tcp_packet(*net, *net.tcp_connections[0], .ACK | .PSH, payload);
         }
 
         #asm { sti; }
@@ -405,6 +355,10 @@ init_default_context_values :: () #no_context {
             write_string("[");
             write_string(context.log_category);
             write_string("] ");
+        }
+
+        if info.common_flags & .ERROR {
+            write_string("ERROR: ");
         }
 
         write_string(message);
