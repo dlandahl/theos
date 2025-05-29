@@ -849,14 +849,8 @@ Dhcp_Message_Type :: enum u8 {
     TLS                :: 18;
 }
 
-Dhcp_Option_Code :: enum u8 {
-    REQUEST_IP   :: 0x32;
-    MESSAGE_TYPE :: 0x35;
-    PRL          :: 0x37;
-    TERMINATOR   :: 0xff;
-}
-
 get_dhcp_message_type :: (dhcp: *Dhcp_Message) -> Dhcp_Message_Type {
+    // Todo: Make a general options parser.
     options := cast(*Dhcp_Option_Code, dhcp + 1);
 
     while options.* != .TERMINATOR {
@@ -866,6 +860,21 @@ get_dhcp_message_type :: (dhcp: *Dhcp_Message) -> Dhcp_Message_Type {
 
         return cast(Dhcp_Message_Type) options[2];
     }
+}
+
+init_dhcp_message :: (net: *Network_Connection) -> Dhcp_Message {
+    dhcp: Dhcp_Message;
+    dhcp.opcode = 0x1;
+    dhcp.hardware_type = 0x1;
+    dhcp.mac_length = 0x6;
+    dhcp.xid = net.dhcp_xid;
+    dhcp.client_mac = net.adapter.mac_address;
+    dhcp.server_ip = net.router_ip;
+    dhcp.magic = Dhcp_Message.MAGIC;
+
+    byte_swap_protocol_header(*dhcp);
+
+    return dhcp;
 }
 
 DHCP_CLIENT_PORT :: 68;
@@ -920,6 +929,7 @@ update_dhcp :: (using net: *Network_Connection) {
                 dhcp_request_attempts = 0;
             } else {
                 // Retransmit the request for the IP if we don't get an acknowledgement in time.
+                log("Retransmitting DHCP request.");
                 transmit_dhcp_request(net);
                 dhcp_message_transmitted_at = get_monotonic_time();
                 dhcp_request_attempts += 1;
@@ -996,6 +1006,47 @@ handle_dhcp_packet :: (using net: *Network_Connection, eth_: *Ethernet_Header) {
     }
 }
 
+
+
+Dhcp_Option_Code :: enum u8 {
+    REQUEST_IP   :: 0x32;
+    MESSAGE_TYPE :: 0x35;
+    SERVER_IP    :: 0x36;
+    PRL          :: 0x37;
+    TERMINATOR   :: 0xff;
+}
+
+Dhcp_Added_Options :: struct {
+    buffer: [..] u8;
+}
+
+add_dhcp_option :: (options: *Dhcp_Added_Options, code: Dhcp_Option_Code, data: Any) {
+    if options.buffer.data == null {
+        // options.buffer.allocator = temp;
+    }
+
+    array_add(*options.buffer, cast(u8)code);
+
+    array_add(*options.buffer, cast(u8)data.type.runtime_size);
+
+    bytes: []u8;
+    bytes.data = data.value_pointer;
+    bytes.count = data.type.runtime_size;
+    array_add(*options.buffer, ..bytes);
+}
+
+get_size :: (options: Dhcp_Added_Options) -> u16 {
+    // +1 because we add the terminator when we commit.
+    return cast(u16)options.buffer.count + 1;
+}
+
+commit_dhcp_options :: (packet: *Network_Packet, options: Dhcp_Added_Options) {
+    array_add(*options.buffer, 0xff);
+    add_to_packet(packet, cast(string)options.buffer);
+}
+
+
+
 transmit_dhcp_discover :: (net: *Network_Connection) {
     packet: Network_Packet;
     packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
@@ -1009,15 +1060,14 @@ transmit_dhcp_discover :: (net: *Network_Connection) {
     add_to_packet(*packet, eth);
 
     // DHCP options
-    dhcp_opt_discover   := u8.[0x35, 0x01, 0x01];
-    dhcp_opt_prl        := u8.[0x37, 0x04, 0x01, 0x03, 0x0f, 0x06, 0xff];
-
-    dhcp_options_length : u16 = dhcp_opt_discover.count + dhcp_opt_prl.count;
+    options: Dhcp_Added_Options;
+    add_dhcp_option(*options, .MESSAGE_TYPE, Dhcp_Message_Type.DISCOVER);
+    add_dhcp_option(*options, .PRL, u8.[4, 1, 3, 15, 6]);
 
     ip_length := size_of(Ipv4_Header)
         + size_of(Udp_Header)
         + size_of(Dhcp_Message)
-        + dhcp_options_length;
+        + get_size(options);
 
     ip := init_ip_header(net, .UDP, 0xff_ff_ff_ff, ip_length);
     add_to_packet(*packet, ip);
@@ -1027,7 +1077,7 @@ transmit_dhcp_discover :: (net: *Network_Connection) {
     udp.destination_port = DHCP_SERVER_PORT;
     udp.length = size_of(Udp_Header)
         + size_of(Dhcp_Message)
-        + dhcp_options_length;
+        + get_size(options);
 
     byte_swap_protocol_header(*udp);
     add_to_packet(*packet, udp);
@@ -1035,8 +1085,7 @@ transmit_dhcp_discover :: (net: *Network_Connection) {
     dhcp := init_dhcp_message(net);
     add_to_packet(*packet, dhcp);
 
-    add_to_packet(*packet, dhcp_opt_discover);
-    add_to_packet(*packet, dhcp_opt_prl);
+    commit_dhcp_options(*packet, options);
 
     i8254x_transmit_packet(*net.adapter, packet);
 }
@@ -1053,12 +1102,13 @@ transmit_dhcp_decline :: (net: *Network_Connection) {
     byte_swap_protocol_header(*eth);
     add_to_packet(*packet, eth);
 
-    dhcp_opt_decline := u8.[0x35, 0x01, 0x04];
+    options: Dhcp_Added_Options;
+    add_dhcp_option(*options, .MESSAGE_TYPE, Dhcp_Message_Type.DECLINE);
 
     ip_length := size_of(Ipv4_Header)
         + size_of(Udp_Header)
         + size_of(Dhcp_Message)
-        + dhcp_opt_decline.count.(u16);
+        + get_size(options);
 
     ip := init_ip_header(net, .UDP, 0xff_ff_ff_ff, ip_length);
     add_to_packet(*packet, ip);
@@ -1068,7 +1118,7 @@ transmit_dhcp_decline :: (net: *Network_Connection) {
     udp.destination_port = DHCP_SERVER_PORT;
     udp.length = size_of(Udp_Header)
         + size_of(Dhcp_Message)
-        + dhcp_opt_decline.count.(u16);
+        + get_size(options);
 
     byte_swap_protocol_header(*udp);
     add_to_packet(*packet, udp);
@@ -1076,7 +1126,7 @@ transmit_dhcp_decline :: (net: *Network_Connection) {
     dhcp := init_dhcp_message(net);
     add_to_packet(*packet, dhcp);
 
-    add_to_packet(*packet, dhcp_opt_decline);
+    commit_dhcp_options(*packet, options);
 
     i8254x_transmit_packet(*net.adapter, packet);
 }
@@ -1095,35 +1145,15 @@ transmit_dhcp_request :: (net: *Network_Connection) {
     add_to_packet(*packet, eth);
 
     // DHCP options
-    dhcp_opt_request := u8.[0x35, 0x01, 0x03];
-
-    router_ip := bit_cast(net.router_ip, [4]u8);
-    our_ip    := bit_cast(net.our_ip,    [4]u8);
-
-    dhcp_opt_server := u8.[
-        0x36, 0x04,
-        router_ip[0],
-        router_ip[1],
-        router_ip[2],
-        router_ip[3]
-    ];
-
-    dhcp_opt_requested_ip := u8.[
-        0x32, 0x04,
-        our_ip[0],
-        our_ip[1],
-        our_ip[2],
-        our_ip[3],
-
-        0xff
-    ];
-
-    dhcp_options_length : u16 = dhcp_opt_request.count + dhcp_opt_server.count + dhcp_opt_requested_ip.count;
+    options: Dhcp_Added_Options;
+    add_dhcp_option(*options, .MESSAGE_TYPE, Dhcp_Message_Type.REQUEST);
+    add_dhcp_option(*options, .SERVER_IP, net.router_ip);
+    add_dhcp_option(*options, .REQUEST_IP, net.our_ip);
 
     ip_length := size_of(Ipv4_Header)
         + size_of(Udp_Header)
         + size_of(Dhcp_Message)
-        + dhcp_options_length;
+        + get_size(options);
 
     ip := init_ip_header(net, .UDP, 0xff_ff_ff_ff, ip_length);
     add_to_packet(*packet, ip);
@@ -1133,7 +1163,7 @@ transmit_dhcp_request :: (net: *Network_Connection) {
     udp.destination_port = DHCP_SERVER_PORT;
     udp.length = size_of(Udp_Header)
         + size_of(Dhcp_Message)
-        + dhcp_options_length;
+        + get_size(options);
 
     byte_swap_protocol_header(*udp);
     add_to_packet(*packet, udp);
@@ -1141,26 +1171,9 @@ transmit_dhcp_request :: (net: *Network_Connection) {
     dhcp := init_dhcp_message(net);
     add_to_packet(*packet, dhcp);
 
-    add_to_packet(*packet, dhcp_opt_request);
-    add_to_packet(*packet, dhcp_opt_server);
-    add_to_packet(*packet, dhcp_opt_requested_ip);
+    commit_dhcp_options(*packet, options);
 
     i8254x_transmit_packet(*net.adapter, packet);
-}
-
-init_dhcp_message :: (net: *Network_Connection) -> Dhcp_Message {
-    dhcp: Dhcp_Message;
-    dhcp.opcode = 0x1;
-    dhcp.hardware_type = 0x1;
-    dhcp.mac_length = 0x6;
-    dhcp.xid = net.dhcp_xid;
-    dhcp.client_mac = net.adapter.mac_address;
-    dhcp.server_ip = net.router_ip;
-    dhcp.magic = Dhcp_Message.MAGIC;
-
-    byte_swap_protocol_header(*dhcp);
-
-    return dhcp;
 }
 
 
