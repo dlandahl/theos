@@ -1009,6 +1009,13 @@ handle_dhcp_packet :: (using net: *Network_Connection, eth_: *Ethernet_Header) {
 
 
 Dhcp_Option_Code :: enum u8 {
+    PADDING      :: 0x0;
+    SUBNET_MASK  :: 0x01;
+    ROUTER       :: 0x03;
+    TIME_SERVER  :: 0x04;
+    DNS_SERVER   :: 0x06;
+    HOSTNAME     :: 0x0c;
+    DOMAIN_NAME  :: 0x0f;
     REQUEST_IP   :: 0x32;
     MESSAGE_TYPE :: 0x35;
     SERVER_IP    :: 0x36;
@@ -1016,16 +1023,23 @@ Dhcp_Option_Code :: enum u8 {
     TERMINATOR   :: 0xff;
 }
 
-Dhcp_Added_Options :: struct {
+Dhcp_Options_Builder :: struct {
     buffer: [..] u8;
 }
 
-add_dhcp_option :: (options: *Dhcp_Added_Options, code: Dhcp_Option_Code, data: Any) {
-    if options.buffer.data == null {
-        // options.buffer.allocator = temp;
+add_option :: (options: *Dhcp_Options_Builder, code: Dhcp_Option_Code, data: Any) {
+    if !options.buffer.allocator.proc {
+        options.buffer.allocator = temp;
     }
 
     array_add(*options.buffer, cast(u8)code);
+
+    if data.type.type == .STRING {
+        bytes := cast(*[]u8, data.value_pointer).*;
+        array_add(*options.buffer, cast(u8)bytes.count);
+        array_add(*options.buffer, ..bytes);
+        return;
+    }
 
     array_add(*options.buffer, cast(u8)data.type.runtime_size);
 
@@ -1035,15 +1049,22 @@ add_dhcp_option :: (options: *Dhcp_Added_Options, code: Dhcp_Option_Code, data: 
     array_add(*options.buffer, ..bytes);
 }
 
-get_size :: (options: Dhcp_Added_Options) -> u16 {
+get_size :: (options: Dhcp_Options_Builder) -> u16 {
     // +1 because we add the terminator when we commit.
     return cast(u16)options.buffer.count + 1;
 }
 
-commit_dhcp_options :: (packet: *Network_Packet, options: Dhcp_Added_Options) {
+commit_dhcp_options :: (packet: *Network_Packet, options: Dhcp_Options_Builder) {
     array_add(*options.buffer, 0xff);
     add_to_packet(packet, cast(string)options.buffer);
 }
+
+dhcp_option_data_types :: struct {
+    code: Dhcp_Option_Code;
+    data_type: Type;
+}.[
+    .{ .REQUEST_IP, u32 },
+];
 
 
 
@@ -1059,10 +1080,15 @@ transmit_dhcp_discover :: (net: *Network_Connection) {
     byte_swap_protocol_header(*eth);
     add_to_packet(*packet, eth);
 
-    // DHCP options
-    options: Dhcp_Added_Options;
-    add_dhcp_option(*options, .MESSAGE_TYPE, Dhcp_Message_Type.DISCOVER);
-    add_dhcp_option(*options, .PRL, u8.[4, 1, 3, 15, 6]);
+    options: Dhcp_Options_Builder;
+    add_option(*options, .MESSAGE_TYPE, Dhcp_Message_Type.DISCOVER);
+    add_option(*options, .PRL, Dhcp_Option_Code.[
+        .SUBNET_MASK,
+        .ROUTER,
+        .TIME_SERVER,
+        .DNS_SERVER,
+        .DOMAIN_NAME
+    ]);
 
     ip_length := size_of(Ipv4_Header)
         + size_of(Udp_Header)
@@ -1102,8 +1128,8 @@ transmit_dhcp_decline :: (net: *Network_Connection) {
     byte_swap_protocol_header(*eth);
     add_to_packet(*packet, eth);
 
-    options: Dhcp_Added_Options;
-    add_dhcp_option(*options, .MESSAGE_TYPE, Dhcp_Message_Type.DECLINE);
+    options: Dhcp_Options_Builder;
+    add_option(*options, .MESSAGE_TYPE, Dhcp_Message_Type.DECLINE);
 
     ip_length := size_of(Ipv4_Header)
         + size_of(Udp_Header)
@@ -1144,11 +1170,11 @@ transmit_dhcp_request :: (net: *Network_Connection) {
     byte_swap_protocol_header(*eth);
     add_to_packet(*packet, eth);
 
-    // DHCP options
-    options: Dhcp_Added_Options;
-    add_dhcp_option(*options, .MESSAGE_TYPE, Dhcp_Message_Type.REQUEST);
-    add_dhcp_option(*options, .SERVER_IP, net.router_ip);
-    add_dhcp_option(*options, .REQUEST_IP, net.our_ip);
+    options: Dhcp_Options_Builder;
+    add_option(*options, .MESSAGE_TYPE, Dhcp_Message_Type.REQUEST);
+    add_option(*options, .HOSTNAME, "JaiOS");
+    add_option(*options, .SERVER_IP, net.router_ip);
+    add_option(*options, .REQUEST_IP, net.our_ip);
 
     ip_length := size_of(Ipv4_Header)
         + size_of(Udp_Header)
