@@ -322,7 +322,8 @@ ioapic_add_interrupt_redirection_table_entry :: (redirection_index: u32, gate_nu
 };
 
 DEFAULT_ISA_FAULT_HANDLER :: #string END
-#program_export default_isa_fault_handler_%1 :: (stack: *void) #c_call {
+#program_export
+default_isa_fault_handler_%1 :: (stack: *void) #c_call {
     core := get_current_core();
     Scoped_Acquire(*kernel_globals.serial_port_spinlock);
 

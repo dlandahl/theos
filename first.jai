@@ -165,7 +165,6 @@ compile_kernel :: (kernel_only: bool) -> success: bool {
         options.output_path = ".build";
         options.text_output_flags = 0;
         options.entry_point_name = "kernel_entry";
-        options.cast_bounds_check = .OFF;
         options.disable_redzone = true;
         options.additional_linker_arguments = .["-ekernel_entry", "-Tlink.ld"];
         options.os_target = .LINUX;

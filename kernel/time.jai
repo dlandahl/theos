@@ -414,7 +414,8 @@ hpet_restart :: () {
     write(.CONFIG, config | ENABLE_BIT);
 }
 
-#program_export hpet_timer0_interrupt :: (data: *Interrupt_Stack()) #c_call {
+#program_export
+hpet_timer0_interrupt :: (data: *Interrupt_Stack()) #c_call {
     using kernel_globals.high_precision_timer;
 
     sequence_write(*seq_lock, #code {
@@ -425,7 +426,8 @@ hpet_restart :: () {
     write_apic_register(.EOI__END_OF_INTERRUPT, 0);
 } @InterruptRoutine
 
-#program_export hpet_timer1_interrupt :: (data: *Interrupt_Stack()) #c_call {
+#program_export
+hpet_timer1_interrupt :: (data: *Interrupt_Stack()) #c_call {
     using kernel_globals.high_precision_timer;
     timers[1].counter += 1;
     write_apic_register(.EOI__END_OF_INTERRUPT, 0);
@@ -516,7 +518,7 @@ busy_loop :: (n: s64, $units: enum {nanoseconds; microseconds; milliseconds; sec
 calibrate_tsc :: () -> hz: u64 {
     verbose := false;
 
-    // Try to read TSC frequency from CPUID. Modern CPUs support it, but even fairly recent ones don't, so fallback to manual timing using HPET.
+    // Try to read TSC frequency from CPUID. Modern CPUs support it, but even fairly recent ones don't, in which case we fall back to manual timing using HPET.
     eax, ebx, ecx, edx: u64;
 
     #asm {
@@ -531,7 +533,7 @@ calibrate_tsc :: () -> hz: u64 {
 
     if eax != 0 {
         frequency := ecx * (ebx / eax);
-        if verbose log("TSC Frequency is % (CPUID)", frequency);
+        if verbose log("TSC Frequency is % (eax=0x15)", frequency);
         return frequency;
     }
 
@@ -546,9 +548,11 @@ calibrate_tsc :: () -> hz: u64 {
     if eax != 0 {
         // It looks like this value is not too accurate. Manual calibration might be better.
         frequency := eax * 1_000_000;
-        if verbose log("TSC Frequency is % (CPUID)", frequency);
+        if verbose log("TSC Frequency is % (eax=0x16)", frequency);
         return frequency;
     }
+
+
 
     if verbose log("Calibrating TSC...");
     hpet := kernel_globals.high_precision_timer;

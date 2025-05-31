@@ -302,7 +302,7 @@ read_base_address_register :: (device: Pci_Device, bar_index: int) -> Pci_Bar {
 
     device.registers[0x4 + bar_index] = bar;
 
-    limit = cast(u32) ~(limit & mask) + 1;
+    limit = cast,trunc(u32) ~(limit & mask) + 1;
 
     return .{base, limit};
 }

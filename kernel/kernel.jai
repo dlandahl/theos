@@ -178,14 +178,14 @@ kernel_entry :: () #no_context {
 
         // Put a virtual memory heap after the direct mapping
         GB :: 0x4000_0000;
-        direct_mapping_size := boot_data.page_tables.direct_pd.count * GB;
+        direct_mapping_size := cast(u64) boot_data.page_tables.direct_pd.count * GB;
 
-        heap_base := DIRECT_MAPPING_BASE + direct_mapping_size + 4096 * 100;
-        heap_size := 64 * GB;
+        heap_base: u64 = DIRECT_MAPPING_BASE + direct_mapping_size;
+        heap_size: u64 = 64 * GB;
 
         // Keep virtual allocations page aligned, since virtual memory always needs to be mapped anyway.
         alignment := 4096;
-        init_block_allocator(*virtual_block_allocator, cast(u64) heap_base, cast(u64) heap_size, alignment);
+        init_block_allocator(*virtual_block_allocator, heap_base, heap_size, alignment);
 
 
         // Sequentially allocating interrupt gates, starting after the ISA exceptions
@@ -436,10 +436,10 @@ init_processor_core :: () {
         tss_address := cast(u64) *core.task_state_segment;
 
         tss_desc.segment_limit = size_of(Tss_With_Iopb);
-        tss_desc.base_address_0 = cast(u16, tss_address);
-        tss_desc.base_address_1 = cast(u8,  tss_address >> 16);
-        tss_desc.base_address_2 = cast(u8,  tss_address >> 24);
-        tss_desc.base_address_3 = cast(u32, tss_address >> 32);
+        tss_desc.base_address_0 = cast,trunc(u16, tss_address);
+        tss_desc.base_address_1 = cast,trunc(u8,  tss_address >> 16);
+        tss_desc.base_address_2 = cast,trunc(u8,  tss_address >> 24);
+        tss_desc.base_address_3 = cast,trunc(u32, tss_address >> 32);
         tss_desc.flags_0        = 0b1_00_0_1001; // type=TSS non-busy | PRESENT
 
         using Gdt_Entry;

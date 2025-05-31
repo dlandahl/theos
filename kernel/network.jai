@@ -519,6 +519,7 @@ handle_tcp_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
 
     if !con {
         log_error("Got TCP message for nonexistent connection on port %", tcp.destination_port);
+        // Todo: transmit RST
         return;
     }
 
@@ -885,7 +886,7 @@ update_dhcp :: (using net: *Network_Connection) {
     if dhcp_handshake_state == {
       case .NOT_STARTED;
 
-        net.dhcp_xid = cast(u32) random_get();
+        net.dhcp_xid = cast,trunc(u32) random_get();
         log("Transmitting DHCP discover... (0x%)", hex(dhcp_xid));
 
         transmit_dhcp_discover(net);
@@ -1278,7 +1279,7 @@ transmit_ping :: (net: *Network_Connection, destination_ip: u32) {
     ip = init_ip_header(net, .ICMP, destination_ip, size_of(Ipv4_Header) + size_of(Icmp_Header));
 
     icmp.control_message = .echo_request;
-    icmp.data = xx random_get() & 0xffff;
+    icmp.data = cast(u32) random_get() & 0xffff;
     byte_swap_protocol_header(*icmp);
     icmp.checksum = internet_checksum(icmp);
 
@@ -1304,7 +1305,10 @@ transmit_ping :: (net: *Network_Connection, destination_ip: u32) {
 Dns_Header :: struct {
     transaction_id: u16;
 
-    flags: u16;
+    flags: enum_flags u16 {
+        QR__query :: 0x1;
+        RD__recursion_desired :: 0x100;
+    }
 
     questions: u16;
     answers: u16;
@@ -1320,7 +1324,7 @@ transmit_dns_query :: (net: *Network_Connection, url: string) -> *Dns_Query {
     packet: Network_Packet;
     packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
 
-    xid := cast(u16) random_get();
+    xid := cast,trunc(u16) random_get();
 
     eth := init_ethernet_header(net);
     add_to_packet(*packet, eth);
@@ -1345,7 +1349,7 @@ transmit_dns_query :: (net: *Network_Connection, url: string) -> *Dns_Query {
 
     dns: Dns_Header;
     dns.transaction_id = xid;
-    dns.flags = 0x1 | 0x100; // Recursive query. Todo: magic number
+    dns.flags = .QR__query | .RD__recursion_desired;
     dns.questions = 1;
 
     byte_swap_protocol_header(*dns);
@@ -1505,7 +1509,6 @@ handle_dns_packet :: (net: *Network_Connection, eth_: *Ethernet_Header) {
 
     log_error("Got unexpected DNS response from %.", format_ip(ip.source_address));
 }
-
 
 
 
