@@ -273,3 +273,12 @@ Mxcsr :: enum_flags u64 {
               | UM__underflow_mask
               | PM__precision_mask;
 }
+
+Xsave_Area :: struct {
+    // Warning: this struct requires 16-byte alignment to be accessed by fxsave64 etc.
+    fpu: [512] u8;
+
+#place fpu;
+    offset: [24] u8;
+    mxcsr: Mxcsr;
+}

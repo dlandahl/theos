@@ -154,6 +154,7 @@ initialize_apic :: () {
         return builder_to_string(*builder);
     };
 
+    register_interrupt_gate(int__breakpoint_handler,            3,  true);
     register_interrupt_gate(int__general_protection_fault,      13, true);
     register_interrupt_gate(int__page_fault,                    14, true);
     register_interrupt_gate(int__simd_floating_point_exception, 19, true);
@@ -336,6 +337,21 @@ default_isa_fault_handler_%1 :: (stack: *void) #c_call {
 END;
 
 #program_export
+breakpoint_handler :: (stack: *Interrupt_Stack(false)) #c_call {
+    push_context {
+        context.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = 0;
+        context.print_style.default_format_struct.use_newlines_if_long_form = true;
+        context.print_style.default_format_int.base = 16;
+
+        Scoped_Acquire(*kernel_globals.serial_port_spinlock);
+
+        print("Breakpoint hit. Context:\n%", stack.*);
+    }
+
+    while true {}
+} @InterruptRoutine
+
+#program_export
 page_fault :: (stack: *Interrupt_Stack(true)) #c_call {
     push_context,defer_pop;
 
@@ -418,6 +434,26 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
 
 
 initialize_uacpi :: () {
+    uacpi_set_interrupt_model(.IOAPIC);
+
+    // Initializing PCI requires uACPI to get the PCI routing table, so this code needs to run first. But uACPI wants to access PCI devices while initializing, so they already need to be discoverable. Therefore this code is here for now, even though it doesn't really fit, I don't really want to make a separate function for it or have it in the entry point.
+
+    mcfg := cast(*Acpi_Mcfg) find_acpi_table("MCFG");
+    if !mcfg {
+        log_error("ACPI MCFG table not found.");
+        bluescreen();
+    }
+
+    ecam_length_bytes := mcfg.length - size_of(Acpi_Mcfg);
+
+    ecam: [] Ecam_Entry;
+    ecam.data = cast(*Ecam_Entry, mcfg + 1);
+    ecam.count = ecam_length_bytes / size_of(Ecam_Entry);
+
+    kernel_globals.pci_ecam = ecam;
+
+
+
     init_uacpi_interrupt_handlers();
 
     if uacpi_initialize(0) != .OK bluescreen();
@@ -439,75 +475,6 @@ initialize_uacpi :: () {
 
     if uacpi_finalize_gpe_initialization() != .OK bluescreen();
 }
-
-get_pci_irq_routing :: () {
-    namespace_root := uacpi_namespace_root();
-
-    PCI_BRIDGE_PNP_ID :: "PNP0A03";
-
-    uacpi_find_devices(PCI_BRIDGE_PNP_ID, (user: *void, node: *uacpi_namespace_node, depth: u32) -> uacpi_iteration_decision #c_call {
-        node_info: *uacpi_namespace_node_info;
-        if uacpi_get_namespace_node_info(node, *node_info) != .OK bluescreen();
-
-        routing: *uacpi_pci_routing_table;
-        uacpi_get_pci_routing_table(node, *routing);
-
-        push_context {
-            Push_Print_Style().default_format_int.base=16;
-
-            entries := (routing + 1).(*uacpi_pci_routing_table_entry);
-            for 0..routing.num_entries-1 {
-
-                address := entries[it].address;
-                bus    := address >> 24;
-                device := address >> 16;
-
-                device_offset := cast(u64, bus * 256 + device * 8);
-                device_offset *= PCI_CONFIGURATION_SPACE_SIZE;
-                device_offset += kernel_globals.pci_ecam[0].base_address;
-
-                config := cast(*Pci_Configuration_Space, device_offset + DIRECT_MAPPING_BASE);
-
-                log("Class ID: %", config.class_code);
-                log("Pin:      %", config.interrupt_pin);
-
-
-                res: *uacpi_resources;
-                uacpi_get_current_resources(entries[it].source, *res);
-
-                uacpi_for_each_resource(res, (user: *void, resource: *uacpi_resource) -> uacpi_iteration_decision #c_call {
-                    push_context {
-                        type := resource.type.(uacpi_resource_type);
-                        if type == .END_TAG return .BREAK;
-
-                        assert(type == .EXTENDED_IRQ);
-                        irq := (*resource.extended_irq + 1).(*u32).*;
-                        log("Irq: %", irq);
-                    }
-                    return .CONTINUE;
-                }, null);
-
-                #if false {
-                    info: *uacpi_namespace_node_info;
-                    log("%", uacpi_get_namespace_node_info(entries[it].source, *info));
-                    log("%", info.*);
-
-                    name: *uacpi_id_string;
-                    log("%", uacpi_eval_hid(entries[it].source, *name));
-
-                    s: string;
-                    s.data = name.value;
-                    s.count = name.size.(s64)-1;
-                    log("Source name: %", s);
-                }
-                // uacpi_free_id_string(name);
-            }
-        }
-
-        return .CONTINUE;
-    }, null);
-}
-
 
 //
 // Implement the uACPI kernel API callbacks
@@ -706,14 +673,7 @@ uacpi_kernel_io_write :: (handle: uacpi_handle, offset: uacpi_size, byte_width: 
 
 #program_export
 uacpi_kernel_map :: (addr: uacpi_phys_addr, len: uacpi_size) -> *void #c_call {
-    // write_nonnegative_number(addr, base=16);
-    // write_string("\n");
-    // write_nonnegative_number(xx kernel_globals.framebuffer.buffer, base=16);
-    // write_string("\n");
-    // return cast(*void) addr + DIRECT_MAPPING_BASE;
-
     push_context {
-
         memory := alloc_block(*kernel_globals.virtual_block_allocator, cast(u64) len);
         pages_needed := len / 4096;
         if len % 4096 pages_needed += 1;
@@ -799,17 +759,18 @@ uacpi_kernel_log :: (log_level: uacpi_log_level, c_string: *uacpi_char) #c_call 
 }
 
 
-next_mutex_handle: uacpi_handle = xx 1;
-next_event_handle: uacpi_handle = xx 1;
+
+// Just use spinlocks until we have actual mutexes.
 
 #program_export uacpi_kernel_create_mutex :: () -> uacpi_handle #c_call {
-    result := next_mutex_handle;
-    next_mutex_handle += 1;
-    return result;
+    return uacpi_kernel_create_spinlock();
 }
 
 #program_export uacpi_kernel_free_mutex :: (handle: uacpi_handle) #c_call {
+    uacpi_kernel_free_spinlock(handle);
 }
+
+next_event_handle: uacpi_handle = xx 1;
 
 #program_export uacpi_kernel_create_event :: () -> uacpi_handle #c_call {
     result := next_event_handle;
@@ -818,6 +779,8 @@ next_event_handle: uacpi_handle = xx 1;
 }
 
 #program_export uacpi_kernel_free_event :: () #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_free_event\"\n");
+    bluescreen();
 }
 
 #program_export uacpi_kernel_get_thread_id :: () -> uacpi_thread_id #c_call {
@@ -826,14 +789,17 @@ next_event_handle: uacpi_handle = xx 1;
 }
 
 #program_export uacpi_kernel_acquire_mutex :: (handle: uacpi_handle, timeout: uacpi_u16) -> uacpi_status #c_call {
+    uacpi_kernel_lock_spinlock(handle);
     return .OK;
 }
 
 #program_export uacpi_kernel_release_mutex :: (handle: uacpi_handle) #c_call {
+    uacpi_kernel_unlock_spinlock(handle, 0);
 }
 
-#program_export uacpi_kernel_wait_for_event :: (handle: uacpi_handle, timeout: uacpi_u16) -> uacpi_bool #c_call {
-    return true;
+#program_export uacpi_kernel_wait_for_event :: (handle: uacpi_handle, timeout: uacpi_u16) #c_call {
+    write_string("uACPI kernel call: \"uacpi_kernel_wait_for_event\"\n");
+    bluescreen();
 }
 
 #program_export uacpi_kernel_signal_event :: () #c_call {

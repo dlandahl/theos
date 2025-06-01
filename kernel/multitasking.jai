@@ -14,10 +14,13 @@ Task_Info :: struct {
     id: int;
 
     sleeping: bool;
+    waiting_for_mutex: bool;
+
     sleep_until: Apollo_Time;
+
     next_sleeping: *Task_Info;
 
-    on_core: int;
+    on_core: *X64_Core;
 
     cpu_time: Apollo_Time;
 }
@@ -28,22 +31,13 @@ Scheduler :: struct {
     current_task: *Task_Info;
     idle_task:    *Task_Info;
 
-    sleep_queue: *Task_Info;
+    sleep_queue:  *Task_Info;
 
     waiting_to_run: Queue(*Task_Info);
 
     spinlock: Spinlock;
 
     last_task_switch_timestamp: Apollo_Time;
-}
-
-Xsave_Area :: struct {
-    // Warning: this struct requires 16-byte alignment to be accessed by fxsave64 etc.
-    fpu: [512] u8;
-
-#place fpu;
-    offset: [24] u8;
-    mxcsr: Mxcsr;
 }
 
 allocate_task_info_struct :: () -> *Task_Info {
@@ -98,7 +92,7 @@ put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
     scheduler := *core.scheduler;
     Scoped_Acquire(*scheduler.spinlock);
 
-    task.on_core = core.id;
+    task.on_core = core;
     queue_push(*scheduler.waiting_to_run, task);
 }
 
@@ -173,18 +167,16 @@ sleep_until :: (time: Apollo_Time) {
     yield();
 }
 
-wake_sleeping_tasks :: (core: *X64_Core, time: Apollo_Time) {
-    using core.scheduler;
-
-    while sleep_queue && sleep_queue.sleep_until < time {
-        to_wake := sleep_queue;
-
-        sleep_queue = sleep_queue.next_sleeping;
-
-        to_wake.sleeping = false;
-        to_wake.next_sleeping = null;
-        queue_push(*waiting_to_run, to_wake);
+pick_next_task_to_run :: (using scheduler: *Scheduler) -> *Task_Info {
+    if !queue_is_empty(*waiting_to_run) {
+        return queue_pop(*waiting_to_run);
     }
+
+    if !current_task.sleeping && !current_task.waiting_for_mutex {
+        return current_task;
+    }
+
+    return idle_task;
 }
 
 yield :: () {
@@ -193,26 +185,32 @@ yield :: () {
 
     Scoped_Acquire(*scheduler.spinlock);
 
-    next: *Task_Info;
     current := scheduler.current_task;
 
     time_now := get_monotonic_system_time();
-    wake_sleeping_tasks(core, time_now);
 
-    if queue_is_empty(scheduler.waiting_to_run) {
-        if !current.sleeping return;
+    {
+        // Wake sleeping tasks
+        using scheduler;
 
-        next = scheduler.idle_task;
-    } else {
-        next = queue_pop(*scheduler.waiting_to_run);
+        while sleep_queue && sleep_queue.sleep_until < time_now {
+            to_wake := sleep_queue;
+
+            sleep_queue = sleep_queue.next_sleeping;
+
+            to_wake.sleeping = false;
+            to_wake.next_sleeping = null;
+            queue_push(*waiting_to_run, to_wake);
+        }
     }
+
+    next := pick_next_task_to_run(scheduler);
 
     if next == current {
         return;
     }
 
-    if !current.sleeping && current != scheduler.idle_task {
-        // This should never be an allocation since we just removed.
+    if !current.sleeping && !current.waiting_for_mutex && current != scheduler.idle_task {
         queue_push(*scheduler.waiting_to_run, current);
     }
 
@@ -233,6 +231,60 @@ yield :: () {
         int TASK_SWITCH_GATE;
     }
 }
+
+
+
+Mutex :: struct {
+    spinlock: Spinlock;
+    held_by: *Task_Info;
+    queue: Queue(*Task_Info);
+}
+
+acquire_mutex :: (mutex: *Mutex) {
+    core := get_current_core();
+    current_task := core.scheduler.current_task;
+
+    acquire(*mutex.spinlock);
+
+    if mutex.held_by == null {
+        assert(queue_is_empty(mutex.queue));
+
+        mutex.held_by = current_task;
+
+        release(*mutex.spinlock);
+        return;
+    }
+
+    queue_push(*mutex.queue, current_task);
+    current_task.waiting_for_mutex = true;
+
+    release(*mutex.spinlock);
+    yield();
+}
+
+release_mutex :: (mutex: *Mutex) {
+    core := get_current_core();
+    current_task := core.scheduler.current_task;
+
+    Scoped_Acquire(*mutex.spinlock);
+
+    assert(mutex.held_by == current_task);
+    mutex.held_by = null;
+
+    if !queue_is_empty(*mutex.queue) {
+        next := queue_pop(*mutex.queue);
+        Scoped_Acquire(*next.on_core.scheduler.spinlock);
+
+        assert(next.waiting_for_mutex);
+
+        next.waiting_for_mutex = false;
+
+        queue_push(*next.on_core.scheduler.waiting_to_run, next);
+        mutex.held_by = next;
+    }
+}
+
+
 
 yield_from_user_mode :: () #no_context {
     syscall_number := 1;

@@ -103,6 +103,7 @@ Kernel_Globals :: struct {
     uacpi_state: Uacpi_State;
 
     pci_ecam: [] Ecam_Entry;
+    pci_routing_table: [] uacpi_pci_routing_table_entry;
 }
 
 kernel_globals: Kernel_Globals;
@@ -115,7 +116,7 @@ kernel_entry :: () #no_context {
 
     write_string_callback = kernel_write_string;
 
-    init_default_context_values();
+    set_context_callbacks();
 
     // We should avoid using the UEFI identity map because we'll need to get rid of it once we run user processes in low memory.
     boot_data = cast(*Boot_Data, Boot_Data.BASE_ADDRESS + DIRECT_MAPPING_BASE);
@@ -236,12 +237,10 @@ kernel_entry :: () #no_context {
         context.random_state.low = time.low | 1;
         context.random_state.high = cast,no_check(u64) time.high;
 
-        calendar := native_apollo_to_calendar(time);
-        print("Time: %\n", calendar_to_string(calendar));
+        initialize_uacpi();
+        find_all_pci_devices();
 
         startup_application_processors();
-
-        find_all_pci_devices();
 
         for* pci_devices {
             if it.class_code == .MASS_STORAGE {
@@ -256,7 +255,7 @@ kernel_entry :: () #no_context {
             }
         }
 
-        {
+        if false {
             Push_Print_Style().default_format_int.base = 16;
 
             if !aes128_check_intel_instruction_set_support() {
@@ -277,8 +276,6 @@ kernel_entry :: () #no_context {
             log("Ciphertext: %", cast([]u8) text);
         }
 
-        // initialize_uacpi();
-
         network_adapter_initialized := kernel_globals.net.adapter.mmio != null;
 
         if network_adapter_initialized {
@@ -291,10 +288,10 @@ kernel_entry :: () #no_context {
         log("Sending DNS Query");
         dns_query := transmit_dns_query(*net, "thinkpad");
 
-        Timeout(dns_query.complete, 60_000);
-        assert(dns_query.answer != 0);
+        // Timeout(dns_query.complete, 60_000);
+        // assert(dns_query.answer != 0);
 
-        connection := initiate_tcp_connection(*net, dns_query.answer, 4443);
+        connection := initiate_tcp_connection(*net, bit_cast(u8.[192, 168, 145, 251], u32), 4443);
 
         Timeout(connection.handshake_state == .COMPLETED, 60_000);
 
@@ -330,7 +327,7 @@ simd_floating_point_exception :: (stack: *Interrupt_Stack()) #c_call {
     }
 } @InterruptRoutine
 
-init_default_context_values :: () #no_context {
+set_context_callbacks :: () #no_context {
 
     kernel_assertion_failed = (location: Source_Code_Location, message: string) -> bool {
         acquire(*kernel_globals.serial_port_spinlock);
@@ -586,11 +583,6 @@ allocate_large_page :: (loc := #caller_location) -> u64 #no_context {
             continue;
         }
 
-        if desc.state == .ALLOCATED {
-            // This can be removed once `allocate_consecutive_large_pages` is replaced.
-            continue;
-        }
-
         desc.state = .ALLOCATED;
         return cast(u64) address;
     }
@@ -608,43 +600,6 @@ allocate_large_page :: (loc := #caller_location) -> u64 #no_context {
 
     // There's no free memory
     bluescreen(loc);
-    return 0;
-}
-
-allocate_consecutive_large_pages :: (wanted: int) -> u64 #no_context {
-    // Hack. Remove this once we have a system that can allocate virtual memory and map it as needed, removing the need for consecutive physical pages.
-
-    using kernel_globals.large_page_allocator;
-    Scoped_Acquire(*spinlock);
-
-    search_index := max_large_page_used.(int);
-    consecutive_pages_found: int;
-
-    // Should put the large pages array into `large_page_allocator`, but it would need to be accessible from the bootloader...
-    while search_index < kernel_globals.large_pages.count {
-
-        desc := *kernel_globals.large_pages[search_index];
-        search_index += 1;
-
-        if desc.state == .RESERVED {
-            consecutive_pages_found = 0;
-            continue;
-        }
-
-        consecutive_pages_found += 1;
-        if consecutive_pages_found != wanted {
-            continue;
-        }
-
-        for search_index-wanted..search_index-1 {
-            desc := *kernel_globals.large_pages[it];
-            desc.state = .ALLOCATED;
-        }
-
-        return cast(u64, (search_index-wanted) * 0x20_0000);
-    }
-
-    bluescreen();
     return 0;
 }
 

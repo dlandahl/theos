@@ -15,19 +15,7 @@ Ecam_Entry :: struct {
 }
 
 find_all_pci_devices :: () {
-    mcfg := cast(*Acpi_Mcfg) find_acpi_table("MCFG");
-    if !mcfg {
-        log_error("ACPI MCFG table not found.");
-        bluescreen();
-    }
-
-    ecam_length_bytes := mcfg.length - size_of(Acpi_Mcfg);
-
-    ecam: [] Ecam_Entry;
-    ecam.data = cast(*Ecam_Entry, mcfg + 1);
-    ecam.count = ecam_length_bytes / size_of(Ecam_Entry);
-
-    for ecam {
+    for kernel_globals.pci_ecam {
         for bus: it.start_bus..it.end_bus {
             for device: 0..255 {
                 header := read_configuration_space(it.base_address, bus, device, 0);
@@ -35,6 +23,7 @@ find_all_pci_devices :: () {
 
                 new_device := array_add(*pci_devices);
                 new_device.configuration_space = header;
+                new_device.bus_address = .{bus, device.(u8), 0};
 
                 if header.header_type & 0x80 == 0 {
                     // Device is not multi-function.
@@ -47,12 +36,34 @@ find_all_pci_devices :: () {
 
                     new_device := array_add(*pci_devices);
                     new_device.configuration_space = header;
+                    new_device.bus_address = .{bus, device.(u8), function.(u8)};
                 }
             }
         }
     }
 
-    kernel_globals.pci_ecam = ecam;
+    find_routing_table_under_bridge :: (user: *void, node: *uacpi_namespace_node, depth: u32) -> uacpi_iteration_decision #c_call {
+        node_info: *uacpi_namespace_node_info;
+        uacpi_get_namespace_node_info(node, *node_info);
+
+        routing: *uacpi_pci_routing_table;
+        uacpi_get_pci_routing_table(node, *routing);
+
+        entries := cast(*uacpi_pci_routing_table_entry) (routing + 1);
+
+        kernel_globals.pci_routing_table.count = cast(s64) routing.num_entries;
+        kernel_globals.pci_routing_table.data = entries;
+
+        return .BREAK;
+    }
+
+    uacpi_find_devices("PNP0A03", find_routing_table_under_bridge, null);
+
+    if kernel_globals.pci_routing_table.data == null {
+        uacpi_find_devices("PNP0A08", find_routing_table_under_bridge, null);
+    }
+
+    assert(kernel_globals.pci_routing_table.data != null);
 }
 
 pci_devices: [..] Pci_Device;
@@ -63,6 +74,8 @@ Pci_Device :: struct {
 #place configuration_space;
     registers: *u32;
 
+    bus_address: Pci_Bus_Address;
+
     union {
         msi: *Pci_Capability_Msi;
         msi64: *Pci_Capability_Msi64;
@@ -72,6 +85,36 @@ Pci_Device :: struct {
     msi_x: *Pci_Capability_Msi_X;
     msi_x_table: [] Msi_X_Table_Entry;
     msi_x_pending: Bit_Array;
+}
+
+Pci_Bus_Address :: struct {
+    bus: u8;
+    device: u8;
+    function: u8;
+}
+
+register_legacy_pci_interrupt :: (pci: *Pci_Device, interrupt_handler: () #c_call) -> bool {
+    for kernel_globals.pci_routing_table {
+        // Todo: this code works but doesn't make any sense to me.
+        bus    := it.address >> 24;
+        device := it.address >> 16;
+
+        if bus != pci.bus_address.bus || device != pci.bus_address.device {
+            continue;
+        }
+
+        if pci.interrupt_pin != it.pin {
+            continue;
+        }
+
+        gate := allocate_interrupt_gate();
+        register_interrupt_gate(interrupt_handler, gate);
+        ioapic_add_interrupt_redirection_table_entry(it.index, gate);
+
+        return true;
+    }
+
+    return false;
 }
 
 read_configuration_space :: (base_address: u64, bus: int, device: int, function: int) -> *Pci_Configuration_Space {
@@ -571,6 +614,16 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
     parse_pci_capability_list(device);
     enabled := enable_msi_or_msi_x(device, int__i8254x_interrupt);
 
+    if enabled == .NONE {
+        success := register_legacy_pci_interrupt(device, int__i8254x_interrupt);
+        if !success {
+            log_error("Failed to set up interrupt.");
+            bluescreen();
+        } else {
+            log("Enabled legacy interrupts.");
+        }
+    }
+
     nic: I8254x_Network_Interface_Card;
 
     bar0 := read_base_address_register(device, 0);
@@ -598,7 +651,7 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
     }
 
     // Disable interrupts
-    // nic.IMC__interrupt_mask_clear = 0xffff_ffff;
+    nic.IMC__interrupt_mask_clear = 0xffff_ffff;
     _ := nic.ICR__interrupt_cause_read;
 
     // Get MAC address
