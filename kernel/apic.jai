@@ -140,7 +140,10 @@ initialize_apic :: () {
         kernel_globals.apic = cast(*void) virtual;
     }
 
+
+    kernel_globals.processor_cores.data = space_for_processor_cores.data;
     kernel_globals.processor_cores.count = 1;
+
     bootstrap_core := *kernel_globals.processor_cores[0];
     bootstrap_core.local_apic_id = read_apic_register(.APIC_ID) >> 24;
 
@@ -286,14 +289,13 @@ ap_entry_point :: () #c_call {
     }
 }
 
-get_current_core :: (loc := #caller_location) -> *X64_Core #no_context {
+get_current_core :: inline (loc := #caller_location) -> *X64_Core #no_context {
     core: *X64_Core;
 
     #asm FSGSBASE {
         rdgsbase core;
     }
 
-    if !core bluescreen(loc);
     return core;
 }
 
@@ -434,7 +436,6 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
 
 
 initialize_uacpi :: () {
-    uacpi_set_interrupt_model(.IOAPIC);
 
     // Initializing PCI requires uACPI to get the PCI routing table, so this code needs to run first. But uACPI wants to access PCI devices while initializing, so they already need to be discoverable. Therefore this code is here for now, even though it doesn't really fit, I don't really want to make a separate function for it or have it in the entry point.
 
@@ -452,6 +453,10 @@ initialize_uacpi :: () {
 
     kernel_globals.pci_ecam = ecam;
 
+
+    // uACPI uses thread local storage.
+    tls := get_4k_page() + DIRECT_MAPPING_BASE;
+    #asm FSGSBASE { wrfsbase tls; }
 
 
     init_uacpi_interrupt_handlers();

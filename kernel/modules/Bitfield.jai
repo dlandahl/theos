@@ -56,7 +56,6 @@ bitfield_get :: (bitfield: $B, flag: $F, $loc := #caller_location, $call := #cal
 } {
     bit_mask, bit_offset :: #run calculate_mask_and_offset(B, loc, call);
 
-
     value := bitfield;
     value &=  xx bit_mask;
     value >>= xx bit_offset;

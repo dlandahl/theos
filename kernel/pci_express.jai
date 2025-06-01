@@ -718,7 +718,7 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
             | .RTLC__retransmit_on_late_collision
             | .EN__enable;
 
-        // Temporary, COLD and CT
+        // COLD and CT, todo: magic numbers
         tctl |= (0x0f << 4) | (0x40 << 12);
 
         nic.TCTL__transmit_control = tctl;

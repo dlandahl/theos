@@ -26,6 +26,9 @@ Page_Tables :: struct {
     // Page tables for the bootloader executable, at the bottom of virtual memory
     boot_pdpt: [0x200] u64;
     boot_pd:   [0x200] u64;
+
+    // The lowest 2MB is a regular page table rather than a large page, so we can trap null pointers.
+    boot_pt:   [0x200] u64;
 }
 
 DIRECT_MAPPING_BASE :: 0xffff_8000_0000_0000;

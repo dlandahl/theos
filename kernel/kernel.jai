@@ -95,7 +95,7 @@ Kernel_Globals :: struct {
         font_loaded: bool;
     }
 
-    // Recursive, so that procedures that generate multiple accesses to the serial port can be grouped together, and not be interleaved with accesses by other cores.
+    // Recursive, so that procedures that write to the serial port multiple times can have those writes grouped together, and not be interleaved with writes by other cores.
     serial_port_spinlock: Recursive_Spinlock;
 
     net: Network_Connection;
@@ -160,8 +160,6 @@ kernel_entry :: () #no_context {
     large_page := allocate_large_page();
     init_block_allocator(*physical_block_allocator, large_page, 0x20_0000, 0x10);
 
-    processor_cores.data = space_for_processor_cores.data;
-
     push_context {
         rtc_init();
 
@@ -177,6 +175,8 @@ kernel_entry :: () #no_context {
             }
         }
 
+
+
         // Put a virtual memory heap after the direct mapping
         GB :: 0x4000_0000;
         direct_mapping_size := cast(u64) boot_data.page_tables.direct_pd.count * GB;
@@ -185,8 +185,8 @@ kernel_entry :: () #no_context {
         heap_size: u64 = 64 * GB;
 
         // Keep virtual allocations page aligned, since virtual memory always needs to be mapped anyway.
-        alignment := 4096;
-        init_block_allocator(*virtual_block_allocator, heap_base, heap_size, alignment);
+        init_block_allocator(*virtual_block_allocator, heap_base, heap_size, alignment=4096);
+
 
 
         // Sequentially allocating interrupt gates, starting after the ISA exceptions
@@ -779,6 +779,12 @@ free_4k_page :: (address: u64) #no_context {
 
 get_or_create_page_table :: (table: *u64, entry: u64) -> *u64 {
     using Page_Flags;
+
+    is_page := cast(u64, table) & xx PAGE_SIZE;
+    if is_page {
+        // The page table to which we're trying to add a lower level child table is actually a large or huge page.
+        assert(false);
+    }
 
     if table[entry] & xx PRESENT {
         physical := table[entry] & (~0xfff);

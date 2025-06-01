@@ -168,6 +168,7 @@ compile_kernel :: (kernel_only: bool) -> success: bool {
         options.disable_redzone = true;
         options.additional_linker_arguments = .["-ekernel_entry", "-Tlink.ld"];
         options.os_target = .LINUX;
+        options.stack_trace = false;
 
         new_path: [..] string;
         array_add(*new_path, "kernel/modules/");

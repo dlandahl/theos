@@ -181,12 +181,17 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
             pml4[0]      = cast(u64) boot_pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
             boot_pdpt[0] = cast(u64) boot_pd.data   | PAGE_PRESENT | PAGE_READ_WRITE;
+            boot_pd[0]   = cast(u64) boot_pt.data   | PAGE_PRESENT | PAGE_READ_WRITE;
 
             // Low memory where the bootloader is loaded
-            boot_pd[0] = 0x00_0000 | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             boot_pd[1] = 0x20_0000 | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             boot_pd[2] = 0x40_0000 | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
             boot_pd[3] = 0x60_0000 | PAGE_PRESENT | PAGE_READ_WRITE | PAGE_SIZE;
+
+            boot_pt[0] = 0;
+            for 1..511 {
+                boot_pt[it] = (4096 * cast(u64)it) | PAGE_PRESENT | PAGE_READ_WRITE;
+            }
 
             // UEFI seems to put the stack at the top of physical memory. I don't know if that's standardised. For now assume that the machine has 256Mb
             index: int = 128;
