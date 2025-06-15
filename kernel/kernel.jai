@@ -233,6 +233,7 @@ kernel_entry :: () #no_context {
         core_begin_multitasking();
 
         // Todo: replace with a call to random_seed when updating to a compiler version newer than 0.2.014
+        // Todo: system time alone is too low entropy for an OS PRNG
         time := get_monotonic_system_time();
         context.random_state.low = time.low | 1;
         context.random_state.high = cast,no_check(u64) time.high;
@@ -291,7 +292,10 @@ kernel_entry :: () #no_context {
         // Timeout(dns_query.complete, 60_000);
         // assert(dns_query.answer != 0);
 
-        connection := initiate_tcp_connection(*net, bit_cast(u8.[192, 168, 145, 251], u32), 4443);
+        hardcoded_ip := bit_cast(u8.[192, 168, 1, 111], u32);
+        // transmit_ping(*net, hardcoded_ip);
+
+        connection := initiate_tcp_connection(*net, hardcoded_ip, 4443);
 
         Timeout(connection.handshake_state == .COMPLETED, 60_000);
 
@@ -1557,6 +1561,10 @@ parse_netpbm :: (file: [] u8) -> Netpbm_Image {
 
     return image;
 }
+
+
+
+
 
 bit_cast :: (object: $T, $target_type: Type) -> target_type {
     return (.*) cast(*target_type) *object;

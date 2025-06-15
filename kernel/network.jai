@@ -36,8 +36,7 @@ byte_swap_protocol_header :: (header: *$T) #modify {
                 // Other array types will contain pointers, which shouldn't be in a network protocol struct.
                 assert(tia.array_type == .FIXED);
 
-                // There are some arrays of u8, which are fine as they are. If arrays of larger integers are added, they need to be supported here.
-                assert(tia.element_type.runtime_size == 1);
+                print(*builder, "    for* header.%1 it.* = byte_swap(it.*);\n", it.name);
 
               case;
                 assert(false, "Auto-byteswapping field of type % is not implemented. Field: %.", it.type.type, it.name);
@@ -690,19 +689,40 @@ Tls_Client_Hello :: struct {
     session_id: u8;
 
     num_cipher_suites: u16 #align 1;
-    cipher_suite: Tls_Cipher_Suite #align 1;
+    cipher_suites: [2] Tls_Cipher_Suite #align 1;
 
     num_compression_methods: u8;
     compression_method: u8;
 
     extensions_length: u16 #align 1;
 
-    signature_algorithms: [8] u8;
-    sct: [4] u8;
+    using extensions: struct {
+        supported_groups: [14] u8;
+        ec_points_format: [6] u8;
+        signature_algorithms: [8] u8;
+        sct: [4] u8;
+        renegotiation_info: [5] u8;
+    } @DontByteswap
 }
 
 Tls_Cipher_Suite :: enum u16 {
-    DHE_RSA_WITH_AES128_GCM_SHA256 :: 0x009e;
+    ECDHE_RSA_\ WITH_CHACHA20_POLY1305_SHA256 :: 0xcc_a8;
+    ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 :: 0xcc_a9;
+    ECDHE_RSA_\ WITH_AES128_GCM_SHA256        :: 0xc0_2f;
+    ECDHE_RSA_\ WITH_AES256_GCM_SHA384        :: 0xc0_30;
+    ECDHE_ECDSA_WITH_AES128_GCM_SHA256        :: 0xc0_2b;
+    ECDHE_ECDSA_WITH_AES256_GCM_SHA384        :: 0xc0_2c;
+    ECDHE_RSA_\ WITH_AES128_CBC_SHA           :: 0xc0_13;
+    ECDHE_ECDSA_WITH_AES128_CBC_SHA           :: 0xc0_09;
+    ECDHE_RSA_\ WITH_AES256_CBC_SHA           :: 0xc0_14;
+    ECDHE_ECDSA_WITH_AES256_CBC_SHA           :: 0xc0_0a;
+    RSA_\       WITH_AES128_GCM_SHA256        :: 0x00_9c;
+    RSA_\       WITH_AES256_GCM_SHA384        :: 0x00_9d;
+    DHE_RSA_\   WITH_AES128_GCM_SHA256        :: 0x00_9e;
+    RSA_\       WITH_AES128_CBC_SHA           :: 0x00_2f;
+    RSA_\       WITH_AES256_CBC_SHA           :: 0x00_35;
+    ECDHE_RSA_\ WITH_3DES_EDE_CBC_SHA         :: 0xc0_12;
+    RSA_\       WITH_3DES_EDE_CBC_SHA         :: 0x00_0a;
 }
 
 Tls_Version :: enum u16 {
@@ -712,6 +732,7 @@ Tls_Version :: enum u16 {
 
 Tls_Random :: struct {
     random: [4] u64;
+
 #place random;
     unix_time: u32;
 }
@@ -773,18 +794,26 @@ initiate_tls_connection :: (net: *Network_Connection, con: *Tcp_Connection) -> s
     byte_swap_protocol_header(*record);
     add_to_packet(*packet, record);
 
-    hello := Tls_Client_Hello.{
+    hello: Tls_Client_Hello;
+    hello = .{
         type                      = .CLIENT_HELLO,
         client_version            = .TLS_1_2,
         session_id                = 0,
-        num_cipher_suites         = 2,
-        cipher_suite              = .DHE_RSA_WITH_AES128_GCM_SHA256,
+        num_cipher_suites         = size_of(type_of(hello.cipher_suites)),
         num_compression_methods   = 1,
         compression_method        = 0,
-        extensions_length         = 12,
+
+        extensions_length         = size_of(type_of(hello.extensions)),
+
         signature_algorithms      = .[0x0, 0xd, 0x0, 0x4, 0x0, 0x2, 0x4, 0x1],
         sct                       = .[0x0, 0x12, 0x0, 0x0],
+        supported_groups          = .[0x0, 0xa, 0x0, 0xa, 0x0, 0x8, 0x0, 0x1d, 0x0, 0x17, 0x0, 0x18, 0x0, 0x19],
+        ec_points_format          = .[0x0, 0xb, 0x0, 0x2, 0x1, 0x0],
+        renegotiation_info        = .[0xff, 0x1, 0x0, 0x1, 0x0],
     };
+
+    hello.cipher_suites[0] = .DHE_RSA_WITH_AES128_GCM_SHA256;
+    hello.cipher_suites[1] = .ECDHE_RSA_WITH_AES128_GCM_SHA256;
 
     set(*hello.length, size_of(Tls_Client_Hello) - 4);
 
@@ -1044,7 +1073,7 @@ add_option :: (options: *Dhcp_Options_Builder, code: Dhcp_Option_Code, data: Any
 
     array_add(*options.buffer, cast(u8)data.type.runtime_size);
 
-    bytes: []u8;
+    bytes: [] u8;
     bytes.data = data.value_pointer;
     bytes.count = data.type.runtime_size;
     array_add(*options.buffer, ..bytes);
@@ -1068,7 +1097,7 @@ dhcp_option_data_types :: struct {
 ];
 
 
-
+// Todo: these three "transmit_dhcp_" routines are basically identical except for the Options.
 transmit_dhcp_discover :: (net: *Network_Connection) {
     packet: Network_Packet;
     packet.data = cast(*void) get_4k_page() + DIRECT_MAPPING_BASE;
@@ -1206,6 +1235,8 @@ transmit_dhcp_request :: (net: *Network_Connection) {
 
 
 Icmp_Header :: struct {
+    // Note, the ICMP header doesn't need to be byte-swapped, because of how we happen to represent the fields.
+
     control_message: enum u16 {
         // Type and code (subtype) combined into one field
 
@@ -1214,7 +1245,7 @@ Icmp_Header :: struct {
     }
 
     checksum: u16;
-    data: u32;  @DontByteswap
+    data: u32;
 }
 
 Icmp_Packet :: struct {
@@ -1264,8 +1295,6 @@ transmit_pong :: (net: *Network_Connection, ping: *Icmp_Packet) {
 
     icmp.control_message = .echo_reply;
     icmp.data = ping.icmp.data;
-    byte_swap_protocol_header(*icmp);
-
     icmp.checksum = internet_checksum(icmp);
     add_to_packet(*packet, pong);
 
@@ -1280,7 +1309,6 @@ transmit_ping :: (net: *Network_Connection, destination_ip: u32) {
 
     icmp.control_message = .echo_request;
     icmp.data = cast(u32) random_get() & 0xffff;
-    byte_swap_protocol_header(*icmp);
     icmp.checksum = internet_checksum(icmp);
 
     packet: Network_Packet;
