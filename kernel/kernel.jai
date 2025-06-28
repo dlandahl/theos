@@ -13,6 +13,7 @@ get :: bitfield_get;
 
 #import "Aes";
 #import "Jai_Crypto";
+#import "Curve25519";
 
 #load "../boot_data.jai";
 
@@ -246,13 +247,14 @@ kernel_entry :: () #no_context {
         for* pci_devices {
             if it.class_code == .MASS_STORAGE {
                 if it.subclass == {
-                    // case 0x8; init_nvme_controller(it);
+                    case 0x8; init_nvme_controller(it);
                     // case 0x6; init_ahci_controller(it);
                 }
             }
 
             if it.class_code == .NETWORK && it.subclass == 0x0 {
                 kernel_globals.net.adapter = init_i8254x(it);
+                #asm { sti; }
             }
         }
 
@@ -317,7 +319,6 @@ kernel_entry :: () #no_context {
 
 #program_export
 simd_floating_point_exception :: (stack: *Interrupt_Stack()) #c_call {
-
     mxcsr: Mxcsr;
     pmxcsr := *mxcsr;
 

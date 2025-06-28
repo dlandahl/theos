@@ -705,6 +705,17 @@ Tls_Client_Hello :: struct {
     } @DontByteswap
 }
 
+Tls_Server_Hello :: struct {
+    type: Tls_Handshake_Type;
+    length: tls_u24;
+
+    version: Tls_Version;
+    random: Tls_Random #align 1; @DontByteswap
+    session_id: u8;
+    cipher_suite: Tls_Cipher_Suite;
+    compression_method: u8;
+}
+
 Tls_Cipher_Suite :: enum u16 {
     ECDHE_RSA_\ WITH_CHACHA20_POLY1305_SHA256 :: 0xcc_a8;
     ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 :: 0xcc_a9;
@@ -772,6 +783,14 @@ Tls_Alert :: struct {
     }
 }
 
+Tls_Connection_State :: struct {
+    tcp: *Tcp_Connection;
+
+    handshake_state: enum {
+        CLIENT_HELLO_SENT;
+    }
+}
+
 initiate_tls_connection :: (net: *Network_Connection, con: *Tcp_Connection) -> struct {} {
 
     if con.handshake_state != .COMPLETED {
@@ -831,6 +850,10 @@ initiate_tls_connection :: (net: *Network_Connection, con: *Tcp_Connection) -> s
     transmit_tcp_packet(net, con, .ACK | .PSH, payload);
 
     return .{};
+}
+
+handle_tls_message :: (net: *Network_Connection, tls: *Tls_Connection_State, record: *Tls_Record_Header) {
+
 }
 
 

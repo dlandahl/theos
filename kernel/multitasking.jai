@@ -64,7 +64,29 @@ core_begin_multitasking :: () {
     scheduler.current_task = allocate_task_info_struct();
     scheduler.current_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
 
-    scheduler.idle_task = scheduler.current_task;
+    if core.id != 0 {
+        scheduler.idle_task = scheduler.current_task;
+    } else {
+        // Temporary: during development, I want to keep using thread 0 to do stuff on the bootstrap core. So make a separate idle task.
+        idle :: () #c_call {
+            push_context,defer_pop;
+
+            core := get_current_core();
+            release(*core.scheduler.spinlock);
+
+            while true {
+                #asm { hlt; }
+                yield();
+            }
+        }
+
+        params: Create_Task_Parameters;
+        params.user_stack_size = 0;
+        params.kernel_stack_size = 0x2000;
+        params.entry_point = idle;
+
+        scheduler.idle_task = create_task(params);
+    }
 
     {
         // Enable Local APIC timer interrupts, or TSC deadline if available

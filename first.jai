@@ -168,6 +168,8 @@ compile_kernel :: (kernel_only: bool) -> success: bool {
         options.disable_redzone = true;
         options.additional_linker_arguments = .["-ekernel_entry", "-Tlink.ld"];
         options.os_target = .LINUX;
+
+        // Sometimes, setting up the stack trace node upon entering a procedure currently causes null pointer dereferences.
         options.stack_trace = false;
 
         new_path: [..] string;

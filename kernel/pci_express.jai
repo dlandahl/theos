@@ -93,30 +93,6 @@ Pci_Bus_Address :: struct {
     function: u8;
 }
 
-register_legacy_pci_interrupt :: (pci: *Pci_Device, interrupt_handler: () #c_call) -> bool {
-    for kernel_globals.pci_routing_table {
-        // Todo: this code works but doesn't make any sense to me.
-        bus    := it.address >> 24;
-        device := it.address >> 16;
-
-        if bus != pci.bus_address.bus || device != pci.bus_address.device {
-            continue;
-        }
-
-        if pci.interrupt_pin != it.pin {
-            continue;
-        }
-
-        gate := allocate_interrupt_gate();
-        register_interrupt_gate(interrupt_handler, gate);
-        ioapic_add_interrupt_redirection_table_entry(it.index, gate);
-
-        return true;
-    }
-
-    return false;
-}
-
 read_configuration_space :: (base_address: u64, bus: int, device: int, function: int) -> *Pci_Configuration_Space {
     device_offset := cast(u64, bus * 256 + device * 8 + function);
     address := base_address + device_offset * PCI_CONFIGURATION_SPACE_SIZE;
@@ -372,6 +348,30 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
     }
 
     return cast(*void) virtual;
+}
+
+register_legacy_pci_interrupt :: (pci: *Pci_Device, interrupt_handler: () #c_call) -> bool {
+    for kernel_globals.pci_routing_table {
+        bus    := (it.address >> 24) & 0xff;
+        device := (it.address >> 16) & 0xff;
+
+        if bus != pci.bus_address.bus || device != pci.bus_address.device {
+            continue;
+        }
+
+        if pci.interrupt_pin != it.pin {
+            continue;
+        }
+
+        gate := allocate_interrupt_gate();
+        register_interrupt_gate(interrupt_handler, gate);
+        ioapic_add_interrupt_redirection_table_entry(it.index, gate | (1 << 15) | (1 << 13));
+
+        return true;
+    }
+
+    log_error("Failed to register legacy PCI interrupt.");
+    return false;
 }
 
 
@@ -659,6 +659,7 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
     mac.ral = nic.RAL__receive_address_low;
     mac.rah = nic.RAH__receive_address_high;
     nic.mac_address = mac.array;
+        #asm { sti; }
 
     {
         Push_Print_Style(mac_address_print_style);
@@ -1012,12 +1013,13 @@ init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
     device.registers[1] &= cast(u32) ~Pci_Command.INTERRUPT_DISABLE;
 
     parse_pci_capability_list(device);
-    enabled := enable_msi_or_msi_x(device, int__nvme_interrupt);
 
-    assert(enabled == .MSI_X);
+    // enabled := enable_msi_or_msi_x(device, int__nvme_interrupt);
+    // assert(enabled == .MSI_X);
+    register_legacy_pci_interrupt(device, int__nvme_interrupt);
 
     // Mask out the admin queue interrupt. Just spin on the phase bit for now
-    device.msi_x_table[0].vector_control |= .MASK;
+    // device.msi_x_table[0].vector_control |= .MASK;
 
     nvme: Nvme_Controller;
 
@@ -1658,7 +1660,7 @@ Ahci_Port :: struct {
     SNTF__sata_notif:          u32;
     FBS__fis_based_switching:  u32;
     DEVSLP__device_sleep:      u32;
-    
+
     RSV1__reserved:            [40] u8;
     vendor_specific:           [16] u8;
 }

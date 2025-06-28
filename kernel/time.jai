@@ -25,9 +25,9 @@ get_monotonic_system_time :: () -> Apollo_Time {
 get_monotonic_time :: get_monotonic_system_time;
 
 native_calendar_to_apollo :: (ct: Calendar_Time) -> Apollo_Time {
-    // Todo: Doesn't work with dates before 1 AD. It doesn't seem to work on Linux either, but I feel like it should definitely be made to work.
+    // Todo: Doesn't work with dates before 1 AD. That doesn't seem to work on Linux either, but it should definitely be made to work.
 
-    // We calculate Apollo Time relative to 1.1.1970 and then add the offset at the end, to make everything easier to think about.
+    // Calculate Apollo Time relative to 1.1.1970 and then add the offset at the end, to make everything easier to think about.
     LEAP_YEARS_BEFORE_1970 :: 477;
 
     last_year := cast(s64) ct.year - 1;

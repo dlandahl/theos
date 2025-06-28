@@ -205,8 +205,9 @@ initialize_apic :: () {
             assert(ioapic_ics.address == 0xfec0_0000);
 
           case .INTERRUPT_SOURCE_OVERRIDE;
+            Push_Print_Style().default_format_struct.use_long_form_if_more_than_this_many_members = 1;
             iso := cast(*Ics_Source_Override) ics;
-            // Todo
+            log("Interrupt source override: %", iso.*);
         }
     }
 
