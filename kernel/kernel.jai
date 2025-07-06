@@ -247,7 +247,7 @@ kernel_entry :: () #no_context {
         for* pci_devices {
             if it.class_code == .MASS_STORAGE {
                 if it.subclass == {
-                    case 0x8; init_nvme_controller(it);
+                    // case 0x8; init_nvme_controller(it);
                     // case 0x6; init_ahci_controller(it);
                 }
             }
@@ -286,6 +286,7 @@ kernel_entry :: () #no_context {
             put_task_on_core(task, *processor_cores[1]);
         }
 
+        log("Waiting for DHCP handshake.");
         Timeout(net.dhcp_handshake_state == .COMPLETED, 60_000);
 
         log("Sending DNS Query");
@@ -520,6 +521,8 @@ init_processor_core :: () {
 
 bluescreen :: (loc := #caller_location) #no_context {
     using kernel_globals.framebuffer;
+
+    #asm { cli; }
 
     for y: 0..y_resolution-1 for x: 0..x_resolution-1 {
         t := cast(float, buffer[x + y * stride] & 0xff) / 0xff;

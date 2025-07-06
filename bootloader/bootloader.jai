@@ -190,7 +190,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
             boot_pt[0] = 0;
             for 1..511 {
-                boot_pt[it] = (4096 * cast(u64)it) | PAGE_PRESENT | PAGE_READ_WRITE;
+                boot_pt[it] = (4096 * cast(u64) it) | PAGE_PRESENT | PAGE_READ_WRITE;
             }
 
             // UEFI seems to put the stack at the top of physical memory. I don't know if that's standardised. For now assume that the machine has 256Mb

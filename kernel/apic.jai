@@ -634,8 +634,8 @@ uacpi_kernel_io_map :: (base: uacpi_io_addr, len: uacpi_size, out_handle: *uacpi
 uacpi_kernel_io_read :: (handle: uacpi_handle, offset: uacpi_size, byte_width: uacpi_u8, value: *u64) -> uacpi_status #c_call {
     using kernel_globals.uacpi_state;
 
-    io_base := cast(*u16) handle;
-    address := io_base.* + xx offset;
+    io_base := cast(u16) handle;
+    address := io_base + xx offset;
 
     result: u64;
     #asm {
@@ -659,8 +659,8 @@ uacpi_kernel_io_read :: (handle: uacpi_handle, offset: uacpi_size, byte_width: u
 uacpi_kernel_io_write :: (handle: uacpi_handle, offset: uacpi_size, byte_width: uacpi_u8, value: u64) -> uacpi_status #c_call {
     using kernel_globals.uacpi_state;
 
-    io_base := cast(*u16) handle;
-    address := io_base.* + xx offset;
+    io_base := cast(u16) handle;
+    address := io_base + xx offset;
 
     #asm {
         address === d;

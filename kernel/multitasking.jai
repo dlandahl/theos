@@ -80,12 +80,7 @@ core_begin_multitasking :: () {
             }
         }
 
-        params: Create_Task_Parameters;
-        params.user_stack_size = 0;
-        params.kernel_stack_size = 0x2000;
-        params.entry_point = idle;
-
-        scheduler.idle_task = create_task(params);
+        scheduler.idle_task = create_task(idle, 0x2000);
     }
 
     {
@@ -118,7 +113,7 @@ put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
     queue_push(*scheduler.waiting_to_run, task);
 }
 
-create_task :: (entry_point: () #c_call, kernel_stack_size := 0x4000, user_stack_size := 0x4000, mxcsr := Mxcsr.MASK_ALL) -> *Task_Info {
+create_task :: (entry_point: () #c_call, kernel_stack_size := 0x4000, user_stack_size := 0, mxcsr := Mxcsr.MASK_ALL) -> *Task_Info {
     new_task := allocate_task_info_struct();
     new_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
 

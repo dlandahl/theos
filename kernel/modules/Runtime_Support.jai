@@ -74,8 +74,8 @@ kernel_default_allocator_proc: (mode: Allocator_Mode, size: s64, old_size: s64, 
 
 // These must be constant values, as they're used as default values in Context_Base. To be able to set
 // custom implementations from the kernel code base, we forward each of them through a function pointer.
-// We also need to keep the default implementations at compile time, as #run,host uses the target workspaces
-// module import directories for some reason.
+// We also need to keep the default implementations at compile time, as #run,host uses the target workspace's
+// module import directories.
 
 runtime_support_assertion_failed :: (loc: Source_Code_Location, message: string) -> bool {
     if #compile_time {
