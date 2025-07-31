@@ -20,21 +20,27 @@ main :: () {
     set_build_options_dc(.{ do_output = false });
 
     #if OS == .WINDOWS {
-
         log("You are on Windows, but this build program works only on Linux. Attempting to automatically relaunch in WSL");
 
-        JAI_ROOT_DIR :: "/mnt/c/jai";
+        JAI_ROOT_DIR    :: "/mnt/c/jai";
         WSL_DISTRO_NAME :: "Ubuntu";
+
+        command_line := get_build_options().compile_time_command_line;
+        context.print_style.default_format_array.begin_string = "";
+        context.print_style.default_format_array.end_string = "";
+
+        jai_command := tprint("%/bin/jai-linux first.jai - %", JAI_ROOT_DIR, command_line);
 
         stdin  := GetStdHandle(STD_INPUT_HANDLE);
         stdout := GetStdHandle(STD_OUTPUT_HANDLE);
         stderr := GetStdHandle(STD_ERROR_HANDLE);
 
-        jai_command := tprint("%/bin/jai-linux first.jai", JAI_ROOT_DIR);
         process: HANDLE;
 
         WslLaunch(utf8_to_wide(WSL_DISTRO_NAME), utf8_to_wide(jai_command), .TRUE, stdin, stdout, stderr, *process);
         WaitForSingleObject(process, INFINITE);
+
+        init_plugins(.[], null, -1);
 
         return;
     }
@@ -178,7 +184,7 @@ compile_kernel :: (kernel_only: bool) -> success: bool {
         options.os_target = .LINUX;
 
         // Sometimes, setting up the stack trace node upon entering a procedure currently causes null pointer dereferences.
-        options.stack_trace = false;
+        options.stack_trace = true;
 
         new_path: [..] string;
         array_add(*new_path, "kernel/modules/");

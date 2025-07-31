@@ -84,7 +84,7 @@ Kernel_Globals :: struct {
     // If future x64 CPUs all support this, plus some other TSC specific features, then we'll likely remove
     // support for HPET and the Local APIC timer, and use TSC for everything. Namely the features you would
     // need are Invariant TSC, and for the frequency to be provided by CPUID. However, Boostibot on Discord
-    // has said that TSC frequency is imprecise even if provided by CPUID, so will need to investigate that.
+    // said that TSC frequency is imprecise even if provided by CPUID, so will need to investigate that.
     tsc_deadline_support: bool;
 
     text_drawing_state: struct {
@@ -525,16 +525,23 @@ bluescreen :: (loc := #caller_location) #no_context {
         // buffer[x + y * stride] = cast(u32) 0xff2138e7;
     }
 
-    write_string("Bluescreen!\nSource code location:\n");
-    write_loc(loc);
-    write_string("\n");
+    core := get_current_core();
+
+    if core.scheduler.current_task && core.scheduler.current_task._context {
+        push_context {
+            print_stack_trace(core.scheduler.current_task._context.stack_trace);
+        }
+    } else {
+        write_string("Bluescreen!\nSource code location:\n");
+        write_loc(loc);
+        write_string("\n");
+    }
 
     {
         // Temporary hack to make debugging easier. If one core dies and leaks
         // the serial port spinlock, other CPU cores should still be able to
         // keep running.
 
-        core := get_current_core();
         lock := *kernel_globals.serial_port_spinlock;
 
         if lock.lock && lock.held_by_core == core.id {
@@ -850,7 +857,6 @@ Page_Flags :: enum_flags u64 {
 }
 
 get_physical_address :: (virtual: *void) -> u64, present: bool {
-    using Page_Flags;
     x := cast(u64) virtual;
 
     mask: u64 = 0x1ff;
@@ -862,7 +868,7 @@ get_physical_address :: (virtual: *void) -> u64, present: bool {
     page_offset := x & 0xfff;
 
     ReadTableEntry :: (index: u64, table_address: u64) -> entry: u64 #expand {
-        present := table_address & xx PRESENT;
+        present := table_address.(Page_Flags) & .PRESENT;
 
         if !present `return 0, false;
 
@@ -877,13 +883,13 @@ get_physical_address :: (virtual: *void) -> u64, present: bool {
     pml4e := pml4[pml4_offset];
 
     pdpte := ReadTableEntry(pdpt_offset, pml4e);
-    if pdpte & xx PAGE_SIZE {
+    if pdpte.(Page_Flags) & .PAGE_SIZE {
         page_offset := x & 0x3fff_ffff;
         return (pdpte & ~0xfff) + page_offset, true;
     }
 
     pde := ReadTableEntry(pd_offset, pdpte);
-    if pde & xx PAGE_SIZE {
+    if pde.(Page_Flags) & .PAGE_SIZE {
         page_offset := x & 0x1f_ffff;
         return (pde & ~0xfff) + page_offset, true;
     }

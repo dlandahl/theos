@@ -8,10 +8,13 @@ Task_Info :: struct {
     cr3: u64;
     xsave: Xsave_Area #align 16;
 
+    id: int;
+
+    entry_point: ();
+    _context: *#Context;
+
     user_stack:   *void;
     kernel_stack: *void;
-
-    id: int;
 
     sleeping: bool;
     waiting_for_mutex: bool;
@@ -63,16 +66,14 @@ core_begin_multitasking :: () {
 
     scheduler.current_task = allocate_task_info_struct();
     scheduler.current_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
+    scheduler.current_task._context = *context;
 
     if core.id != 0 {
         scheduler.idle_task = scheduler.current_task;
     } else {
         // Temporary: during development, I want to keep using thread 0 to do stuff on the bootstrap core. So make a separate idle task.
-        idle :: () #c_call {
-            push_context,defer_pop;
-
+        idle :: () {
             core := get_current_core();
-            release(*core.scheduler.spinlock);
 
             while true {
                 #asm { hlt; }
@@ -113,7 +114,7 @@ put_task_on_core :: (task: *Task_Info, core: *X64_Core) {
     queue_push(*scheduler.waiting_to_run, task);
 }
 
-create_task :: (entry_point: () #c_call, kernel_stack_size := 0x4000, user_stack_size := 0, mxcsr := Mxcsr.MASK_ALL) -> *Task_Info {
+create_task :: (entry_point: (), kernel_stack_size := 0x4000, user_stack_size := 0, mxcsr := Mxcsr.MASK_ALL) -> *Task_Info {
     new_task := allocate_task_info_struct();
     new_task.cr3 = cast(u64) *kernel_globals.page_tables.pml4 - DIRECT_MAPPING_BASE;
 
@@ -127,12 +128,14 @@ create_task :: (entry_point: () #c_call, kernel_stack_size := 0x4000, user_stack
     stack.flags = .IF__interrupt;
     stack.cs = .RING0_CODE;
     stack.ss = .RING0_DATA;
-    stack.ip = cast(*void) entry_point;
+    stack.ip = cast(*void) new_task_start;
     stack.sp = new_task.kernel_stack;
 
     new_task.rsp = cast(*void) stack;
 
     new_task.xsave.mxcsr = mxcsr;
+
+    new_task.entry_point = entry_point;
 
     return new_task;
 }
@@ -246,6 +249,25 @@ yield :: () {
         mov rax: gpr === a, _current;
         mov rbx: gpr === b, next;
         int TASK_SWITCH_GATE;
+    }
+}
+
+new_task_start :: () #no_context {
+    // When booting a new kernel thread, we could go straight to its entry point, but we always forward through this procedure to conveniently set up the Context and release the scheduler spinlock.
+
+    push_context {
+        core := get_current_core();
+
+        release(*core.scheduler.spinlock);
+
+        task := core.scheduler.current_task;
+        task._context = *context;
+        task.entry_point();
+
+        // Todo: remove the task from the scheduler properly
+        while true {
+            yield();
+        }
     }
 }
 
@@ -401,9 +423,8 @@ enter_user_mode :: (entry_point: () #c_call, flags: X64_Flags, user_stack: *void
 
 
 
-task_do_work :: () #c_call {
+task_do_work :: () {
     core := get_current_core();
-    release(*core.scheduler.spinlock);
 
     user_stack := core.scheduler.current_task.user_stack;
     entry_point := task_do_work_in_ring_3;

@@ -636,7 +636,7 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
         // Spin for 2us to be safe.
 
         nic.CTRL__device_control |= .RST__device_reset;
-        busy_loop(2, .microseconds);
+        busy_wait(2, .microseconds);
 
         if Timeout(nic.CTRL__device_control & .RST__device_reset == 0) {
             log_error("Timeout during device reset.");
@@ -646,7 +646,7 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
         // To reset the PHY, PHY_RST should be asserted for 10ms. Spin for 15ms to be safe.
 
         nic.CTRL__device_control |= .PHY_RST__phy_reset;
-        busy_loop(15, .milliseconds);
+        busy_wait(15, .milliseconds);
         nic.CTRL__device_control &= ~.PHY_RST__phy_reset;
     }
 

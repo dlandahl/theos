@@ -509,9 +509,9 @@ initialize_tsc :: () {
     kernel_globals.tsc_frequency = calibrate_tsc();
 }
 
-busy_loop :: (n: s64, $units: enum {nanoseconds; microseconds; milliseconds; seconds;}) {
+busy_wait :: (n: s64, $units: enum {nanoseconds; microseconds; milliseconds; seconds;}) {
     start := get_kernel_timestamp();
-    end   := start + (#insert #run tprint("%_to_apollo(n);", units));
+    end   := start + #insert #run tprint("%_to_apollo(n);", units);
 
     assert(end >= start);
 

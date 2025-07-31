@@ -454,6 +454,7 @@ transmit_tcp_packet :: (net: *Network_Connection, con: *Tcp_Connection, header_f
 }
 
 initiate_tcp_connection :: (net: *Network_Connection, remote_ip: u32, remote_port: u16) -> *Tcp_Connection {
+
     port := FIRST_EPHEMERAL_PORT + cast(u16, rdtsc() & 0xfff);
 
     log("Initating TCP connection with %:%", format_ip(remote_ip), remote_port);
@@ -1652,12 +1653,7 @@ allocate_port :: (net: *Network_Connection) -> u16 {
     return port;
 }
 
-network_thread :: () #c_call {
-    push_context,defer_pop;
-
-    // All task entry points must release the scheduler spinlock.
-    core := get_current_core();
-    release(*core.scheduler.spinlock);
+network_thread :: () {
 
     sleep(5, .seconds);
     Log_Category("Net");
