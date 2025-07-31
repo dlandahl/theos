@@ -217,6 +217,13 @@ initialize_apic :: () {
     // Store this, to be able to configure the APIC timer of all cores to use the same interrupt handler.
     // In the future we might not need the APIC timer if we only support CPUs with the TSC deadline feature.
     kernel_globals.local_apic_timer_interrupt_gate = timer_gate;
+
+
+    task_switch :: () #foreign Interrupts;
+    register_interrupt_gate(task_switch, TASK_SWITCH_GATE);
+
+    kernel_globals.tasks.allocator = context.allocator;
+    kernel_globals.next_task_id = 1;
 }
 
 startup_application_processors :: () {
@@ -416,20 +423,15 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
             reserved              :: 16;
         } @Bitfield
 
-        Table_Kind :: enum {
-            GDT  :: 0b00;
-            IDT  :: 0b01;
-            LDT  :: 0b10;
-            IDT_ :: 0b11;
-        }
+        table_names :: string.["GDT", "IDT", "LDT", "IDT"];
 
         selector_error := cast(Selector_Error_Code) stack.error_code;
 
-        is_external := cast(bool)       bitfield_get(selector_error, .external);
-        table       := cast(Table_Kind) bitfield_get(selector_error, .descriptor_table_kind);
-        index       :=                  bitfield_get(selector_error, .selector_index);
+        is_external := cast(bool) bitfield_get(selector_error, .external);
+        table       :=            bitfield_get(selector_error, .descriptor_table_kind);
+        index       :=            bitfield_get(selector_error, .selector_index);
 
-        print("Error code: external=%, table=%, index=% (0x%)\n", is_external, table, formatInt(index, base=10), index);
+        print("Error code: external=%, table=%, index=% (0x%)\n", is_external, table_names[table], formatInt(index, base=10), index);
         bluescreen();
     }
 } @InterruptRoutineWithErrorCode

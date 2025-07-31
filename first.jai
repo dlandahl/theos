@@ -5,7 +5,7 @@
 #import "File";
 #import "String";
 #import "System";
-#import "Print_Color";
+#import "Metaprogram_Plugins";
 
 #if OS == .WINDOWS {
     #import "Windows_Utf8";
@@ -14,7 +14,7 @@
     #import,dir "modules/VirtualBox";
 }
 
-#run main();
+#run,stallable main();
 
 main :: () {
     set_build_options_dc(.{ do_output = false });
@@ -82,6 +82,7 @@ compile_bootloader :: () -> success: bool {
         options.output_executable_name = "bootloader";
         options.output_path = ".build/";
         options.append_executable_filename_extension = false;
+        options.llvm_options.preserve_debug_info = true;
         options.text_output_flags = 0;
         options.disable_redzone = true;
         options.llvm_options.target_system_triple = "x86_64-unknown-windows";
@@ -97,7 +98,8 @@ compile_bootloader :: () -> success: bool {
         set_build_options(options, workspace);
     }
 
-    compiler_begin_intercept(workspace, .SKIP_ALL);
+    intercept_flags := Intercept_Flags.SKIP_ALL;
+    compiler_begin_intercept(workspace, intercept_flags);
     add_build_file("bootloader/bootloader.jai", workspace);
 
     success: bool;
@@ -107,7 +109,6 @@ compile_bootloader :: () -> success: bool {
 
         if message.kind == {
           case .COMPLETE;
-            compiler_end_intercept(workspace);
 
             complete := cast(*Message_Complete) message;
             success = complete.error_code == .NONE;
@@ -129,6 +130,8 @@ compile_bootloader :: () -> success: bool {
             }
         }
     }
+
+    compiler_end_intercept(workspace);
 
     if success {
         command := break_command_into_strings("objdump -x .build/bootx64.efi -d -M intel --source");
@@ -158,6 +161,11 @@ compile_kernel :: (kernel_only: bool) -> success: bool {
     log("Compiling kernel");
     workspace := compiler_create_workspace("Kernel");
 
+    plugins: [..] *Metaprogram_Plugin;
+    to_create: Plugin_To_Create;
+    to_create.name = "Codex";
+    init_plugins(.[to_create], *plugins, workspace);
+
     {
         options := get_build_options(workspace);
 
@@ -174,14 +182,18 @@ compile_kernel :: (kernel_only: bool) -> success: bool {
 
         new_path: [..] string;
         array_add(*new_path, "kernel/modules/");
-        array_add(*new_path, ..options.import_path);
+        array_add(*new_path, .. options.import_path);
         options.import_path = new_path;
 
         set_build_options(options, workspace);
     }
+    
+    intercept_flags := Intercept_Flags.SKIP_ALL & ~.SKIP_PROCEDURE_HEADERS;
+    for plugins if it.before_intercept it.before_intercept(it, *intercept_flags);
 
-    intercept := Intercept_Flags.SKIP_ALL & ~.SKIP_PROCEDURE_HEADERS;
-    compiler_begin_intercept(workspace, intercept);
+    compiler_begin_intercept(workspace, 0);
+
+    for plugins if it.add_source it.add_source(it);
 
     add_build_file("kernel/kernel.jai", workspace);
 
@@ -245,6 +257,8 @@ compile_kernel :: (kernel_only: bool) -> success: bool {
             }
         }
 
+        for plugins if it.message it.message(it, message);
+
         if message.kind == .COMPLETE {
             complete := cast(*Message_Complete) message;
             success = complete.error_code == .NONE;
@@ -253,6 +267,9 @@ compile_kernel :: (kernel_only: bool) -> success: bool {
     }
 
     compiler_end_intercept(workspace);
+
+    for plugins if it.finish   it.finish  (it);
+    for plugins if it.shutdown it.shutdown(it);
 
     if success {
         command := break_command_into_strings("objdump -x .build/kernel -d -M intel --source");

@@ -33,13 +33,13 @@ X64_Core :: struct {
     global_descriptor_table: Global_Descriptor_Table #align 64;
 
     local_apic_id: u32;
-    id: int;
+    id: int; // ID 0 is the bootstrap core.
 
     scheduler: Scheduler;
 }
 
 // This can't be in kernel_globals, or else, due to the size of the IOPB, the compiler will
-// reserve 8Mb in the executable, all of which is zero.
+// reserve 8Mb in the executable, all of which is zero. Todo: is there really a reason not to dynamically allocate this?
 space_for_processor_cores: [1024] X64_Core;
 
 // For the same reason this struct shouldn't have default values.
@@ -47,6 +47,8 @@ space_for_processor_cores: [1024] X64_Core;
 
 Kernel_Globals :: struct {
     using boot_data: *Boot_Data;
+
+    large_page_allocator: Large_Page_Allocator;
 
     physical_page_pool: Physical_4k_Page_Pool(1024);
     physical_block_allocator: Block_Allocator;
@@ -56,9 +58,15 @@ Kernel_Globals :: struct {
     acpi_version: int;
     fadt: *acpi_fadt;
 
+    uacpi_state: Uacpi_State;
+
     // Hardware requires 16 byte alignment on IDT
     interrupt_descriptor_table: [256] Interrupt_Gate_Descriptor #align 16;
     next_free_interrupt_gate: int;
+
+    tasks: Bucket_Array(Task_Info, 128, always_iterate_by_pointer=true);
+    next_task_id: int;
+    add_task_info_struct_spinlock: Spinlock;
 
     processor_cores: [] X64_Core;
 
@@ -68,14 +76,8 @@ Kernel_Globals :: struct {
 
     high_precision_timer: HPET;
 
-    tasks: Bucket_Array(Task_Info, 128, always_iterate_by_pointer=true);
-    next_task_id: int;
-    add_task_info_struct_spinlock: Spinlock;
-
     boot_time: Apollo_Time;
     rtc_format_is_bcd: bool;
-
-    large_page_allocator: Large_Page_Allocator;
 
     tsc_frequency: u64;
 
@@ -100,8 +102,6 @@ Kernel_Globals :: struct {
     serial_port_spinlock: Recursive_Spinlock;
 
     net: Network_Connection;
-
-    uacpi_state: Uacpi_State;
 
     pci_ecam: [] Ecam_Entry;
     pci_routing_table: [] uacpi_pci_routing_table_entry;
@@ -154,6 +154,7 @@ kernel_entry :: () #no_context {
         }
     }
 
+
     large_page_allocator.freelist = FREELIST_TAIL;
     large_page_allocator.lru_least = LRU_TAIL;
     large_page_allocator.lru_most  = LRU_TAIL;
@@ -161,8 +162,8 @@ kernel_entry :: () #no_context {
     large_page := allocate_large_page();
     init_block_allocator(*physical_block_allocator, large_page, 0x20_0000, 0x10);
 
+
     push_context {
-        rtc_init();
 
         using framebuffer;
 
@@ -215,11 +216,7 @@ kernel_entry :: () #no_context {
         hpet_configure_timer(timer_index = 0, frequency = 10, true);
 
 
-        task_switch :: () #foreign Interrupts;
-        register_interrupt_gate(task_switch, TASK_SWITCH_GATE);
-
-        tasks.allocator = context.allocator;
-        next_task_id = 1;
+        rtc_init();
 
         // Get the time at the most recent second. Maybe use an interrupt to detect a more accurate boot time.
         boot_calendar_time := rtc_get_calendar_time();
@@ -228,8 +225,6 @@ kernel_entry :: () #no_context {
         boot_time = native_calendar_to_apollo(boot_calendar_time);
 
         initialize_tsc();
-
-        draw_text("Hello, Sailor!\nWelcome to the operating system.\n");
 
         core_begin_multitasking();
 

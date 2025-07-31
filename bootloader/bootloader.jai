@@ -25,7 +25,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         boot_data := cast(*Boot_Data) boot_data_address;
         boot_data.* = .{};
 
-        // Memory for the kernel executable.
+        // Memory for the loaded kernel executable.
         kernel_base: *void;
         EFI_CHECK(boot_services.AllocatePool(UserReservedMemoryType, 0x40_0000, *kernel_base));
         // Aligning this to 2MB is necessary because we map it as large pages, but this potentially wastes a lot of memory.
@@ -75,7 +75,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         }
 
 
-        // All this stuff is to load the kernel ELF file from the EFI filesystem
+        display("Loading kernel .elf...\r\n");
 
         loaded_image_protocol: *EFI_LOADED_IMAGE_PROTOCOL;
         EFI_CHECK(boot_services.HandleProtocol(loaded_image, *EFI_LOADED_IMAGE_PROTOCOL_GUID, xx *loaded_image_protocol));
@@ -110,7 +110,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
 
 
-        // Firmware physical memory map
+        display("Detect memory size...\r\n");
 
         limit :: (region: Boot_Data.Memory_Region) -> u64 {
             return region.address + region.pages * 4096;
@@ -169,7 +169,8 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         }
 
         {
-            // Page tables
+            display("Building page tables...\r\n");
+
             memset(*boot_data.page_tables, 0, size_of(Page_Tables));
 
             using boot_data.page_tables;
@@ -204,7 +205,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             pml4[0x1ff] = cast(u64) pdpt.data | PAGE_PRESENT | PAGE_READ_WRITE;
             pdpt[0x1fe] = cast(u64) pd.data   | PAGE_PRESENT | PAGE_READ_WRITE;
 
-            // 16Mb memory within the top two gigabytes, for the kernel binary.
+            // 16Mb memory within the top two gigabytes, for the loaded kernel executable. The linker script specifies that this is where the loaded kernel executable should be placed.
             // Todo: these page directory indeces are hardcoded in a few places below.
             // Maybe have a table that defines the map of the top two gigabytes of virtual memory.
             for 0..7 {
@@ -267,6 +268,8 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
 
         entry_count = mmap_size / descriptor_size;
         boot_data.memory_map_entries_used = 0;
+
+        display("Parsing firmware memory map...\r\n");
 
         for 0..entry_count-1 {
             desc := cast(*EFI_MEMORY_DESCRIPTOR) (memory_map + it * descriptor_size);
@@ -354,7 +357,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             }
         }
 
-        display("Exiting boot services.\r\n");
+        display("Exiting boot services...\r\n");
         while boot_services.ExitBootServices(loaded_image, mmap_key) == .InvalidParameter {
             // ExitBootServices itself can sometimes change the memory map, in which case you need to call it again.
             // Todo: does this mean we need to update the one we give the kernel?
@@ -363,7 +366,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
             boot_services.GetMemoryMap(*mmap_size, xx memory_map, *mmap_key, null, null);
         }
 
-        serial_out("Loading page tables.\n");
+        serial_out("Loading page tables...\n");
         cr3 := boot_data.page_tables.pml4.data;
         #asm {
             cli;
@@ -371,7 +374,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
         }
 
         {
-            serial_out("Loading kernel ELF.\n");
+            serial_out("Loading kernel ELF...\n");
 
             elf := load_buffer;
 
@@ -398,7 +401,7 @@ EfiMain :: (loaded_image: EFI_HANDLE, system_table: *EFI_SYSTEM_TABLE) -> EFI_UI
                 }
             }
 
-            serial_out("Jumping to the kernel.\n");
+            serial_out("Jumping to the kernel...\n");
             entry_point := << cast(*() #no_context) *(elf_header.e_entry);
             entry_point();
         }
@@ -458,7 +461,7 @@ display_int :: (value: u64) {
         result[it] = hex_chars[(value >> (60 - it * 4)) & 0xF];
     }
 
-    display(cast(string) result);
+    display_string(cast(string) result);
 }
 
 ascii_to_wide :: (input: string, buffer: [] u16) -> *u16 {

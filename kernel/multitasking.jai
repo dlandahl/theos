@@ -138,7 +138,7 @@ create_task :: (entry_point: () #c_call, kernel_stack_size := 0x4000, user_stack
 }
 
 sleep :: (n: s64, $units: enum {nanoseconds; microseconds; milliseconds; seconds;}) {
-    time := (#insert #run tprint("%_to_apollo(n);", units));
+    time := #insert #run tprint("%_to_apollo(n);", units);
     sleep(time);
 }
 

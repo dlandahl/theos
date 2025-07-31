@@ -78,7 +78,7 @@ native_apollo_to_calendar :: (apollo: Apollo_Time) -> Calendar_Time {
 
     seconds := to_seconds(apollo - LEAPOCH);
 
-    // Convert seconds back to Apollo to get the value rounded down to the nearest second. Is there a way to simplify this.
+    // Convert seconds back to Apollo to get the value rounded down to the nearest second. Maybe there's a way to simplify this.
     milliseconds := to_milliseconds(apollo - seconds_to_apollo(seconds) - LEAPOCH);
     if milliseconds < 0 {
         milliseconds += 1000;
@@ -183,6 +183,11 @@ rtc_init :: () {
 
     kernel_globals.rtc_format_is_bcd = status & BCD_MODE == 0;
 }
+
+#program_export
+rtc_initial_interrupt :: () {
+    write_string("====== RTC interrupt ======\n");
+} @InterruptRoutine
 
 rtc_read :: (register: Rtc_Register) -> u8 {
     using Rtc_Port;

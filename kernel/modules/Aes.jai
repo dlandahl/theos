@@ -1,4 +1,6 @@
 
+#assert CPU == .X64 "AES module relies on Intel hardware acceleration";
+
 // It might seem reasonable to use the Int128 module here, but in fact we need none of the operations implemented there and it would create a dependency on Basic.
 
 i128 :: union {
