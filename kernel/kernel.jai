@@ -117,7 +117,7 @@ kernel_entry :: () #no_context {
 
     write_string_callback = kernel_write_string;
 
-    set_context_callbacks();
+    set_global_context_callbacks();
 
     // We should avoid using the UEFI identity map because we'll need to get rid of it once we run user processes in low memory.
     boot_data = cast(*Boot_Data, Boot_Data.BASE_ADDRESS + DIRECT_MAPPING_BASE);
@@ -328,8 +328,9 @@ simd_floating_point_exception :: (stack: *Interrupt_Stack()) #c_call {
     }
 } @InterruptRoutine
 
-set_context_callbacks :: () #no_context {
-
+set_global_context_callbacks :: () #no_context {
+    // These are default context values in our custom Runtime_Support module, such that they get used by default initalized context structs.
+ 
     kernel_assertion_failed = (location: Source_Code_Location, message: string) -> bool {
         acquire(*kernel_globals.serial_port_spinlock);
 
@@ -339,9 +340,8 @@ set_context_callbacks :: () #no_context {
         }
         write_string("\n");
 
-        print_stack_trace(context.stack_trace);
-
         release(*kernel_globals.serial_port_spinlock);
+
         bluescreen(location);
         return true;
     };
@@ -515,24 +515,21 @@ init_processor_core :: () {
 }
 
 bluescreen :: (loc := #caller_location) #no_context {
-    using kernel_globals.framebuffer;
-
     #asm { cli; }
 
-    for y: 0..y_resolution-1 for x: 0..x_resolution-1 {
-        t := cast(float, buffer[x + y * stride] & 0xff) / 0xff;
-
-        // buffer[x + y * stride] = cast(u32) 0xff2138e7;
-    }
+    write_string("Bluescreen!\n");
 
     core := get_current_core();
+    task := core.scheduler.current_task;
 
-    if core.scheduler.current_task && core.scheduler.current_task._context {
+    stack_trace_is_available := task && task._context && task._context.stack_trace;
+
+    if stack_trace_is_available  {
         push_context {
-            print_stack_trace(core.scheduler.current_task._context.stack_trace);
+            print_stack_trace(task._context.stack_trace);
         }
     } else {
-        write_string("Bluescreen!\nSource code location:\n");
+        write_string("Source code location:\n");
         write_loc(loc);
         write_string("\n");
     }
@@ -816,8 +813,6 @@ map_page :: (virtual_address: *void, physical_address: u64, flags := Page_Flags.
 }
 
 map_page :: (virtual_address: u64, physical_address: u64, flags := Page_Flags.PRESENT | .READ_WRITE, loc := #caller_location) {
-    using Page_Flags;
-
     mask: u64 = 0b111111111;
 
     pml4_offset := (virtual_address >> 39) & mask;
@@ -831,7 +826,7 @@ map_page :: (virtual_address: u64, physical_address: u64, flags := Page_Flags.PR
     pd   := get_or_create_page_table(pdpt, pdpt_offset);
     pt   := get_or_create_page_table(pd,   pd_offset);
 
-    if pt[pt_offset] & xx PRESENT {
+    if pt[pt_offset].(Page_Flags) & .PRESENT {
         log("%", hex(pt.(u64) - DIRECT_MAPPING_BASE));
         bluescreen(loc);
     }
@@ -1272,12 +1267,6 @@ LRU_TAIL      :: -1;
 
 allocate_interrupt_gate :: () -> int {
     using kernel_globals;
-
-    if next_free_interrupt_gate == TASK_SWITCH_GATE {
-        // Some gates need to be reserved as constants so they can be used in instruction immediates.
-        // In the future we might need to support allocating specific gates anyway.
-        next_free_interrupt_gate += 1;
-    }
 
     assert(next_free_interrupt_gate < 0xff);
 

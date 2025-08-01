@@ -218,10 +218,6 @@ initialize_apic :: () {
     // In the future we might not need the APIC timer if we only support CPUs with the TSC deadline feature.
     kernel_globals.local_apic_timer_interrupt_gate = timer_gate;
 
-
-    task_switch :: () #foreign Interrupts;
-    register_interrupt_gate(task_switch, TASK_SWITCH_GATE);
-
     kernel_globals.tasks.allocator = context.allocator;
     kernel_globals.next_task_id = 1;
 }
@@ -358,7 +354,7 @@ breakpoint_handler :: (stack: *Interrupt_Stack(false)) #c_call {
         print("Breakpoint hit. Context:\n%", stack.*);
     }
 
-    while true {}
+    bluescreen();
 } @InterruptRoutine
 
 #program_export

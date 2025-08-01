@@ -28,8 +28,6 @@ Task_Info :: struct {
     cpu_time: Apollo_Time;
 }
 
-TASK_SWITCH_GATE :: 64;
-
 Scheduler :: struct {
     current_task: *Task_Info;
     idle_task:    *Task_Info;
@@ -73,8 +71,6 @@ core_begin_multitasking :: () {
     } else {
         // Temporary: during development, I want to keep using thread 0 to do stuff on the bootstrap core. So make a separate idle task.
         idle :: () {
-            core := get_current_core();
-
             while true {
                 #asm { hlt; }
                 yield();
@@ -124,21 +120,104 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4000, user_stack_size :=
         new_task.user_stack = alloc(user_stack_size) + user_stack_size;
     }
 
-    stack := cast(*Interrupt_Stack) new_task.kernel_stack - 1;
-    stack.flags = .IF__interrupt;
-    stack.cs = .RING0_CODE;
-    stack.ss = .RING0_DATA;
-    stack.ip = cast(*void) new_task_start;
-    stack.sp = new_task.kernel_stack;
+    Context_Switch_Stack :: struct {
+        // Represents the stack layout used by the context_switch routine in first.jai
+        registers: General_Registers;
+        flags: X64_Flags;
+        return_address: *void;
+    }
+
+    stack := cast(*Context_Switch_Stack) new_task.kernel_stack - 1;
+    stack.return_address = cast(*void) new_task_start;
+    stack.registers.r15 = 12345678;
 
     new_task.rsp = cast(*void) stack;
-
     new_task.xsave.mxcsr = mxcsr;
-
     new_task.entry_point = entry_point;
 
     return new_task;
 }
+
+pick_next_task_to_run :: (using scheduler: *Scheduler) -> *Task_Info {
+    if !queue_is_empty(*waiting_to_run) {
+        return queue_pop(*waiting_to_run);
+    }
+
+    if !current_task.sleeping && !current_task.waiting_for_mutex {
+        return current_task;
+    }
+
+    return idle_task;
+}
+
+yield :: (loc := #caller_location) {
+    core := get_current_core();
+    scheduler := *core.scheduler;
+
+    Scoped_Acquire(*scheduler.spinlock);
+
+    current := scheduler.current_task;
+
+    time_now := get_monotonic_system_time();
+
+    {
+        // Wake sleeping tasks
+        using scheduler;
+
+        while sleep_queue && sleep_queue.sleep_until < time_now {
+            to_wake := sleep_queue;
+
+            sleep_queue = sleep_queue.next_sleeping;
+
+            to_wake.sleeping = false;
+            to_wake.next_sleeping = null;
+            queue_push(*waiting_to_run, to_wake);
+        }
+    }
+
+    next := pick_next_task_to_run(scheduler);
+
+    if next == current {
+        return;
+    }
+
+    if !current.sleeping && !current.waiting_for_mutex && current != scheduler.idle_task {
+        queue_push(*scheduler.waiting_to_run, current);
+    }
+
+    current.cpu_time += time_now - scheduler.last_task_switch_timestamp;
+    scheduler.last_task_switch_timestamp = time_now;
+
+    core.task_state_segment.rsp[0] = next.kernel_stack;
+    scheduler.current_task = next;
+
+    context_switch :: (current: *Task_Info, next: *Task_Info) #foreign Interrupts;
+    context_switch(current, next);
+}
+
+new_task_start :: () #no_context {
+    // When booting a new kernel thread, we could go straight to its entry point, but we always
+    // forward through this procedure to conveniently set up the Context and release the scheduler spinlock.
+
+    push_context {
+        core := get_current_core();
+
+        release(*core.scheduler.spinlock);
+
+        task := core.scheduler.current_task;
+        task._context = *context;
+
+        task.entry_point();
+
+        while true {
+            #asm { sti; hlt; }
+        }
+
+        // Todo: remove the task from the scheduler properly
+    }
+}
+
+
 
 sleep :: (n: s64, $units: enum {nanoseconds; microseconds; milliseconds; seconds;}) {
     time := #insert #run tprint("%_to_apollo(n);", units);
@@ -185,90 +264,6 @@ sleep_until :: (time: Apollo_Time) {
     }
 
     yield();
-}
-
-pick_next_task_to_run :: (using scheduler: *Scheduler) -> *Task_Info {
-    if !queue_is_empty(*waiting_to_run) {
-        return queue_pop(*waiting_to_run);
-    }
-
-    if !current_task.sleeping && !current_task.waiting_for_mutex {
-        return current_task;
-    }
-
-    return idle_task;
-}
-
-yield :: () {
-    core := get_current_core();
-    scheduler := *core.scheduler;
-
-    Scoped_Acquire(*scheduler.spinlock);
-
-    current := scheduler.current_task;
-
-    time_now := get_monotonic_system_time();
-
-    {
-        // Wake sleeping tasks
-        using scheduler;
-
-        while sleep_queue && sleep_queue.sleep_until < time_now {
-            to_wake := sleep_queue;
-
-            sleep_queue = sleep_queue.next_sleeping;
-
-            to_wake.sleeping = false;
-            to_wake.next_sleeping = null;
-            queue_push(*waiting_to_run, to_wake);
-        }
-    }
-
-    next := pick_next_task_to_run(scheduler);
-
-    if next == current {
-        return;
-    }
-
-    if !current.sleeping && !current.waiting_for_mutex && current != scheduler.idle_task {
-        queue_push(*scheduler.waiting_to_run, current);
-    }
-
-    current.cpu_time += time_now - scheduler.last_task_switch_timestamp;
-    scheduler.last_task_switch_timestamp = time_now;
-
-    // Todo: we don't need to write into scheduler.current_task in the interrupt routine
-    _current := *scheduler.current_task;
-    core.task_state_segment.rsp[0] = next.kernel_stack;
-
-    // Todo: I think this software interrupt is completely vestigial. The code should be
-    // restructured so that the context switch happens in the interrupt handler that called
-    // this yield procedure.
-
-    #asm {
-        mov rax: gpr === a, _current;
-        mov rbx: gpr === b, next;
-        int TASK_SWITCH_GATE;
-    }
-}
-
-new_task_start :: () #no_context {
-    // When booting a new kernel thread, we could go straight to its entry point, but we always forward through this procedure to conveniently set up the Context and release the scheduler spinlock.
-
-    push_context {
-        core := get_current_core();
-
-        release(*core.scheduler.spinlock);
-
-        task := core.scheduler.current_task;
-        task._context = *context;
-        task.entry_point();
-
-        // Todo: remove the task from the scheduler properly
-        while true {
-            yield();
-        }
-    }
 }
 
 

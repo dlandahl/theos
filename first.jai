@@ -184,7 +184,7 @@ compile_kernel :: (kernel_only: bool) -> success: bool {
         options.os_target = .LINUX;
 
         // Sometimes, setting up the stack trace node upon entering a procedure currently causes null pointer dereferences.
-        options.stack_trace = true;
+        options.stack_trace = false;
 
         new_path: [..] string;
         array_add(*new_path, "kernel/modules/");
@@ -193,7 +193,7 @@ compile_kernel :: (kernel_only: bool) -> success: bool {
 
         set_build_options(options, workspace);
     }
-    
+
     intercept_flags := Intercept_Flags.SKIP_ALL & ~.SKIP_PROCEDURE_HEADERS;
     for plugins if it.before_intercept it.before_intercept(it, *intercept_flags);
 
@@ -366,10 +366,10 @@ section .text
 %endmacro
 
 
-global task_switch
+global context_switch
 
-; **current_task is in rax
-; *new_task is in rbx
+; *current_task is in rdi
+; *new_task is in rsi
 
 struc Task_Info
     .rsp:   resq 1
@@ -378,35 +378,38 @@ struc Task_Info
 endstruc
 
 align 0x8
-task_switch:
-    cli
+context_switch:
+    ; Save RFLAGS and GPRs on the stack
+    pushfq
     push_all
 
-    ; Put *current_task in rcx
-    mov rcx, [rax]
-
     ; Store FPU state in the old task's xsave_area
-    fxsave64 [rcx + Task_Info.xsave]
+    fxsave64 [rdi + Task_Info.xsave]
 
-    ; Store current stack on current (old) task
-    mov [rcx + Task_Info.rsp], rsp
-
-    ; Set *current_task to point to the new task
-    mov [rax], rbx
+    ; Store current stack on the old task
+    mov [rdi + Task_Info.rsp], rsp
 
     ; Load FPU state from the new task's xsave_area
-    fxrstor64 [rbx + Task_Info.xsave]
+    fxrstor64 [rsi + Task_Info.xsave]
 
-    ; Restore the stack pointer from the current (new) task
-    mov rsp, [rbx + Task_Info.rsp]
+    ; Restore the stack pointer from the new task
+    mov rsp, [rsi + Task_Info.rsp]
 
-    ; Restore the page table from the current (new) task
-    mov rdx, [rbx + Task_Info.cr3]
+    ; Load the address space of the new task
+    mov rdx, [rsi + Task_Info.cr3]
     mov cr3, rdx
 
+    ; Restore RFLAGS and GPRs from the stack
     pop_all
-    iretq
+    popfq
 
+    ret
+
+
+global trap
+align 0x8
+trap:
+    int3
 
 
 extern get_kernel_stack
