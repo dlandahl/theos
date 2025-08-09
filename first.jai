@@ -87,8 +87,6 @@ compile_bootloader :: () -> success: bool {
         options.output_type = .OBJECT_FILE;
         options.output_executable_name = "bootloader";
         options.output_path = ".build/";
-        options.append_executable_filename_extension = false;
-        options.llvm_options.preserve_debug_info = true;
         options.text_output_flags = 0;
         options.disable_redzone = true;
         options.llvm_options.target_system_triple = "x86_64-unknown-windows";

@@ -25,8 +25,6 @@ get :: bitfield_get;
 #load "time.jai";
 
 X64_Core :: struct {
-    // It might make sense to #add_context this because there's one per logical core, but many procedures are called from interrupt routines so you would have to always manually set it.
-
     task_state_segment: Tss_With_Iopb #align 0x80;
 
     // Align to cache block so no extra memory accesses are required on context switch
@@ -254,7 +252,7 @@ kernel_entry :: () #no_context {
         }
 
         if false {
-            Push_Print_Style().default_format_int.base = 16;
+            push_print_style().default_format_int.base = 16;
 
             if !aes128_check_intel_instruction_set_support() {
                 bluescreen();
@@ -1280,7 +1278,7 @@ allocate_interrupt_gate :: () -> int {
 
 debug_print_physical_memory_map :: () {
     using kernel_globals;
-    Push_Print_Style().default_format_float.trailing_width = 2;
+    push_print_style().default_format_float.trailing_width = 2;
 
     #if false {
         total_by_type: [5] float;
@@ -1304,7 +1302,7 @@ debug_print_physical_memory_map :: () {
 
         print("\n\n\n");
 
-        Push_Print_Style().default_format_float.trailing_width = 2;
+        push_print_style().default_format_float.trailing_width = 2;
         for total_by_type {
             print("Total (%) % MB\n=======\n", cast(type_of(Memory_Region.type)) it_index, it / 256);
         }
@@ -1374,7 +1372,7 @@ Timeout :: (code: Code, time_ms := 1000) -> bool #expand {
     return false;
 }
 
-Push_Print_Style :: (style := context.print_style) -> *Print_Style #expand {
+push_print_style :: (style := context.print_style) -> *Print_Style #expand {
     // User may choose whether to use the input argument, return value, or neither
 
     old := context.print_style;
@@ -1389,7 +1387,7 @@ dec :: #bake_arguments formatInt(base=10);
 
 #add_context log_category: string;
 
-Log_Category :: (category: string) #expand {
+log_category :: (category: string) #expand {
     old := context.log_category;
     context.log_category = category;
     `defer context.log_category = old;

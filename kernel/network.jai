@@ -1586,7 +1586,7 @@ add_to_packet :: (packet: *Network_Packet, data: Any) {
 
 
 format_mac :: (mac: [6] u8) -> string {
-    Push_Print_Style(mac_address_print_style);
+    push_print_style(mac_address_print_style);
     return tprint("%", mac);
 }
 
@@ -1656,7 +1656,7 @@ allocate_port :: (net: *Network_Connection) -> u16 {
 network_thread :: () {
 
     sleep(5, .seconds);
-    Log_Category("Net");
+    log_category("Net");
 
     using net := *kernel_globals.net;
     next_port = FIRST_EPHEMERAL_PORT;
@@ -1682,7 +1682,7 @@ network_thread :: () {
             byte_swap_protocol_header(eth);
 
             if LOG_ALL_RECEIVED_ETHERNET_PACKETS {
-                Push_Print_Style(mac_address_print_style);
+                push_print_style(mac_address_print_style);
                 log("% => % (%)", eth.source_mac, eth.destination_mac, eth.ethertype);
             }
 

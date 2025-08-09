@@ -338,7 +338,7 @@ map_base_address_register :: (bar: Pci_Bar) -> *void {
     virtual := alloc_block(*kernel_globals.virtual_block_allocator, bar.limit);
 
     {
-        Push_Print_Style().default_format_int.base = 16;
+        push_print_style().default_format_int.base = 16;
         log("Mapping BAR % to address %", bar, cast(*void)virtual);
     }
 
@@ -603,7 +603,7 @@ I8254x_Network_Interface_Card :: struct {
 }
 
 init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
-    Log_Category("8254x");
+    log_category("8254x");
 
     log("Vendor ID: %", hex(device.vendor_id));
     log("Device ID: %", hex(device.device_id));
@@ -636,7 +636,7 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
         // Spin for 2us to be safe.
 
         nic.CTRL__device_control |= .RST__device_reset;
-        busy_wait(2, .microseconds);
+        busy_wait(2);
 
         if Timeout(nic.CTRL__device_control & .RST__device_reset == 0) {
             log_error("Timeout during device reset.");
@@ -646,7 +646,7 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
         // To reset the PHY, PHY_RST should be asserted for 10ms. Spin for 15ms to be safe.
 
         nic.CTRL__device_control |= .PHY_RST__phy_reset;
-        busy_wait(15, .milliseconds);
+        busy_wait(15_000);
         nic.CTRL__device_control &= ~.PHY_RST__phy_reset;
     }
 
@@ -659,10 +659,11 @@ init_i8254x :: (device: *Pci_Device) -> I8254x_Network_Interface_Card {
     mac.ral = nic.RAL__receive_address_low;
     mac.rah = nic.RAH__receive_address_high;
     nic.mac_address = mac.array;
-        #asm { sti; }
+
+    #asm { sti; }
 
     {
-        Push_Print_Style(mac_address_print_style);
+        push_print_style(mac_address_print_style);
         log("MAC address: %", nic.mac_address);
     }
 
@@ -784,7 +785,7 @@ i8254x_get_newly_received_packets :: (nic: *I8254x_Network_Interface_Card) -> []
 }
 
 i8254x_transmit_packet :: (nic: *I8254x_Network_Interface_Card, packet: Network_Packet, call := #caller_location) -> bool {
-    Log_Category("8254x");
+    log_category("8254x");
 
     if !packet.data || !packet.length {
         log_error("Uninitialized packet: %", packet);
@@ -1004,7 +1005,7 @@ nvme_interrupt :: (stack: *void) {
 } @InterruptRoutine
 
 init_nvme_controller :: (device: *Pci_Device) -> Nvme_Controller {
-    Log_Category("NVMe");
+    log_category("NVMe");
 
     if device.class_code != .MASS_STORAGE bluescreen();
     if device.subclass   != 0x8           bluescreen();
@@ -1187,7 +1188,7 @@ nvme_reset_controller :: (nvme: *Nvme_Controller) {
 }
 
 nvme_send_admin_command :: (using nvme: *Nvme_Controller, command: Nvme_Submission_Queue_Entry) {
-    Log_Category("NVMe");
+    log_category("NVMe");
     admin_sq[admin_sq_tail] = command;
 
     start_phase := admin_cq[admin_cq_head].STATUS__status & 1;
@@ -1211,7 +1212,7 @@ nvme_send_admin_command :: (using nvme: *Nvme_Controller, command: Nvme_Submissi
 }
 
 nvme_send_io_command :: (using nvme: *Nvme_Controller, command: Nvme_Submission_Queue_Entry) {
-    Log_Category("NVMe");
+    log_category("NVMe");
     io_sq[io_sq_tail] = command;
 
     start_phase := io_cq[io_cq_head].STATUS__status & 1;
@@ -1257,7 +1258,7 @@ ahci_interrupt :: (data: *void) {
 } @InterruptRoutine
 
 init_ahci_controller :: (device: *Pci_Device) -> c: Ahci_Controller = .{}, success: bool {
-    Log_Category("AHCI");
+    log_category("AHCI");
 
     device.registers[1] |= cast(u32) Pci_Command.BUS_MASTER | .MEMORY_SPACE;
     device.registers[1] &= cast(u32) ~Pci_Command.INTERRUPT_DISABLE;
@@ -1420,7 +1421,7 @@ Transfer_Direction :: enum {
 }
 
 ahci_transfer :: (controller: *Ahci_Controller, direction: Transfer_Direction, memory_address: u64, number_of_bytes: u64, disk_address: u64) {
-    Log_Category("AHCI");
+    log_category("AHCI");
 
     assert(cast(u64) memory_address % 0x200 == 0);
 
@@ -1454,7 +1455,7 @@ ahci_transfer :: (controller: *Ahci_Controller, direction: Transfer_Direction, m
 }
 
 ahci_transfer_sectors :: (controller: *Ahci_Controller, direction: Transfer_Direction, physical: u64, lba: u64, sector_count: int) {
-    Log_Category("AHCI");
+    log_category("AHCI");
 
     fis: Ahci_Command_Fis;
     fis.flags = .IS_COMMAND;
@@ -1491,7 +1492,7 @@ ahci_transfer_sectors :: (controller: *Ahci_Controller, direction: Transfer_Dire
     prdt.I__interrupt_on_completion = .YES;
 
     {
-        Push_Print_Style();
+        push_print_style();
         context.print_style.default_format_int.base = 16;
         log("PRDT: %\n", prdt.*);
     }

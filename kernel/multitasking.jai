@@ -129,7 +129,6 @@ create_task :: (entry_point: (), kernel_stack_size := 0x4000, user_stack_size :=
 
     stack := cast(*Context_Switch_Stack) new_task.kernel_stack - 1;
     stack.return_address = cast(*void) new_task_start;
-    stack.registers.r15 = 12345678;
 
     new_task.rsp = cast(*void) stack;
     new_task.xsave.mxcsr = mxcsr;
@@ -210,7 +209,7 @@ new_task_start :: () #no_context {
         task.entry_point();
 
         while true {
-            #asm { sti; hlt; }
+            yield();
         }
 
         // Todo: remove the task from the scheduler properly

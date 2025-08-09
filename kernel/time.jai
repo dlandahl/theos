@@ -509,9 +509,10 @@ initialize_tsc :: () {
     kernel_globals.tsc_frequency = calibrate_tsc();
 }
 
-busy_wait :: (n: s64, $units: enum {nanoseconds; microseconds; milliseconds; seconds;}) {
+
+busy_wait :: (microseconds: s64) {
     start := get_kernel_timestamp();
-    end   := start + #insert #run tprint("%_to_apollo(n);", units);
+    end   := start + microseconds_to_apollo(microseconds);
 
     assert(end >= start);
 
@@ -519,6 +520,7 @@ busy_wait :: (n: s64, $units: enum {nanoseconds; microseconds; milliseconds; sec
         pause;
     }
 }
+
 
 calibrate_tsc :: () -> hz: u64 {
     verbose := false;
@@ -644,7 +646,7 @@ calibrate_tsc_using_interrupt :: () {
 }
 
 debug_measure_tsc_drift :: () {
-    Push_Print_Style().default_format_int.base = 10;
+    push_print_style().default_format_int.base = 10;
 
     #asm { cli; }
 
@@ -666,7 +668,7 @@ debug_measure_tsc_drift :: () {
 }
 
 debug_run_tsc_timer :: () {
-    Push_Print_Style().default_format_int.base = 10;
+    push_print_style().default_format_int.base = 10;
 
     #asm { cli; }
 

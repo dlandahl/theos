@@ -205,9 +205,9 @@ initialize_apic :: () {
             assert(ioapic_ics.address == 0xfec0_0000);
 
           case .INTERRUPT_SOURCE_OVERRIDE;
-            Push_Print_Style().default_format_struct.use_long_form_if_more_than_this_many_members = 1;
+
             iso := cast(*Ics_Source_Override) ics;
-            log("Interrupt source override: %", iso.*);
+            // Todo
         }
     }
 
@@ -247,6 +247,7 @@ startup_application_processors :: () {
 
         // This lock is to ensure that APs have time to copy their stack's base address into their stack register before the next AP is started up.
         // Maybe if processors could use their APIC ID to find their stack memory it would be faster.
+        // Todo: Maybe this needs a timeout in case a core fails to start
         acquire(*ap_startup_spinlock);
 
         stack := alloc_block(*kernel_globals.physical_block_allocator, 0x1_0000) + 0x1_0000;
@@ -372,7 +373,7 @@ page_fault :: (stack: *Interrupt_Stack(true)) #c_call {
     #asm { get_cr2 _cr2; }
     cr2 := _cr2;
 
-    Push_Print_Style().default_format_int.base = 16;
+    push_print_style().default_format_int.base = 16;
     print("Virtual Address: 0x%\n", cr2);
 
     Flags :: enum_flags u32 {
@@ -406,7 +407,7 @@ general_protection_fault :: (stack: *Interrupt_Stack(with_error_code = true)) #c
 
         print("General Protection Fault    (On core %, running thread %)\n", core.id, task.id);
 
-        Push_Print_Style().default_format_int.base = 16;
+        push_print_style().default_format_int.base = 16;
         print("RIP: 0x%\n", stack.ip);
         print("RSP: 0x%\n", stack.sp);
         print("SS: %\n", stack.ss);
@@ -736,7 +737,7 @@ uacpi_kernel_log :: (log_level: uacpi_log_level, c_string: *uacpi_char) #c_call 
     // if log_level < .INFO return;
 
     push_context {
-        Log_Category("uACPI");
+        log_category("uACPI");
 
         message: string;
         message.data = c_string;
@@ -953,7 +954,7 @@ uacpi_kernel_unlock_spinlock :: (handle: uacpi_handle, flags: uacpi_cpu_flags) #
     write_string("uACPI kernel call: \"uacpi_kernel_wait_for_work_completion\"\n");
     bluescreen();
 }
- 
+
 #program_export __popcountdi2 :: () {
     write_string("uACPI kernel call: \"__popcountdi2\"\n");
     bluescreen();
