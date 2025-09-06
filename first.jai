@@ -404,11 +404,6 @@ context_switch:
     ret
 
 
-global trap
-align 0x8
-trap:
-    int3
-
 
 extern get_kernel_stack
 extern syscall_handler
@@ -437,8 +432,8 @@ global enter_user_mode
 align 0x10
 enter_user_mode:
     mov rsp, rdx
-    mov rcx, rdi
-    mov r11, rsi
+    mov rcx, rsi
+    mov r11, rdi
 
     o64 sysret
 

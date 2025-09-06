@@ -249,6 +249,12 @@ kernel_entry :: () #no_context {
                 kernel_globals.net.adapter = init_i8254x(it);
                 #asm { sti; }
             }
+
+            if it.class_code == .MULTIMEDIA {
+                if it.subclass == 0x3 {
+                    init_high_definition_audio_controller(it);
+                }
+            }
         }
 
         if false {
@@ -1399,7 +1405,8 @@ log_category :: (category: string) #expand {
 
 font_file :: #run,host -> [] u8 {
     image := read_entire_file("font.pgm");
-    return add_global_data(cast([] u8) image, .WRITABLE);
+    // Beware memory does not currently actually get marked as read-only if it's in the read-only section.
+    return add_global_data(cast([] u8) image, .READ_ONLY);
 }
 
 draw_text :: (text: string) #no_context {

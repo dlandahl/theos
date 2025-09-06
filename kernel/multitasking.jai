@@ -11,6 +11,7 @@ Task_Info :: struct {
     id: int;
 
     entry_point: ();
+
     _context: *#Context;
 
     user_stack:   *void;
@@ -149,13 +150,11 @@ pick_next_task_to_run :: (using scheduler: *Scheduler) -> *Task_Info {
     return idle_task;
 }
 
-yield :: (loc := #caller_location) {
+yield :: () {
     core := get_current_core();
     scheduler := *core.scheduler;
 
     Scoped_Acquire(*scheduler.spinlock);
-
-    current := scheduler.current_task;
 
     time_now := get_monotonic_system_time();
 
@@ -174,6 +173,7 @@ yield :: (loc := #caller_location) {
         }
     }
 
+    current := scheduler.current_task;
     next := pick_next_task_to_run(scheduler);
 
     if next == current {
@@ -413,7 +413,7 @@ get_kernel_stack :: () -> *void #c_call {
     return core.scheduler.current_task.kernel_stack;
 }
 
-enter_user_mode :: (entry_point: () #c_call, flags: X64_Flags, user_stack: *void) #foreign Interrupts;
+enter_user_mode :: (entry_point: () #c_call, user_stack: *void, flags := X64_Flags.IF__interrupt) #foreign Interrupts;
 
 
 
@@ -423,7 +423,7 @@ task_do_work :: () {
     user_stack := core.scheduler.current_task.user_stack;
     entry_point := task_do_work_in_ring_3;
 
-    enter_user_mode(entry_point, .IF__interrupt, user_stack);
+    enter_user_mode(entry_point, user_stack);
 }
 
 task_do_work_in_ring_3 :: () #c_call {

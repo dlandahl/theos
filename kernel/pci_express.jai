@@ -939,7 +939,7 @@ Nvme_Submission_Queue_Entry :: struct {
         CNS__controller_or_namespace: Nvme_Controller_Or_Namespace_Structure;
 
         struct {
-            // For create IO queue:
+            // For CREATE_IO_*_QUEUE:
             QID__queue_identifier: u16;
             QSIZE__queue_size: u16;
 
@@ -1528,13 +1528,13 @@ ahci_transfer_sectors :: (controller: *Ahci_Controller, direction: Transfer_Dire
 }
 
 Ata_Command :: enum u8 {
-    READ_PIO  :: 0x20;
-    READ_DMA  :: 0xc8;
-    READ_DMA_EX :: 0x25;
-    WRITE_PIO :: 0x30;
-    WRITE_DMA :: 0xca;
+    READ_PIO     :: 0x20;
+    READ_DMA     :: 0xc8;
+    READ_DMA_EX  :: 0x25;
+    WRITE_PIO    :: 0x30;
+    WRITE_DMA    :: 0xca;
     WRITE_DMA_EX :: 0x35;
-    IDENTIFY  :: 0xec;
+    IDENTIFY     :: 0xec;
 }
 
 Ata_Status :: enum_flags u8 {
@@ -1707,6 +1707,29 @@ HBA_PxSIG__Ahci_Port_Signature :: enum u32 {
     PM    :: 0x9669_0101;
 }
 
+
+
+Intel_HDA_Memory_Region :: struct {
+    offset: [8] u8;
+    gctl__global_control: GCTL__Global_Control;
+}
+
+GCTL__Global_Control :: enum u32 {
+    CRST__controller_rest :: 1;
+    FCNTRL__flush_control :: 1;
+    reserved_0            :: 6;
+    UNSOL                 :: 8;
+    reserved_1            :: 16;
+}
+
+init_high_definition_audio_controller :: (device: *Pci_Device) {
+    log_category("HDA");
+
+    log("Found an INTEL HDA audio device");
+
+    bar0 := read_base_address_register(device, 0);
+    mmio := map_base_address_register(bar0);
+}
 
 
 

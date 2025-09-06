@@ -294,7 +294,7 @@ ap_entry_point :: () #c_call {
     }
 }
 
-get_current_core :: inline (loc := #caller_location) -> *X64_Core #no_context {
+get_current_core :: inline () -> *X64_Core #no_context {
     core: *X64_Core;
 
     #asm FSGSBASE {
